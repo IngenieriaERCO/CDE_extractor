@@ -1,0 +1,2 @@
+Bloque | referencias | capas | anÃ³nimo | contenido sin caja
+Perfil_K0010 | 1 | _000_Rótulo__General | no | sÃ­

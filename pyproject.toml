@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68.0,<76.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cde-exportador-vectorial"
+version = "0.1.0"
+description = "Procesamiento de documentos técnicos y exportación vectorial para CDE ERCO"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "CDE ERCO" }]
+dependencies = [
+    "ezdxf>=1.4.4,<2.0.0",
+    "PyMuPDF>=1.24.0,<2.0.0",
+    "Pillow>=10.0.0,<13.0.0",
+    "pydantic-settings>=2.6.0,<3.0.0",
+    "python-dotenv>=1.0.1,<2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0,<9.0.0",
+    "ruff>=0.9.0,<1.0.0",
+]
+
+[project.scripts]
+cde-exporter = "cde_exporter.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
