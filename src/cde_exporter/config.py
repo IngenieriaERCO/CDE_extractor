@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", validation_alias="CDE_LOG_LEVEL")
     input_dir: Path = Field(default=Path("data/input"), validation_alias="CDE_INPUT_DIR")
     output_dir: Path = Field(default=Path("data/output"), validation_alias="CDE_OUTPUT_DIR")
+    font_fallback: str = Field(default="arial.ttf", validation_alias="CDE_FONT_FALLBACK")
+    font_substitutions: Path | None = Field(default=None, validation_alias="CDE_FONT_SUBSTITUTIONS")
+    font_folder: Path | None = Field(default=None, validation_alias="CDE_FONT_FOLDER")
     sharepoint_site_id: str | None = Field(default=None, validation_alias="SHAREPOINT_SITE_ID")
     sharepoint_drive_id: str | None = Field(default=None, validation_alias="SHAREPOINT_DRIVE_ID")
     microsoft_tenant_id: str | None = Field(default=None, validation_alias="MICROSOFT_TENANT_ID")
@@ -47,6 +50,13 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             value = value.strip()
             return value or None
+        return value
+
+    @field_validator("font_substitutions", "font_folder", mode="before")
+    @classmethod
+    def empty_font_paths_become_none(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
         return value
 
 

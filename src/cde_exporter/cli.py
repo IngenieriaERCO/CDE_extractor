@@ -77,12 +77,15 @@ def build_parser() -> argparse.ArgumentParser:
     block_extract_command.add_argument(
         "--hatch-mode",
         choices=("normal", "outline", "solid", "ignore", "auto"),
-        default="normal",
+        default="auto",
     )
     block_extract_command.add_argument("--overwrite", action="store_true")
     block_extract_command.add_argument("--hatch-threshold", type=int, default=50000)
     block_extract_command.add_argument("--font-substitutions", help="JSON UTF-8 familia→fuente")
     block_extract_command.add_argument("--font-folder", help="Carpeta de fuentes del proyecto")
+    block_extract_command.add_argument(
+        "--font-fallback", help="Fuente de respaldo (default: arial.ttf)"
+    )
 
     inspect_command = cad_subcommands.add_parser(
         "inspect", help="Muestra unidades, capas, entidades y extensiones de un DXF"
@@ -131,8 +134,8 @@ def build_parser() -> argparse.ArgumentParser:
     extract_command.add_argument(
         "--hatch-mode",
         choices=("normal", "outline", "solid", "ignore", "auto"),
-        default="normal",
-        help="Política de rayados al dibujar (predeterminada: normal)",
+        default="auto",
+        help="Política de rayados al dibujar (predeterminada: auto)",
     )
     extract_command.add_argument(
         "--page-size-mm",
@@ -165,6 +168,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract_command.add_argument("--hatch-threshold", type=int, default=50000)
     extract_command.add_argument("--font-substitutions", help="JSON UTF-8 familia→fuente")
     extract_command.add_argument("--font-folder", help="Carpeta de fuentes del proyecto")
+    extract_command.add_argument("--font-fallback", help="Fuente de respaldo (default: arial.ttf)")
     return parser
 
 
@@ -260,7 +264,9 @@ def _run_cad(args: argparse.Namespace) -> int:
 
     try:
         if args.cad_command in {"extract", "extract-block"}:
-            restore_fonts = configure_fonts(args.font_substitutions, args.font_folder)
+            restore_fonts = configure_fonts(
+                args.font_substitutions, args.font_folder, args.drawing, args.font_fallback
+            )
         if args.cad_command == "inspect":
             result = inspect_dxf(args.drawing)
             print(f"DXF: {result.path}")
@@ -447,6 +453,14 @@ def _run_cad(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     settings = get_settings()
+    if args.command == "cad" and args.cad_command in {"extract", "extract-block"}:
+        args.font_substitutions = args.font_substitutions or (
+            str(settings.font_substitutions) if settings.font_substitutions else None
+        )
+        args.font_folder = args.font_folder or (
+            str(settings.font_folder) if settings.font_folder else None
+        )
+        args.font_fallback = getattr(args, "font_fallback", None) or settings.font_fallback
     logging.basicConfig(level=settings.log_level)
     logging.getLogger("ezdxf").setLevel(logging.WARNING)
 

@@ -1,12 +1,14 @@
 from pathlib import Path
 
 import ezdxf
+import pytest
 
 from cde_exporter.cad.fidelity import (
     format_fidelity_report,
     inspect_fidelity,
     write_fidelity_report,
 )
+from cde_exporter.cad.font_config import active_substitutions, configure_fonts
 
 
 def create_fidelity_dxf(path: Path) -> Path:
@@ -73,6 +75,32 @@ def test_inline_mtext_font_family_is_reported(tmp_path: Path) -> None:
     report = inspect_fidelity(path)
     assert any(source == "Roboto" for (_style, source, _resolved, _found) in report.fonts)
     assert "Roboto" in format_fidelity_report(report)
+
+
+def test_unresolved_inline_families_get_automatic_fallback(tmp_path: Path) -> None:
+    path = tmp_path / "inline-fonts.dxf"
+    document = ezdxf.new()
+    document.modelspace().add_mtext(
+        r"{\fFuenteInventada|b0|i0|c0|p2;Texto inventado} {\Fromans.shx;Texto SHX}",
+        dxfattribs={"char_height": 2},
+    )
+    document.saveas(path)
+    system_font = Path("C:/Windows/Fonts/arial.ttf")
+    if not system_font.is_file():
+        pytest.skip("arial.ttf no está instalado en esta plataforma")
+
+    restore = configure_fonts(None, None, path, str(system_font))
+    try:
+        substitutions = active_substitutions()
+        assert {"fuenteinventada", "romans.shx"} <= substitutions.keys()
+        report = inspect_fidelity(path)
+        text = format_fidelity_report(report)
+        assert "FuenteInventada" in text
+        assert "romans.shx" in text
+        assert "respaldo automático" in text
+        assert "arial.ttf" in text
+    finally:
+        restore()
 
 
 def test_auto_hatch_mode_marks_only_over_threshold(tmp_path: Path) -> None:

@@ -15,6 +15,7 @@ from ezdxf.fonts import fonts
 from ezdxf.protocols import SupportsVirtualEntities
 
 from cde_exporter.cad.exporters import _estimate_hatch_segments
+from cde_exporter.cad.font_config import active_substitutions
 from cde_exporter.cad.models import CadProcessingError
 from cde_exporter.cad.reader import read_dxf
 
@@ -86,6 +87,9 @@ def _style_and_font(entity, document: Drawing) -> tuple[str, str, str, bool]:
             raw_name = next((str(tag.value) for tag in xdata if isinstance(tag.value, str)), "")
         except (ezdxf.DXFError, AttributeError):
             pass
+    configured = active_substitutions().get(raw_name.casefold()) if raw_name else None
+    if configured:
+        return style_name, raw_name, configured[1], False
     if (
         raw_name
         and not fonts.is_shx_font_name(raw_name)
@@ -207,6 +211,13 @@ def format_fidelity_report(report: FidelityReport) -> str:
     if not report.unsupported_counts:
         lines.append("  Ninguno detectado por la tabla de dibujo de ezdxf.")
     lines.append("\nTexto y fuentes:")
+    substitutions = active_substitutions()
+    if substitutions:
+        lines.append("Sustituciones aplicadas (familia | fuente usada | origen | textos):")
+        lines.extend(
+            f"  {family} | {filename} | {origin} | {count}"
+            for family, filename, origin, count in substitutions.values()
+        )
     lines.extend(
         f"  estilo {style} | fuente DXF {source} | resuelta {resolved} | "
         f"{'encontrada' if found else 'sustituta'} | {count} entidad(es)"
@@ -266,6 +277,6 @@ def print_fidelity_summary(report: FidelityReport, destination: str | Path) -> N
             missing[family] += count
     if missing:
         print(
-            "Fuentes no encontradas sin sustitución: "
+            "Fuentes que requieren sustitución: "
             + ", ".join(f"{name} ({count})" for name, count in sorted(missing.items()))
         )
