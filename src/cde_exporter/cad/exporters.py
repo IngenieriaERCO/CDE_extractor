@@ -222,6 +222,7 @@ def export_vector_outputs(
     page_size_mm: tuple[float, float] | None = None,
     margin_mm: float = 5.0,
     scale_factor: float | None = None,
+    exact_page_size: bool = False,
     hatch_mode: str = "normal",
     hatch_threshold: int = 50000,
 ) -> ExportReport:
@@ -288,6 +289,18 @@ def export_vector_outputs(
         pdf_content, pdf_warnings = _draw_to_pdf(
             document, page, settings, hatch_mode, hatch_threshold
         )
+        if exact_page_size and page_size_mm is not None:
+            with pymupdf.open(stream=pdf_content, filetype="pdf") as sized_pdf:
+                pdf_page = sized_pdf[0]
+                pdf_page.set_mediabox(
+                    pymupdf.Rect(
+                        0,
+                        0,
+                        page_size_mm[0] * 72 / 25.4,
+                        page_size_mm[1] * 72 / 25.4,
+                    )
+                )
+                pdf_content = sized_pdf.tobytes(garbage=4, deflate=True)
     except (MemoryError, TimeoutError) as error:
         text = str(error).lower()
         if isinstance(error, MemoryError) or "hatching timeout" in text:

@@ -50,8 +50,14 @@ def references_for_block(document: Drawing, name: str) -> tuple[BlockReference, 
             yscale=float(entity.dxf.get("yscale", 1)),
             zscale=float(entity.dxf.get("zscale", 1)),
         )
-        for order, entity in enumerate(document.modelspace(), start=1)
-        if entity.dxftype() == "INSERT" and entity.dxf.name == name
+        for order, entity in enumerate(
+            (
+                item
+                for item in document.modelspace()
+                if item.dxftype() == "INSERT" and item.dxf.name == name
+            ),
+            start=1,
+        )
     )
 
 

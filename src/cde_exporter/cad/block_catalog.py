@@ -73,11 +73,11 @@ def list_referenced_blocks(
 
 
 def format_block_catalog(rows: tuple[BlockSummary, ...]) -> str:
-    lines = ["Bloque | referencias | capas | anÃ³nimo | contenido sin caja"]
+    lines = ["Bloque | referencias | capas | anónimo | contenido sin caja"]
     for row in rows:
         lines.append(
             f"{row.name} | {row.references} | {', '.join(row.layers)} | "
-            f"{'sÃ­' if row.anonymous else 'no'} | {'sÃ­' if row.unbounded else 'no'}"
+            f"{'sí' if row.anonymous else 'no'} | {'sí' if row.unbounded else 'no'}"
         )
     if not rows:
         lines.append("No se encontraron bloques referenciados con esos filtros.")

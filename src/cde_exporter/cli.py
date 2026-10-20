@@ -74,6 +74,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     block_extract_command.add_argument("--margin-mm", type=float, default=5.0)
     block_extract_command.add_argument("--scale-factor", type=float)
+    block_extract_command.add_argument("--scale", help="Escala nominal, por ejemplo 1:50")
+    block_extract_command.add_argument(
+        "--units", choices=("mm", "cm", "m", "in", "ft"),
+        help="Declara o corrige las unidades del dibujo",
+    )
     block_extract_command.add_argument(
         "--hatch-mode",
         choices=("normal", "outline", "solid", "ignore", "auto"),
@@ -452,6 +457,21 @@ def _run_cad(args: argparse.Namespace) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    if args.command == "cad" and args.cad_command == "extract-block":
+        if args.scale is not None and args.scale_factor is not None:
+            print("Error CAD: No combines --scale con --scale-factor", file=sys.stderr)
+            return 1
+        if args.scale is not None:
+            from cde_exporter.cad.scale import parse_nominal_scale
+
+            try:
+                parse_nominal_scale(args.scale)
+            except ValueError as error:
+                print(f"Error CAD: {error}", file=sys.stderr)
+                return 1
     settings = get_settings()
     if args.command == "cad" and args.cad_command in {"extract", "extract-block"}:
         args.font_substitutions = args.font_substitutions or (
