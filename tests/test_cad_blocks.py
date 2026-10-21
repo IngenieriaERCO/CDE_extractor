@@ -451,3 +451,38 @@ def test_without_nominal_scale_keeps_legacy_page_size(tmp_path: Path) -> None:
     assert _pdf_size_mm(prefix.with_suffix(".pdf")) == pytest.approx((1009.65, 509.76), abs=0.1)
     report = prefix.with_name("legacy-output_fidelidad.txt").read_text(encoding="utf-8")
     assert "Escala nominal" not in report
+
+
+
+def _handle_catalog_fixture(path: Path, count: int) -> Path:
+    document = ezdxf.new()
+    document.blocks.new("Detalle").add_line((0, 0), (1, 1))
+    for index in range(count):
+        insert = document.modelspace().add_blockref("Detalle", (index, 0))
+        insert.dxf.handle = f"{index + 1:X}"
+    document.saveas(path)
+    return path
+
+
+def test_blocks_handles_option_lists_single_occurrence(tmp_path: Path, capsys) -> None:
+    source = _handle_catalog_fixture(tmp_path / "single-handles.dxf", 1)
+    assert main(["cad", "blocks", str(source), "--handles"]) == 0
+    output = capsys.readouterr().out
+    assert "handles por ocurrencia" in output
+    assert "1: 1" in output
+
+
+def test_blocks_handles_option_preserves_occurrence_order(tmp_path: Path, capsys) -> None:
+    source = _handle_catalog_fixture(tmp_path / "three-handles.dxf", 3)
+    assert main(["cad", "blocks", str(source), "--handles"]) == 0
+    output = capsys.readouterr().out
+    assert "1: 1, 2: 2, 3: 3" in output
+
+
+def test_blocks_handles_option_limits_long_lists(tmp_path: Path, capsys) -> None:
+    source = _handle_catalog_fixture(tmp_path / "many-handles.dxf", 12)
+    assert main(["cad", "blocks", str(source), "--handles"]) == 0
+    output = capsys.readouterr().out
+    assert "10: A" in output
+    assert "… y 2 más" in output
+    assert "11: B" not in output

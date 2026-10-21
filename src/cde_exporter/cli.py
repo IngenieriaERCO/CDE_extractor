@@ -52,6 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
     blocks_command.add_argument("drawing", help="Ruta del dibujo DXF")
     blocks_command.add_argument("--include-anonymous", action="store_true")
     blocks_command.add_argument(
+        "--handles", action="store_true", help="Muestra handles por ocurrencia"
+    )
+    blocks_command.add_argument(
         "--filter", help="Filtra nombres sin distinguir mayúsculas ni tildes"
     )
     blocks_command.add_argument("--output", help="Guarda el informe UTF-8 en una ruta nueva")

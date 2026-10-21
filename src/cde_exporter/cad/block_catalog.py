@@ -17,6 +17,7 @@ from cde_exporter.cad.reader import entity_bounds, read_dxf
 class BlockSummary:
     name: str
     references: int
+    handles: tuple[str | None, ...]
     layers: tuple[str, ...]
     anonymous: bool
     unbounded: bool
@@ -49,9 +50,11 @@ def list_referenced_blocks(
 ) -> tuple[BlockSummary, ...]:
     document = read_dxf(source)
     references: dict[str, list[str]] = defaultdict(list)
+    handles: dict[str, list[str | None]] = defaultdict(list)
     for insert in document.modelspace().query("INSERT"):
         name = insert.dxf.name
         references[name].append(str(insert.dxf.get("layer", "0")))
+        handles[name].append(insert.dxf.get("handle"))
     match = _normalized(filter_text)
     rows = []
     for name, layers in references.items():
@@ -64,6 +67,7 @@ def list_referenced_blocks(
             BlockSummary(
                 name=name,
                 references=len(layers),
+                handles=tuple(handles[name]),
                 layers=tuple(sorted(set(layers), key=str.casefold)),
                 anonymous=anonymous,
                 unbounded=_has_unbounded(document, name, set()),
@@ -72,13 +76,27 @@ def list_referenced_blocks(
     return tuple(sorted(rows, key=lambda row: row.name.casefold()))
 
 
-def format_block_catalog(rows: tuple[BlockSummary, ...]) -> str:
+def format_block_catalog(
+    rows: tuple[BlockSummary, ...], *, include_handles: bool = False
+) -> str:
     lines = ["Bloque | referencias | capas | anónimo | contenido sin caja"]
+    if include_handles:
+        lines[0] += " | handles por ocurrencia"
     for row in rows:
-        lines.append(
+        line = (
             f"{row.name} | {row.references} | {', '.join(row.layers)} | "
             f"{'sí' if row.anonymous else 'no'} | {'sí' if row.unbounded else 'no'}"
         )
+        if include_handles:
+            shown = [
+                f"{index}: {handle or '(sin handle)'}"
+                for index, handle in enumerate(row.handles[:10], start=1)
+            ]
+            remainder = len(row.handles) - len(shown)
+            if remainder:
+                shown.append(f"… y {remainder} más")
+            line += " | " + ", ".join(shown)
+        lines.append(line)
     if not rows:
         lines.append("No se encontraron bloques referenciados con esos filtros.")
     return "\n".join(lines) + "\n"

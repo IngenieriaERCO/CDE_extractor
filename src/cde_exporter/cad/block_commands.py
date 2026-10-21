@@ -28,12 +28,14 @@ from cde_exporter.cad.scale import (
 
 
 def run_blocks(args) -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     rows = list_referenced_blocks(
         args.drawing,
         include_anonymous=args.include_anonymous,
         filter_text=args.filter or "",
     )
-    content = format_block_catalog(rows)
+    content = format_block_catalog(rows, include_handles=args.handles)
     if args.output:
         destination, source = Path(args.output), Path(args.drawing)
         if destination.resolve() == source.resolve():
