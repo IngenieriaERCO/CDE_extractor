@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass, fields, is_dataclass
 from enum import Enum, StrEnum
@@ -170,19 +171,54 @@ class ExtractedDetail:
     dispositions: tuple[EntityDisposition, ...]
     dependencies: tuple[ExternalDependency, ...]
     warnings: tuple[ExtractionWarning, ...]
+    extracted_at: str | None = None
+    exporter_version: str | None = None
+    block_definition_handle: str | None = None
+    selection_method: SelectionMethod | None = None
+    user_units_override: str | None = None
+    detail_size: tuple[float, float] | None = None
+    output_factor_mm_per_unit: float | None = None
+    content_size_mm: tuple[float, float] | None = None
+    page_size_mm: tuple[float, float] | None = None
+    margin_mm: float | None = None
+    physical_scale_guaranteed: bool | None = None
+    physical_scale_note: str | None = None
+    transformations: tuple[TransformationStep, ...] = ()
+    nested_blocks: tuple[NestedBlockInfo, ...] = ()
+    fonts: tuple[FontUse, ...] = ()
+    hatches: HatchSummary | None = None
+    result: ExtractionResult | None = None
 
     def __post_init__(self) -> None:
         _require_tuple("inventory", self.inventory)
         _require_tuple("dispositions", self.dispositions)
         _require_tuple("dependencies", self.dependencies)
         _require_tuple("warnings", self.warnings)
+        _require_enum_if_present("selection_method", self.selection_method, SelectionMethod)
+        for name in ("detail_size", "content_size_mm", "page_size_mm"):
+            size = getattr(self, name)
+            if size is not None:
+                _require_finite_tuple(name, size, 2)
+                if any(dimension < 0 for dimension in size):
+                    raise ValueError(f"{name} no puede contener valores negativos")
+        _require_finite("output_factor_mm_per_unit", self.output_factor_mm_per_unit)
+        if self.output_factor_mm_per_unit is not None and self.output_factor_mm_per_unit <= 0:
+            raise ValueError("output_factor_mm_per_unit debe ser positivo")
+        _require_finite("margin_mm", self.margin_mm)
+        if self.margin_mm is not None and self.margin_mm < 0:
+            raise ValueError("margin_mm no puede ser negativo")
+        for name in ("transformations", "nested_blocks", "fonts"):
+            _require_tuple(name, getattr(self, name))
 
 
 def _to_plain_data(value: object) -> object:
     if isinstance(value, Enum):
         return value.value
     if is_dataclass(value) and not isinstance(value, type):
-        return {item.name: _to_plain_data(getattr(value, item.name)) for item in fields(value)}
+        return {
+            item.name: _to_plain_data(getattr(value, item.name))
+            for item in fields(value)
+        }
     if isinstance(value, tuple):
         return [_to_plain_data(item) for item in value]
     if isinstance(value, float):
@@ -198,6 +234,116 @@ def detail_to_dict(detail: ExtractedDetail) -> dict:
     """Serializa el modelo a datos JSON estables, sin dependencias de formatos CAD."""
     if not isinstance(detail, ExtractedDetail):
         raise TypeError("detail debe ser un ExtractedDetail")
-    result = {"model_version": "1"}
+    result = {"model_version": "2"}
     result.update(_to_plain_data(detail))
     return result
+
+
+def _require_enum_if_present(name: str, value: Enum | None, enum_type: type[Enum]) -> None:
+    if value is not None:
+        _require_enum(name, value, enum_type)
+
+
+def finalize_detail(detail: ExtractedDetail, result: ExtractionResult) -> ExtractedDetail:
+    """Devuelve una copia finalizada sin alterar el detalle original."""
+    if not isinstance(detail, ExtractedDetail):
+        raise TypeError("detail debe ser un ExtractedDetail")
+    if not isinstance(result, ExtractionResult):
+        raise TypeError("result debe ser un ExtractionResult")
+    if detail.result is not None:
+        raise ValueError("El detalle ya fue finalizado")
+    return dataclasses.replace(detail, result=result)
+
+
+class SelectionMethod(StrEnum):
+    AUTOMATIC = "automatic"
+    OCCURRENCE = "occurrence"
+    HANDLE = "handle"
+    ALL = "all"
+
+
+@dataclass(frozen=True, slots=True)
+class TransformationStep:
+    kind: str
+    description: str
+    values: tuple[float, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class NestedBlockInfo:
+    name: str
+    max_depth: int
+    reference_count: int
+
+    def __post_init__(self) -> None:
+        if self.max_depth < 0:
+            raise ValueError("max_depth debe ser mayor o igual que cero")
+        if self.reference_count < 0:
+            raise ValueError("reference_count debe ser mayor o igual que cero")
+
+
+@dataclass(frozen=True, slots=True)
+class FontUse:
+    requested: str
+    resolved: str
+    found: bool
+    uses: int
+
+    def __post_init__(self) -> None:
+        if self.uses < 0:
+            raise ValueError("uses debe ser mayor o igual que cero")
+
+
+@dataclass(frozen=True, slots=True)
+class HatchDetail:
+    layer: str
+    pattern: str
+    scale: float | None
+    action: str
+    reason: str | None
+
+    def __post_init__(self) -> None:
+        _require_finite("scale", self.scale)
+
+
+@dataclass(frozen=True, slots=True)
+class HatchSummary:
+    total: int
+    simplified: int
+    details: tuple[HatchDetail, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.total < 0:
+            raise ValueError("total debe ser mayor o igual que cero")
+        if self.simplified < 0:
+            raise ValueError("simplified debe ser mayor o igual que cero")
+        if self.simplified > self.total:
+            raise ValueError("simplified debe ser menor o igual que total")
+        _require_tuple("details", self.details)
+
+
+class ResultStatus(StrEnum):
+    COMPLETE = "complete"
+    COMPLETE_WITH_WARNINGS = "complete_with_warnings"
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationCheck:
+    name: str
+    passed: bool
+    detail: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractionResult:
+    pdf_name: str
+    status: ResultStatus
+    validations: tuple[ValidationCheck, ...] = ()
+    warnings_after_export: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_enum("status", self.status, ResultStatus)
+        _require_tuple("validations", self.validations)
+        _require_tuple("warnings_after_export", self.warnings_after_export)
+        if any(not isinstance(warning, str) for warning in self.warnings_after_export):
+            raise ValueError("warnings_after_export solo puede contener texto")

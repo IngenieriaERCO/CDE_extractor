@@ -110,7 +110,7 @@ def test_detail_json_is_utf8_valid_json_and_has_model_version(tmp_path: Path) ->
         "--detail-json", str(manifest),
     ]) == 0
     data = json.loads(manifest.read_text(encoding="utf-8"))
-    assert data["model_version"] == "1"
+    assert data["model_version"] == "2"
     assert data["scale"]["nominal_denominator"] == 50.0
     assert data["source"]["block_name"] == "Detalle"
 

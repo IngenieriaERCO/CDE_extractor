@@ -78,9 +78,14 @@ def test_serialization_has_stable_keys_and_json_values() -> None:
     )
     assert list(result) == [
         "model_version", "source", "reference", "units", "scale", "bounds",
-        "inventory", "dispositions", "dependencies", "warnings",
+        "inventory", "dispositions", "dependencies", "warnings", "extracted_at",
+        "exporter_version", "block_definition_handle", "selection_method",
+        "user_units_override", "detail_size", "output_factor_mm_per_unit",
+        "content_size_mm", "page_size_mm", "margin_mm", "physical_scale_guaranteed",
+        "physical_scale_note", "transformations", "nested_blocks", "fonts", "hatches",
+        "result",
     ]
-    assert result["model_version"] == "1"
+    assert result["model_version"] == "2"
     assert result["inventory"][0]["status"] == "conserved"
     assert result["warnings"][0]["severity"] == "warning"
     assert result["reference"]["insertion_xyz"] == [10.0, 20.0, 0.0]
