@@ -20,6 +20,7 @@ from cde_exporter.cad.detail_model import (
     ExtractionWarning,
     ScaleInfo,
     SelectedReference,
+    SelectionMethod,
     Severity,
     UnitInfo,
 )
@@ -118,6 +119,14 @@ def build_extracted_detail(
     hatch_mode: str | None = None,
     hatch_threshold: int | None = None,
     include_dependencies: bool = False,
+    extracted_at: str | None = None,
+    exporter_version: str | None = None,
+    block_definition_handle: str | None = None,
+    selection_method: SelectionMethod | None = None,
+    user_units_override: str | None = None,
+    content_size_mm: tuple[float, float] | None = None,
+    page_size_mm: tuple[float, float] | None = None,
+    margin_mm: float | None = None,
 ) -> ExtractedDetail:
     """Construye el detalle y clasifica cada entidad según la fidelidad existente.
 
@@ -165,6 +174,24 @@ def build_extracted_detail(
         if effective_bounds_xyz is not None
         else None
     )
+    detail_size = (
+        (
+            bounds.max_xyz[0] - bounds.min_xyz[0],
+            bounds.max_xyz[1] - bounds.min_xyz[1],
+        )
+        if bounds is not None
+        else None
+    )
+    physical_scale_guaranteed = None
+    physical_scale_note = None
+    if nominal_denominator is not None:
+        physical_scale_guaranteed = unit_verification.verified and not unit_verification.warnings
+        if not physical_scale_guaranteed:
+            physical_scale_note = (
+                "; ".join(unit_verification.warnings)
+                if unit_verification.warnings
+                else f"Unidades sin verificar: {unit_verification.status}"
+            )
     warnings = []
     if unit_verification.warnings:
         code = (
@@ -334,4 +361,16 @@ def build_extracted_detail(
         dispositions=tuple(dispositions),
         dependencies=dependencies,
         warnings=tuple(warnings),
+        extracted_at=extracted_at,
+        exporter_version=exporter_version,
+        block_definition_handle=block_definition_handle,
+        selection_method=selection_method,
+        user_units_override=user_units_override,
+        detail_size=detail_size,
+        output_factor_mm_per_unit=factor_mm_per_drawing_unit,
+        content_size_mm=content_size_mm,
+        page_size_mm=page_size_mm,
+        margin_mm=margin_mm,
+        physical_scale_guaranteed=physical_scale_guaranteed,
+        physical_scale_note=physical_scale_note,
     )

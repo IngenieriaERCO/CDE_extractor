@@ -6,11 +6,13 @@ import json
 import os
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import ezdxf
 from ezdxf import bbox, units
 
+from cde_exporter import __version__
 from cde_exporter.cad.block_catalog import format_block_catalog, list_referenced_blocks
 from cde_exporter.cad.block_extractor import (
     BlockReference,
@@ -18,7 +20,7 @@ from cde_exporter.cad.block_extractor import (
     references_for_block,
 )
 from cde_exporter.cad.detail_builder import build_extracted_detail
-from cde_exporter.cad.detail_model import detail_to_dict
+from cde_exporter.cad.detail_model import SelectionMethod, detail_to_dict
 from cde_exporter.cad.exporters import export_vector_outputs
 from cde_exporter.cad.fidelity import print_fidelity_summary, write_fidelity_report
 from cde_exporter.cad.models import CadProcessingError
@@ -240,6 +242,15 @@ def run_extract_block(args) -> int:
         )
     selected = _select_references(args, references)
     block_definition = document.blocks[args.block_name]
+    block_definition_handle = str(block_definition.block_record.dxf.handle)
+    if args.all:
+        selection_method = SelectionMethod.ALL
+    elif args.occurrence is not None:
+        selection_method = SelectionMethod.OCCURRENCE
+    elif args.handle is not None:
+        selection_method = SelectionMethod.HANDLE
+    else:
+        selection_method = SelectionMethod.AUTOMATIC
     block_units_code = int(block_definition.block_record.dxf.get("units", 0) or 0)
     block_extents = bbox.extents(block_definition)
     max_block_dimension = (
@@ -314,6 +325,8 @@ def run_extract_block(args) -> int:
         )
         print_fidelity_summary(fidelity_report, fidelity_destination)
         scale_note = ""
+        content_size = None
+        geometry_page_size = None
         if nominal_denominator is not None:
             verification = verify_drawing_units(
                 result.units_code,
@@ -356,9 +369,10 @@ def run_extract_block(args) -> int:
                 report_file.write(f"{scale_note}\n")
             print(scale_note)
         if nominal_denominator is not None:
-            scale, page_size, geometry_box, content_size = _nominal_scale_parameters(
+            scale, geometry_page_size, geometry_box, content_size = _nominal_scale_parameters(
                 args, read_dxf(dxf_output), verification, nominal_denominator
             )
+            page_size = geometry_page_size
             geometry_note = (
                 "Caja geométrica efectiva CAD (xmin, ymin, xmax, ymax): "
                 f"({geometry_box[0]:.3f}, {geometry_box[1]:.3f}, "
@@ -403,6 +417,14 @@ def run_extract_block(args) -> int:
             hatch_mode=args.hatch_mode,
             hatch_threshold=args.hatch_threshold,
             include_dependencies=True,
+            extracted_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+            exporter_version=__version__,
+            block_definition_handle=block_definition_handle,
+            selection_method=selection_method,
+            user_units_override=args.units,
+            content_size_mm=content_size,
+            page_size_mm=geometry_page_size,
+            margin_mm=args.margin_mm if nominal_denominator is not None else None,
         )
         if result.unbounded:
             print(
