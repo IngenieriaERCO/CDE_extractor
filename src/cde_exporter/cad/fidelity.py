@@ -46,7 +46,8 @@ class FidelityReport:
         return sum(self.entity_counts.values())
 
 
-def _entities_with_nested_blocks(document: Drawing):
+def iter_detail_entities(document: Drawing):
+    """Recorre entidades del detalle, incluidos INSERT anidados y sus ATTRIB."""
     def visit(entity, block_stack: tuple[str, ...]):
         yield entity
         if entity.dxftype() == "INSERT":
@@ -63,6 +64,28 @@ def _entities_with_nested_blocks(document: Drawing):
 
     for entity in document.modelspace():
         yield from visit(entity, ())
+
+
+_entities_with_nested_blocks = iter_detail_entities
+
+
+def fidelity_dispatch(document: Drawing):
+    """Devuelve la tabla de tipos que el Frontend de fidelidad puede dibujar."""
+    return Frontend(RenderContext(document), svg.SVGBackend())._dispatch
+
+
+def unsupported_entity_reason(entity, dispatch) -> str | None:
+    """Aplica las mismas reglas de tipo no soportado que usa inspect_fidelity."""
+    kind = entity.dxftype()
+    proxy = bool(getattr(entity, "proxy_graphic", None))
+    virtual = isinstance(entity, SupportsVirtualEntities)
+    if kind == "IMAGE":
+        return "requiere archivo raster externo"
+    if kind in {"ACAD_PROXY_ENTITY", "MLEADER", "MULTILEADER"}:
+        return "proxy gráfico disponible" if proxy else "proxy gráfico ausente"
+    if kind not in dispatch and not virtual:
+        return "sin soporte de dibujo"
+    return None
 
 
 def _style_and_font(entity, document: Drawing) -> tuple[str, str, str, bool]:
@@ -126,6 +149,27 @@ def _hatch_type(entity) -> str:
     return "patrón"
 
 
+def hatch_simplification_reason(entity, hatch_mode: str, hatch_threshold: int) -> str | None:
+    """Devuelve el motivo de simplificación usado por el modo de fidelidad actual."""
+    if entity.dxftype() != "HATCH":
+        return None
+    if hatch_mode == "auto":
+        estimate = _estimate_hatch_segments(entity)
+        if estimate > hatch_threshold:
+            return (
+                f"HATCH simplificado por --hatch-threshold {hatch_threshold}; "
+                f"estimación de {estimate} tramos"
+            )
+        return None
+    if hatch_mode == "solid" and _hatch_type(entity) != "sólido":
+        return "HATCH convertido a relleno sólido por --hatch-mode solid"
+    if hatch_mode == "outline":
+        return "HATCH mostrado solo como contorno por --hatch-mode outline"
+    if hatch_mode == "ignore":
+        return "HATCH omitido deliberadamente por --hatch-mode ignore"
+    return None
+
+
 def inspect_fidelity(
     source: str | Path, hatch_mode: str = "normal", hatch_threshold: int = 50000
 ) -> FidelityReport:
@@ -134,27 +178,20 @@ def inspect_fidelity(
     document = read_dxf(source)
     # ezdxf 1.4.4 no expone un registro público de tipos dibujables. La tabla
     # _dispatch es la misma que UniversalFrontend usa en draw_entity().
-    frontend = Frontend(RenderContext(document), svg.SVGBackend())
-    dispatch = frontend._dispatch
+    dispatch = fidelity_dispatch(document)
     entities: Counter[tuple[str, str]] = Counter()
     unsupported: Counter[tuple[str, str, str]] = Counter()
     text_fonts: Counter[tuple[str, str, str, bool]] = Counter()
     hatches: Counter[tuple[str, str, str]] = Counter()
     simplified_rows = []
 
-    for entity in _entities_with_nested_blocks(document):
+    for entity in iter_detail_entities(document):
         kind = entity.dxftype()
         layer = str(entity.dxf.get("layer", "0") or "0")
         entities[(kind, layer)] += 1
-        proxy = bool(getattr(entity, "proxy_graphic", None))
-        virtual = isinstance(entity, SupportsVirtualEntities)
-        if kind == "IMAGE":
-            unsupported[(kind, layer, "requiere archivo raster externo")] += 1
-        elif kind in {"ACAD_PROXY_ENTITY", "MLEADER", "MULTILEADER"}:
-            reason = "proxy gráfico disponible" if proxy else "proxy gráfico ausente"
+        reason = unsupported_entity_reason(entity, dispatch)
+        if reason is not None:
             unsupported[(kind, layer, reason)] += 1
-        elif kind not in dispatch and not virtual:
-            unsupported[(kind, layer, "sin soporte de dibujo")] += 1
         if kind in _TEXT_TYPES:
             text_fonts[_style_and_font(entity, document)] += 1
         if kind == "HATCH":

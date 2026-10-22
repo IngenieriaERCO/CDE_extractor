@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -16,6 +17,8 @@ from cde_exporter.cad.block_extractor import (
     extract_block_reference,
     references_for_block,
 )
+from cde_exporter.cad.detail_builder import build_extracted_detail
+from cde_exporter.cad.detail_model import detail_to_dict
 from cde_exporter.cad.exporters import export_vector_outputs
 from cde_exporter.cad.fidelity import print_fidelity_summary, write_fidelity_report
 from cde_exporter.cad.models import CadProcessingError
@@ -54,7 +57,7 @@ def _legacy_format_references(references: tuple[BlockReference, ...]) -> str:
     return "\n".join(
         f"  ocurrencia {ref.order} | handle {ref.handle or '(sin handle)'} | capa {ref.layer} | "
         f"rotación {ref.rotation:g}° | escala ({ref.xscale:g}, {ref.yscale:g}, {ref.zscale:g}) | "
-        f"inserciÃ³n {', '.join(f'{value:g}' for value in ref.insert)}"
+        f"inserción {', '.join(f'{value:g}' for value in ref.insert)}"
         for ref in references
     )
 
@@ -200,6 +203,17 @@ def _validate_nominal_page_sizes(
             )
 
 
+def _detail_json_output(path: str | None, occurrence: int, multiple: bool) -> Path | None:
+    if path is None:
+        return None
+    destination = Path(path)
+    if multiple:
+        destination = destination.with_name(
+            f"{destination.stem}_{occurrence:03d}{destination.suffix}"
+        )
+    return destination
+
+
 def run_extract_block(args) -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -253,7 +267,13 @@ def run_extract_block(args) -> int:
         dxf_output = order_prefix.with_suffix(".dxf")
         fidelity_destination = order_prefix.with_name(f"{order_prefix.name}_fidelidad.txt")
         vector_outputs = [order_prefix.with_suffix(ext) for ext in formats]
-        for output in (dxf_output, fidelity_destination, *vector_outputs):
+        detail_json_output = _detail_json_output(
+            args.detail_json, ref.order, args.all or len(selected) > 1
+        )
+        outputs = (dxf_output, fidelity_destination, *vector_outputs)
+        if detail_json_output is not None:
+            outputs += (detail_json_output,)
+        for output in outputs:
             if output.resolve() == source.resolve():
                 raise CadProcessingError("La salida no puede sobrescribir el DXF original")
             if output.exists() and not args.overwrite:
@@ -266,6 +286,24 @@ def run_extract_block(args) -> int:
             references.index(ref) + 1,
             dxf_output,
             overwrite=args.overwrite,
+        )
+        extracted_document = read_dxf(dxf_output)
+        effective_extents = bbox.extents(extracted_document.modelspace())
+        effective_bounds_xyz = (
+            (
+                tuple(float(value) for value in (
+                    effective_extents.extmin.x,
+                    effective_extents.extmin.y,
+                    effective_extents.extmin.z,
+                )),
+                tuple(float(value) for value in (
+                    effective_extents.extmax.x,
+                    effective_extents.extmax.y,
+                    effective_extents.extmax.z,
+                )),
+            )
+            if effective_extents.has_data
+            else None
         )
         fidelity_report = write_fidelity_report(
             dxf_output,
@@ -343,6 +381,29 @@ def run_extract_block(args) -> int:
             scale, page_size, unknown_units = _fit_parameters(
                 args, source, args.block_name, ref.order, result
             )
+            verification = verify_drawing_units(
+                result.units_code,
+                block_units_code,
+                max_block_dimension=max_block_dimension,
+                insert_scale=(ref.xscale, ref.yscale, ref.zscale),
+                insert_position=ref.insert,
+                override=args.units,
+            )
+        detail = build_extracted_detail(
+            source_path=source,
+            block_name=args.block_name,
+            reference=ref,
+            extraction=result,
+            unit_verification=verification,
+            nominal_denominator=nominal_denominator,
+            factor_mm_per_drawing_unit=(scale if nominal_denominator is not None else None),
+            effective_bounds_xyz=effective_bounds_xyz,
+            document=extracted_document,
+            fidelity_report=fidelity_report,
+            hatch_mode=args.hatch_mode,
+            hatch_threshold=args.hatch_threshold,
+            include_dependencies=True,
+        )
         if result.unbounded:
             print(
                 "Aviso: el bloque contiene entidades sin caja; la página se ajusta a la "
@@ -401,4 +462,16 @@ def run_extract_block(args) -> int:
         print(f"Creado: {fidelity_destination}")
         for ext in formats:
             print(f"Creado: {order_prefix.with_suffix(ext)}")
+        if detail_json_output is not None:
+            try:
+                detail_json_output.parent.mkdir(parents=True, exist_ok=True)
+                mode = "w" if args.overwrite else "x"
+                with detail_json_output.open(mode, encoding="utf-8", newline="\n") as stream:
+                    json.dump(detail_to_dict(detail), stream, indent=2, ensure_ascii=False)
+                    stream.write("\n")
+            except (OSError, TypeError, ValueError) as error:
+                raise CadProcessingError(
+                    f"No se pudo escribir el JSON del detalle '{detail_json_output}': {error}"
+                ) from error
+            print(f"JSON del detalle creado: {detail_json_output}")
     return 0

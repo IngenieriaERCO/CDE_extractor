@@ -1,4 +1,4 @@
-"""InspecciÃ³n de bloques referenciados en modelspace."""
+"""Inspección de bloques referenciados en modelspace."""
 
 from __future__ import annotations
 

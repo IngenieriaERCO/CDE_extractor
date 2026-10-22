@@ -79,6 +79,9 @@ def build_parser() -> argparse.ArgumentParser:
     block_extract_command.add_argument("--scale-factor", type=float)
     block_extract_command.add_argument("--scale", help="Escala nominal, por ejemplo 1:50")
     block_extract_command.add_argument(
+        "--detail-json", help="Guarda el modelo de dominio del detalle en JSON"
+    )
+    block_extract_command.add_argument(
         "--units", choices=("mm", "cm", "m", "in", "ft"),
         help="Declara o corrige las unidades del dibujo",
     )

@@ -1,4 +1,4 @@
-"""SelecciÃ³n y copia de referencias individuales de bloques."""
+"""Selección y copia de referencias individuales de bloques."""
 
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ def _similar_names(document: Drawing, name: str) -> str:
 def _reference_rows(references: tuple[BlockReference, ...]) -> str:
     return "\n".join(
         f"  orden {ref.order} | capa {ref.layer} | handle {ref.handle or '(sin handle)'} | "
-        f"inserciÃ³n {', '.join(f'{value:g}' for value in ref.insert)}"
+        f"inserción {', '.join(f'{value:g}' for value in ref.insert)}"
         for ref in references
     )
 
@@ -86,7 +86,7 @@ def extract_block_reference(
 ) -> BlockExtraction:
     source_path, destination = Path(source), Path(output)
     if source_path.resolve() == destination.resolve():
-        raise CadProcessingError("La extracciÃ³n no puede sobrescribir el DXF original")
+        raise CadProcessingError("La extracción no puede sobrescribir el DXF original")
     document = read_dxf(source_path)
     if block_name not in document.blocks:
         raise CadProcessingError(
