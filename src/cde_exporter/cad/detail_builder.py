@@ -9,6 +9,12 @@ from pathlib import Path
 from ezdxf.document import Drawing
 
 from cde_exporter.cad.block_extractor import BlockExtraction, BlockReference
+from cde_exporter.cad.detail_extras import (
+    FontUse,
+    HatchSummary,
+    NestedBlockInfo,
+    TransformationStep,
+)
 from cde_exporter.cad.detail_model import (
     Bounds3D,
     DetailSource,
@@ -127,6 +133,10 @@ def build_extracted_detail(
     content_size_mm: tuple[float, float] | None = None,
     page_size_mm: tuple[float, float] | None = None,
     margin_mm: float | None = None,
+    transformations: tuple[TransformationStep, ...] = (),
+    nested_blocks: tuple[NestedBlockInfo, ...] = (),
+    fonts: tuple[FontUse, ...] = (),
+    hatches: HatchSummary | None = None,
 ) -> ExtractedDetail:
     """Construye el detalle y clasifica cada entidad según la fidelidad existente.
 
@@ -373,4 +383,8 @@ def build_extracted_detail(
         margin_mm=margin_mm,
         physical_scale_guaranteed=physical_scale_guaranteed,
         physical_scale_note=physical_scale_note,
+        transformations=transformations,
+        nested_blocks=nested_blocks,
+        fonts=fonts,
+        hatches=hatches,
     )

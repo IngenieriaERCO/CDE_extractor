@@ -20,6 +20,12 @@ from cde_exporter.cad.block_extractor import (
     references_for_block,
 )
 from cde_exporter.cad.detail_builder import build_extracted_detail
+from cde_exporter.cad.detail_extras import (
+    font_uses,
+    hatch_summary,
+    nested_blocks,
+    transformation_steps,
+)
 from cde_exporter.cad.detail_model import SelectionMethod, detail_to_dict
 from cde_exporter.cad.exporters import export_vector_outputs
 from cde_exporter.cad.fidelity import print_fidelity_summary, write_fidelity_report
@@ -416,6 +422,10 @@ def run_extract_block(args) -> int:
             fidelity_report=fidelity_report,
             hatch_mode=args.hatch_mode,
             hatch_threshold=args.hatch_threshold,
+            transformations=transformation_steps(ref),
+            nested_blocks=nested_blocks(extracted_document),
+            fonts=font_uses(fidelity_report),
+            hatches=hatch_summary(fidelity_report),
             include_dependencies=True,
             extracted_at=datetime.now().astimezone().isoformat(timespec="seconds"),
             exporter_version=__version__,
