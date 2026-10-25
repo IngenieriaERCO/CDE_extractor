@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 from datetime import datetime
@@ -26,10 +27,16 @@ from cde_exporter.cad.detail_extras import (
     nested_blocks,
     transformation_steps,
 )
-from cde_exporter.cad.detail_model import SelectionMethod, detail_to_dict
+from cde_exporter.cad.detail_model import SelectionMethod, detail_to_dict, finalize_detail
+from cde_exporter.cad.detail_text import format_detail_report
 from cde_exporter.cad.exporters import export_vector_outputs
 from cde_exporter.cad.fidelity import print_fidelity_summary, write_fidelity_report
 from cde_exporter.cad.models import CadProcessingError
+from cde_exporter.cad.pdf_checks import (
+    PdfValidationError,
+    build_extraction_result,
+    validate_output_pdf,
+)
 from cde_exporter.cad.reader import entity_bounds, read_dxf
 from cde_exporter.cad.scale import (
     output_factor,
@@ -222,6 +229,62 @@ def _detail_json_output(path: str | None, occurrence: int, multiple: bool) -> Pa
     return destination
 
 
+def _effective_bounds_xyz(document):
+    """Caja efectiva (mínimo y máximo, con Z) del Model Space del DXF extraído."""
+    extents = bbox.extents(document.modelspace())
+    if not extents.has_data:
+        return None
+    return (
+        (float(extents.extmin.x), float(extents.extmin.y), float(extents.extmin.z)),
+        (float(extents.extmax.x), float(extents.extmax.y), float(extents.extmax.z)),
+    )
+
+
+def _keep_intermediates() -> bool:
+    """Opción de desarrollo: conserva el DXF extraído y el SVG junto al PDF y al TXT."""
+    value = os.environ.get("CDE_KEEP_INTERMEDIATES", "")
+    return value.strip().lower() in {"1", "true", "yes", "si", "sí"}
+
+
+def _move_file(source: Path, destination: Path) -> None:
+    try:
+        os.replace(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+        source.unlink(missing_ok=True)
+
+
+def _publish_files(pairs: list[tuple[Path, Path]], overwrite: bool) -> None:
+    """Mueve los archivos preparados a su destino sin dejar un resultado a medias.
+
+    Si algún movimiento falla, se retiran los archivos ya publicados y se restauran
+    los que había antes (cuando se usa --overwrite).
+    """
+    published: list[Path] = []
+    backups: dict[Path, Path] = {}
+    try:
+        for staged, destination in pairs:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists():
+                if not overwrite:
+                    raise CadProcessingError(
+                        f"El archivo de salida ya existe: {destination}. "
+                        "Usa --overwrite para reemplazarlo."
+                    )
+                backup = staged.with_name(staged.name + ".previo")
+                _move_file(destination, backup)
+                backups[destination] = backup
+            _move_file(staged, destination)
+            published.append(destination)
+    except BaseException:
+        for destination in published:
+            destination.unlink(missing_ok=True)
+        for destination, backup in backups.items():
+            if backup.exists():
+                _move_file(backup, destination)
+        raise
+
+
 def run_extract_block(args) -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -278,18 +341,21 @@ def run_extract_block(args) -> int:
             max_block_dimension,
             nominal_denominator,
         )
-    formats = {"all": (".svg", ".pdf"), "svg": (".svg",), "pdf": (".pdf",)}[args.format]
+    keep = _keep_intermediates()
     for ref in selected:
         order_prefix = prefix.with_name(f"{prefix.name}_{ref.order:03d}") if args.all else prefix
+        pdf_destination = order_prefix.with_suffix(".pdf")
+        txt_destination = order_prefix.with_suffix(".txt")
         dxf_output = order_prefix.with_suffix(".dxf")
-        fidelity_destination = order_prefix.with_name(f"{order_prefix.name}_fidelidad.txt")
-        vector_outputs = [order_prefix.with_suffix(ext) for ext in formats]
+        svg_output = order_prefix.with_suffix(".svg")
         detail_json_output = _detail_json_output(
             args.detail_json, ref.order, args.all or len(selected) > 1
         )
-        outputs = (dxf_output, fidelity_destination, *vector_outputs)
+        outputs = [pdf_destination, txt_destination]
+        if keep:
+            outputs += [dxf_output, svg_output]
         if detail_json_output is not None:
-            outputs += (detail_json_output,)
+            outputs.append(detail_json_output)
         for output in outputs:
             if output.resolve() == source.resolve():
                 raise CadProcessingError("La salida no puede sobrescribir el DXF original")
@@ -297,171 +363,153 @@ def run_extract_block(args) -> int:
                 raise CadProcessingError(
                     f"El archivo de salida ya existe: {output}. Usa --overwrite para reemplazarlo."
                 )
-        result = extract_block_reference(
-            source,
-            args.block_name,
-            references.index(ref) + 1,
-            dxf_output,
-            overwrite=args.overwrite,
-        )
-        extracted_document = read_dxf(dxf_output)
-        effective_extents = bbox.extents(extracted_document.modelspace())
-        effective_bounds_xyz = (
-            (
-                tuple(float(value) for value in (
-                    effective_extents.extmin.x,
-                    effective_extents.extmin.y,
-                    effective_extents.extmin.z,
-                )),
-                tuple(float(value) for value in (
-                    effective_extents.extmax.x,
-                    effective_extents.extmax.y,
-                    effective_extents.extmax.z,
-                )),
+        prefix.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            dir=prefix.parent, ignore_cleanup_errors=True
+        ) as temp_name:
+            work = Path(temp_name)
+            temp_dxf = work / f"{order_prefix.name}.dxf"
+            temp_fidelity = work / "fidelidad.txt"
+            temp_svg = work / f"{order_prefix.name}.svg"
+            temp_pdf = work / f"{order_prefix.name}.pdf"
+            temp_report = work / f"{order_prefix.name}.txt"
+            temp_json = work / "detalle.json"
+            result = extract_block_reference(
+                source,
+                args.block_name,
+                references.index(ref) + 1,
+                temp_dxf,
+                overwrite=True,
             )
-            if effective_extents.has_data
-            else None
-        )
-        fidelity_report = write_fidelity_report(
-            dxf_output,
-            fidelity_destination,
-            args.hatch_mode,
-            overwrite=args.overwrite,
-            hatch_threshold=args.hatch_threshold,
-        )
-        print_fidelity_summary(fidelity_report, fidelity_destination)
-        scale_note = ""
-        content_size = None
-        geometry_page_size = None
-        if nominal_denominator is not None:
-            verification = verify_drawing_units(
-                result.units_code,
-                block_units_code,
-                max_block_dimension=max_block_dimension,
-                insert_scale=(ref.xscale, ref.yscale, ref.zscale),
-                insert_position=ref.insert,
-                override=args.units,
+            extracted_document = read_dxf(temp_dxf)
+            effective_bounds_xyz = _effective_bounds_xyz(extracted_document)
+            fidelity_report = write_fidelity_report(
+                temp_dxf,
+                temp_fidelity,
+                args.hatch_mode,
+                overwrite=True,
+                hatch_threshold=args.hatch_threshold,
             )
-            factors = tuple(
-                output_factor(
-                    verification.millimeters_per_unit, nominal_denominator, abs(axis_scale)
+            print_fidelity_summary(fidelity_report, txt_destination)
+            scale_note = ""
+            content_size = None
+            geometry_page_size = None
+            if nominal_denominator is not None:
+                verification = verify_drawing_units(
+                    result.units_code,
+                    block_units_code,
+                    max_block_dimension=max_block_dimension,
+                    insert_scale=(ref.xscale, ref.yscale, ref.zscale),
+                    insert_position=ref.insert,
+                    override=args.units,
                 )
-                for axis_scale in (ref.xscale, ref.yscale, ref.zscale)
-            )
-            factor_text = (
-                f"{factors[0]:g} mm/unidad CAD"
-                if factors[0] == factors[1] == factors[2]
-                else f"X={factors[0]:g}, Y={factors[1]:g}, Z={factors[2]:g} mm/unidad CAD"
-            )
-            scale_note = (
-                f"Escala nominal: 1:{nominal_denominator:g} | {factor_text} | "
-                f"unidades {verification.unit_name} | estado: {verification.status}"
-            )
-            if not verification.verified:
-                scale_note += " | ADVERTENCIA: escala física NO garantizada"
-            if verification.warnings:
-                scale_note += " | indicios: " + "; ".join(verification.warnings)
-        transform = (
-            f"Ocurrencia usada: {ref.order} de {len(references)} | handle "
-            f"{ref.handle or '(sin handle)'} | capa {ref.layer} | "
-            f"punto ({_format_insert(ref.insert)}) | "
-            f"rotación {ref.rotation:g}° | escala ({ref.xscale:g}, {ref.yscale:g}, {ref.zscale:g})"
-        )
-        with fidelity_destination.open("a", encoding="utf-8", newline="\n") as report_file:
-            report_file.write(f"\nSelección del bloque\n{transform}\n")
-        print(transform)
-        if scale_note:
-            with fidelity_destination.open("a", encoding="utf-8", newline="\n") as report_file:
-                report_file.write(f"{scale_note}\n")
-            print(scale_note)
-        if nominal_denominator is not None:
-            scale, geometry_page_size, geometry_box, content_size = _nominal_scale_parameters(
-                args, read_dxf(dxf_output), verification, nominal_denominator
-            )
-            page_size = geometry_page_size
-            geometry_note = (
-                "Caja geométrica efectiva CAD (xmin, ymin, xmax, ymax): "
-                f"({geometry_box[0]:.3f}, {geometry_box[1]:.3f}, "
-                f"{geometry_box[2]:.3f}, {geometry_box[3]:.3f}); "
-                f"contenido físico: {content_size[0]:.3f} × {content_size[1]:.3f} mm; "
-                f"página: {page_size[0]:.3f} × {page_size[1]:.3f} mm; "
-                f"factor aplicado a caja efectiva: {scale:g} mm/unidad CAD."
-            )
-            with fidelity_destination.open("a", encoding="utf-8", newline="\n") as report_file:
-                report_file.write(geometry_note + "\n")
-                if result.unbounded:
-                    report_file.write(
-                        "Aviso: las entidades sin caja calculable se excluyeron del tamaño.\n"
+                factors = tuple(
+                    output_factor(
+                        verification.millimeters_per_unit, nominal_denominator, abs(axis_scale)
                     )
+                    for axis_scale in (ref.xscale, ref.yscale, ref.zscale)
+                )
+                factor_text = (
+                    f"{factors[0]:g} mm/unidad CAD"
+                    if factors[0] == factors[1] == factors[2]
+                    else f"X={factors[0]:g}, Y={factors[1]:g}, Z={factors[2]:g} mm/unidad CAD"
+                )
+                scale_note = (
+                    f"Escala nominal: 1:{nominal_denominator:g} | {factor_text} | "
+                    f"unidades {verification.unit_name} | estado: {verification.status}"
+                )
                 if not verification.verified:
-                    report_file.write("ADVERTENCIA: escala física NO garantizada.\n")
-            print(geometry_note)
-            unknown_units = not verification.verified
-        else:
-            scale, page_size, unknown_units = _fit_parameters(
-                args, source, args.block_name, ref.order, result
+                    scale_note += " | ADVERTENCIA: escala física NO garantizada"
+                if verification.warnings:
+                    scale_note += " | indicios: " + "; ".join(verification.warnings)
+            transform = (
+                f"Ocurrencia usada: {ref.order} de {len(references)} | handle "
+                f"{ref.handle or '(sin handle)'} | capa {ref.layer} | "
+                f"punto ({_format_insert(ref.insert)}) | "
+                f"rotación {ref.rotation:g}° | "
+                f"escala ({ref.xscale:g}, {ref.yscale:g}, {ref.zscale:g})"
             )
-            verification = verify_drawing_units(
-                result.units_code,
-                block_units_code,
-                max_block_dimension=max_block_dimension,
-                insert_scale=(ref.xscale, ref.yscale, ref.zscale),
-                insert_position=ref.insert,
-                override=args.units,
+            print(transform)
+            if scale_note:
+                print(scale_note)
+            if nominal_denominator is not None:
+                scale, geometry_page_size, geometry_box, content_size = _nominal_scale_parameters(
+                    args, extracted_document, verification, nominal_denominator
+                )
+                page_size = geometry_page_size
+                geometry_note = (
+                    "Caja geométrica efectiva CAD (xmin, ymin, xmax, ymax): "
+                    f"({geometry_box[0]:.3f}, {geometry_box[1]:.3f}, "
+                    f"{geometry_box[2]:.3f}, {geometry_box[3]:.3f}); "
+                    f"contenido físico: {content_size[0]:.3f} × {content_size[1]:.3f} mm; "
+                    f"página: {page_size[0]:.3f} × {page_size[1]:.3f} mm; "
+                    f"factor aplicado a caja efectiva: {scale:g} mm/unidad CAD."
+                )
+                print(geometry_note)
+                unknown_units = not verification.verified
+            else:
+                scale, page_size, unknown_units = _fit_parameters(
+                    args, source, args.block_name, ref.order, result
+                )
+                verification = verify_drawing_units(
+                    result.units_code,
+                    block_units_code,
+                    max_block_dimension=max_block_dimension,
+                    insert_scale=(ref.xscale, ref.yscale, ref.zscale),
+                    insert_position=ref.insert,
+                    override=args.units,
+                )
+            detail = build_extracted_detail(
+                source_path=source,
+                block_name=args.block_name,
+                reference=ref,
+                extraction=result,
+                unit_verification=verification,
+                nominal_denominator=nominal_denominator,
+                factor_mm_per_drawing_unit=(scale if nominal_denominator is not None else None),
+                effective_bounds_xyz=effective_bounds_xyz,
+                document=extracted_document,
+                fidelity_report=fidelity_report,
+                hatch_mode=args.hatch_mode,
+                hatch_threshold=args.hatch_threshold,
+                transformations=transformation_steps(ref),
+                nested_blocks=nested_blocks(extracted_document),
+                fonts=font_uses(fidelity_report),
+                hatches=hatch_summary(fidelity_report),
+                include_dependencies=True,
+                extracted_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+                exporter_version=__version__,
+                block_definition_handle=block_definition_handle,
+                selection_method=selection_method,
+                user_units_override=args.units,
+                content_size_mm=content_size,
+                page_size_mm=geometry_page_size,
+                margin_mm=args.margin_mm if nominal_denominator is not None else None,
             )
-        detail = build_extracted_detail(
-            source_path=source,
-            block_name=args.block_name,
-            reference=ref,
-            extraction=result,
-            unit_verification=verification,
-            nominal_denominator=nominal_denominator,
-            factor_mm_per_drawing_unit=(scale if nominal_denominator is not None else None),
-            effective_bounds_xyz=effective_bounds_xyz,
-            document=extracted_document,
-            fidelity_report=fidelity_report,
-            hatch_mode=args.hatch_mode,
-            hatch_threshold=args.hatch_threshold,
-            transformations=transformation_steps(ref),
-            nested_blocks=nested_blocks(extracted_document),
-            fonts=font_uses(fidelity_report),
-            hatches=hatch_summary(fidelity_report),
-            include_dependencies=True,
-            extracted_at=datetime.now().astimezone().isoformat(timespec="seconds"),
-            exporter_version=__version__,
-            block_definition_handle=block_definition_handle,
-            selection_method=selection_method,
-            user_units_override=args.units,
-            content_size_mm=content_size,
-            page_size_mm=geometry_page_size,
-            margin_mm=args.margin_mm if nominal_denominator is not None else None,
-        )
-        if result.unbounded:
-            print(
-                "Aviso: el bloque contiene entidades sin caja; la página se ajusta a la "
-                "geometría calculable.",
-                file=sys.stderr,
-            )
-        if unknown_units:
-            print(
-                "Aviso: unidades no verificadas; el ajuste indicado no representa una "
-                "escala física.",
-                file=sys.stderr,
-            )
-        if scale is None:
-            print(
-                "Aviso: no se pudo calcular una escala 1:N porque no hay una caja "
-                "calculable para el bloque.",
-                file=sys.stderr,
-            )
-        if args.hatch_mode != "normal":
-            print(f"Rayados simplificados: modo --hatch-mode {args.hatch_mode}.")
-        with tempfile.TemporaryDirectory(dir=prefix.parent) as temp_dir:
-            temp_prefix = Path(temp_dir) / order_prefix.name
-            export_vector_outputs(
-                dxf_output,
-                temp_prefix.with_suffix(".svg"),
-                temp_prefix.with_suffix(".pdf"),
+            if result.unbounded:
+                print(
+                    "Aviso: el bloque contiene entidades sin caja; la página se ajusta a la "
+                    "geometría calculable.",
+                    file=sys.stderr,
+                )
+            if unknown_units:
+                print(
+                    "Aviso: unidades no verificadas; el ajuste indicado no representa una "
+                    "escala física.",
+                    file=sys.stderr,
+                )
+            if scale is None:
+                print(
+                    "Aviso: no se pudo calcular una escala 1:N porque no hay una caja "
+                    "calculable para el bloque.",
+                    file=sys.stderr,
+                )
+            if args.hatch_mode != "normal":
+                print(f"Rayados simplificados: modo --hatch-mode {args.hatch_mode}.")
+            export_report = export_vector_outputs(
+                temp_dxf,
+                temp_svg,
+                temp_pdf,
                 overwrite=True,
                 page_size_mm=page_size,
                 margin_mm=args.margin_mm,
@@ -470,13 +518,35 @@ def run_extract_block(args) -> int:
                 hatch_mode=args.hatch_mode,
                 hatch_threshold=args.hatch_threshold,
             )
-            for extension in formats:
-                staged = temp_prefix.with_suffix(extension)
-                destination = order_prefix.with_suffix(extension)
-                if args.overwrite:
-                    os.replace(staged, destination)
-                else:
-                    staged.rename(destination)
+            checks = validate_output_pdf(temp_pdf, geometry_page_size)
+            try:
+                extraction_result = build_extraction_result(
+                    pdf_destination.name,
+                    checks,
+                    detail.warnings,
+                    export_report.warnings,
+                )
+            except PdfValidationError as error:
+                failed = "; ".join(f"{check.name}: {check.detail}" for check in error.checks)
+                raise CadProcessingError(
+                    f"La validación del PDF falló; no se publicó ningún archivo. {failed}"
+                ) from error
+            detail = finalize_detail(detail, extraction_result)
+            temp_report.write_text(format_detail_report(detail), encoding="utf-8", newline="\n")
+            pairs = [(temp_pdf, pdf_destination), (temp_report, txt_destination)]
+            if keep:
+                pairs += [(temp_dxf, dxf_output), (temp_svg, svg_output)]
+            if detail_json_output is not None:
+                try:
+                    with temp_json.open("w", encoding="utf-8", newline="\n") as stream:
+                        json.dump(detail_to_dict(detail), stream, indent=2, ensure_ascii=False)
+                        stream.write("\n")
+                except (OSError, TypeError, ValueError) as error:
+                    raise CadProcessingError(
+                        f"No se pudo escribir el JSON del detalle '{detail_json_output}': {error}"
+                    ) from error
+                pairs.append((temp_json, detail_json_output))
+            _publish_files(pairs, args.overwrite)
         if args.scale_factor is None and nominal_denominator is None and scale is not None:
             mm_per_unit = (
                 1.0
@@ -490,20 +560,11 @@ def run_extract_block(args) -> int:
             f"{_format_insert(ref.insert)} | entidades de definición: "
             f"{result.definition_entity_count}"
         )
-        print(f"Creado: {dxf_output}")
-        print(f"Creado: {fidelity_destination}")
-        for ext in formats:
-            print(f"Creado: {order_prefix.with_suffix(ext)}")
+        print(f"Creado: {pdf_destination}")
+        print(f"Creado: {txt_destination}")
+        if keep:
+            print(f"Creado: {dxf_output}")
+            print(f"Creado: {svg_output}")
         if detail_json_output is not None:
-            try:
-                detail_json_output.parent.mkdir(parents=True, exist_ok=True)
-                mode = "w" if args.overwrite else "x"
-                with detail_json_output.open(mode, encoding="utf-8", newline="\n") as stream:
-                    json.dump(detail_to_dict(detail), stream, indent=2, ensure_ascii=False)
-                    stream.write("\n")
-            except (OSError, TypeError, ValueError) as error:
-                raise CadProcessingError(
-                    f"No se pudo escribir el JSON del detalle '{detail_json_output}': {error}"
-                ) from error
             print(f"JSON del detalle creado: {detail_json_output}")
     return 0

@@ -174,18 +174,19 @@ def test_occurrence_two_and_out_of_range(tmp_path: Path, capsys) -> None:
     document.saveas(path)
     prefix = tmp_path / "selected"
     assert main(["cad", "extract-block", str(path), "--block-name", "Detalle",
-                 "--occurrence", "2", "--output-prefix", str(prefix), "--format", "svg"]) == 0
-    report = prefix.with_name("selected_fidelidad.txt").read_text(encoding="utf-8")
-    assert "Ocurrencia usada: 2 de 3" in report
-    assert "punto (1.000, 0.000, 0.000)" in report
+                 "--occurrence", "2", "--output-prefix", str(prefix)]) == 0
+    assert "Ocurrencia usada: 2 de 3" in capsys.readouterr().out
+    report = prefix.with_suffix(".txt").read_text(encoding="utf-8")
+    assert "Ocurrencia: 2" in report
+    assert "Método de selección: por ocurrencia" in report
+    assert "(1.000, 0.000, 0.000)" in report
     assert main(["cad", "extract-block", str(path), "--block-name", "Detalle",
                  "--occurrence", "4", "--output-prefix", str(tmp_path / "invalid")]) == 1
     assert "La ocurrencia 4 no existe" in capsys.readouterr().err
 
 
-def test_cli_extract_block_honors_format_and_writes_dxf_before_vectors(
-    tmp_path: Path,
-) -> None:
+def test_cli_extract_block_publishes_only_pdf_and_txt(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("CDE_KEEP_INTERMEDIATES", raising=False)
     source = create_blocks(tmp_path / "source.dxf")
     prefix = tmp_path / "result" / "detail"
     result = main(
@@ -204,10 +205,8 @@ def test_cli_extract_block_honors_format_and_writes_dxf_before_vectors(
         ]
     )
     assert result == 0
-    assert prefix.with_suffix(".dxf").is_file()
-    assert prefix.with_suffix(".svg").is_file()
-    assert not prefix.with_suffix(".pdf").exists()
-    assert prefix.with_name("detail_fidelidad.txt").is_file()
+    published = sorted(item.name for item in prefix.parent.iterdir())
+    assert published == ["detail.pdf", "detail.txt"]
 
 
 @pytest.mark.parametrize("value, expected", [("1:20", 20), ("1:50", 50), ("1:100", 100)])
@@ -276,7 +275,7 @@ def test_small_insert_scale_with_large_coordinates_is_flagged() -> None:
     assert "INSERT escala 0.001" in " ".join(verification.warnings)
 
 
-def test_nominal_scale_is_logged_without_changing_pdf_scale(tmp_path: Path) -> None:
+def test_nominal_scale_is_logged_in_terminal_and_report(tmp_path: Path, capsys) -> None:
     document = ezdxf.new()
     document.units = ezdxf.units.InsertUnits.Millimeters
     document.blocks.new("Detalle").add_line((0, 0), (10, 5))
@@ -288,11 +287,14 @@ def test_nominal_scale_is_logged_without_changing_pdf_scale(tmp_path: Path) -> N
     prefix = tmp_path / "scale-output"
     assert main([
         "cad", "extract-block", str(source), "--block-name", "Detalle", "--occurrence", "1",
-        "--scale", "1:50", "--output-prefix", str(prefix), "--format", "svg",
+        "--scale", "1:50", "--output-prefix", str(prefix),
     ]) == 0
-    report = prefix.with_name("scale-output_fidelidad.txt").read_text(encoding="utf-8")
-    assert "Escala nominal: 1:50 | 2e-05 mm/unidad CAD" in report
-    assert "estado: declaradas en el DXF y coherentes" in report
+    terminal = capsys.readouterr().out
+    assert "Escala nominal: 1:50 | 2e-05 mm/unidad CAD" in terminal
+    assert "estado: declaradas en el DXF y coherentes" in terminal
+    report = prefix.with_suffix(".txt").read_text(encoding="utf-8")
+    assert "Escala nominal: 1:50" in report
+    assert "Estado de verificación: declaradas en el DXF y coherentes" in report
 
 
 def test_user_override_clears_unit_inconsistency() -> None:
@@ -342,7 +344,7 @@ def test_nominal_scale_conflicts_with_manual_factor(tmp_path: Path, capsys) -> N
     assert "No combines --scale con --scale-factor" in capsys.readouterr().err
 
 
-def test_cli_units_override_is_recorded_and_used_for_factor(tmp_path: Path) -> None:
+def test_cli_units_override_is_recorded_and_used_for_factor(tmp_path: Path, capsys) -> None:
     document = ezdxf.new()
     document.blocks.new("Detalle").add_line((0, 0), (10, 5))
     document.modelspace().add_blockref("Detalle", (0, 0))
@@ -352,11 +354,13 @@ def test_cli_units_override_is_recorded_and_used_for_factor(tmp_path: Path) -> N
     assert main([
         "cad", "extract-block", str(source), "--block-name", "Detalle", "--occurrence", "1",
         "--scale", "1:100", "--units", "m", "--output-prefix", str(prefix),
-        "--format", "svg",
     ]) == 0
-    report = prefix.with_name("units-output_fidelidad.txt").read_text(encoding="utf-8")
-    assert "| 10 mm/unidad CAD | unidades m |" in report
-    assert "estado: indicadas por el usuario (--units m)" in report
+    terminal = capsys.readouterr().out
+    assert "| 10 mm/unidad CAD | unidades m |" in terminal
+    assert "estado: indicadas por el usuario (--units m)" in terminal
+    report = prefix.with_suffix(".txt").read_text(encoding="utf-8")
+    assert "Unidades indicadas por el usuario: m" in report
+    assert "Factor aplicado: 10.000 mm/unidad CAD" in report
 
 
 def _scaled_detail(path: Path, units_code: int, size: tuple[float, float]) -> Path:
@@ -382,19 +386,22 @@ def _pdf_size_mm(path: Path) -> tuple[float, float]:
      (ezdxf.units.InsertUnits.Millimeters, "1:1", (1010, 510))],
 )
 def test_nominal_scale_sets_physical_pdf_size(
-    tmp_path: Path, units_code: int, nominal: str, expected: tuple[float, float]
+    tmp_path: Path, capsys, units_code: int, nominal: str, expected: tuple[float, float]
 ) -> None:
     size = (1, 0.5) if units_code == ezdxf.units.InsertUnits.Meters else (1000, 500)
     source = _scaled_detail(tmp_path / "scaled.dxf", units_code, size)
     prefix = tmp_path / "scaled-output"
     assert main([
         "cad", "extract-block", str(source), "--block-name", "Detalle", "--occurrence", "1",
-        "--scale", nominal, "--output-prefix", str(prefix), "--format", "pdf",
+        "--scale", nominal, "--output-prefix", str(prefix),
     ]) == 0
     assert _pdf_size_mm(prefix.with_suffix(".pdf")) == pytest.approx(expected, abs=0.1)
-    report = prefix.with_name("scaled-output_fidelidad.txt").read_text(encoding="utf-8")
-    assert "Caja geométrica efectiva CAD" in report
-    assert "página:" in report
+    terminal = capsys.readouterr().out
+    assert "Caja geométrica efectiva CAD" in terminal
+    assert "página:" in terminal
+    assert "Escala aproximada" not in terminal
+    report = prefix.with_suffix(".txt").read_text(encoding="utf-8")
+    assert f"Tamaño de página PDF: {expected[0]:.3f} × {expected[1]:.3f} mm" in report
     assert "Escala aproximada" not in report
 
 
@@ -409,7 +416,7 @@ def test_nominal_scale_rejects_small_page_without_vector_output(tmp_path: Path, 
     assert not prefix.with_suffix(".pdf").exists()
     assert not prefix.with_suffix(".svg").exists()
     assert not prefix.with_suffix(".dxf").exists()
-    assert not prefix.with_name("small-output_fidelidad.txt").exists()
+    assert not prefix.with_suffix(".txt").exists()
 
 
 def test_nominal_scale_keeps_geometry_size_on_larger_page(tmp_path: Path) -> None:
@@ -418,11 +425,11 @@ def test_nominal_scale_keeps_geometry_size_on_larger_page(tmp_path: Path) -> Non
     assert main([
         "cad", "extract-block", str(source), "--block-name", "Detalle", "--occurrence", "1",
         "--scale", "1:100", "--page-size-mm", "30", "25", "--output-prefix", str(prefix),
-        "--format", "pdf",
     ]) == 0
     assert _pdf_size_mm(prefix.with_suffix(".pdf")) == pytest.approx((30, 25), abs=0.1)
-    report = prefix.with_name("large-output_fidelidad.txt").read_text(encoding="utf-8")
-    assert "contenido físico: 10.000 × 5.000 mm" in report
+    report = prefix.with_suffix(".txt").read_text(encoding="utf-8")
+    assert "Tamaño del contenido en PDF: 10.000 × 5.000 mm" in report
+    assert "Tamaño de página PDF: 30.000 × 25.000 mm" in report
 
 
 def test_unknown_units_nominal_scale_warns_in_report_and_terminal(
@@ -432,11 +439,12 @@ def test_unknown_units_nominal_scale_warns_in_report_and_terminal(
     prefix = tmp_path / "unknown-output"
     assert main([
         "cad", "extract-block", str(source), "--block-name", "Detalle", "--occurrence", "1",
-        "--scale", "1:100", "--output-prefix", str(prefix), "--format", "pdf",
+        "--scale", "1:100", "--output-prefix", str(prefix),
     ]) == 0
     assert "NO garantizada" in capsys.readouterr().out
-    report = prefix.with_name("unknown-output_fidelidad.txt").read_text(encoding="utf-8")
-    assert "ADVERTENCIA: escala física NO garantizada" in report
+    report = prefix.with_suffix(".txt").read_text(encoding="utf-8")
+    assert "Escala física: NO GARANTIZADA" in report
+    assert "UNITS_UNVERIFIED" in report
 
 
 def test_without_nominal_scale_keeps_legacy_page_size(tmp_path: Path) -> None:
@@ -446,11 +454,11 @@ def test_without_nominal_scale_keeps_legacy_page_size(tmp_path: Path) -> None:
     prefix = tmp_path / "legacy-output"
     assert main([
         "cad", "extract-block", str(source), "--block-name", "Detalle", "--occurrence", "1",
-        "--output-prefix", str(prefix), "--format", "pdf",
+        "--output-prefix", str(prefix),
     ]) == 0
     assert _pdf_size_mm(prefix.with_suffix(".pdf")) == pytest.approx((1009.65, 509.76), abs=0.1)
-    report = prefix.with_name("legacy-output_fidelidad.txt").read_text(encoding="utf-8")
-    assert "Escala nominal" not in report
+    report = prefix.with_suffix(".txt").read_text(encoding="utf-8")
+    assert "Escala nominal: no aplica" in report
 
 
 

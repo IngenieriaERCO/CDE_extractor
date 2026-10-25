@@ -311,7 +311,8 @@ def _format_result(detail: ExtractedDetail) -> list[str]:
         notes.append(f"{warning.message} {advice}" if advice else warning.message)
     if detail.physical_scale_guaranteed is False and detail.physical_scale_note:
         notes.append(f"Escala física no garantizada: {detail.physical_scale_note}")
-    notes.extend(result.warnings_after_export)
+    for item in result.warnings_after_export:
+        notes.append(f"Aviso del renderizador (ezdxf): {item}")
     if notes:
         for note in notes:
             lines += _line("", f"- {note}", indent="  ")
