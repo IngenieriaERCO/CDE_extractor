@@ -22,6 +22,8 @@ from cde_exporter.cad.detail_model import (
     UnitInfo,
     mark_footprint_solids,
 )
+from cde_exporter.cad.exporters import export_vector_outputs
+from cde_exporter.cad.models import CadProcessingError
 from cde_exporter.cli import main
 
 # Caja de 4 × 2 × 1 centrada en el origen del bloque: su huella es (-2, -1)–(2, 1).
@@ -101,8 +103,26 @@ def test_default_stays_strict(tmp_path: Path, capsys) -> None:
     assert _run(_source(tmp_path / "origen.dxf"), out, "--scale", "1:50") == 1
 
     captured = capsys.readouterr()
-    assert "3DSOLID: unsupported" in captured.out + captured.err
+    message = _flat(captured.out + captured.err)
+    assert "3DSOLID: unsupported" in message
+    assert "--solids footprint (dibujar los 3DSOLID como huella 2D)" in message
+    assert "--omit-unsupported (omitirlos)" in message
+    assert message.count("--omit-unsupported") == 1
     assert _names(out) == []
+
+
+def test_exporter_without_extract_block_signal_keeps_generic_hint(tmp_path: Path) -> None:
+    flat = tmp_path / "plano.dxf"
+    document = ezdxf.new("R2018")
+    document.modelspace().add_line((0, 0), (1, 1))
+    _add_solid(document.modelspace())
+    document.saveas(flat)
+
+    # Sin la señal de extract-block (p. ej. otros comandos) se mantiene la pista genérica.
+    with pytest.raises(CadProcessingError) as error:
+        export_vector_outputs(flat, tmp_path / "a.svg", tmp_path / "a.pdf")
+    assert "Puede usar --omit-unsupported en cad extract-block" in str(error.value)
+    assert "--solids footprint" not in str(error.value)
 
 
 def test_footprint_marks_solids_as_transformed(tmp_path: Path, capsys) -> None:
@@ -256,6 +276,9 @@ def test_large_tilt_is_not_converted_and_follows_strict_rule(tmp_path: Path, cap
     message = _flat(captured.out + captured.err)
     assert "3DSOLID: unsupported" in message
     assert "INSERT inclinado: error de huella 5.000 mm > 0.1 mm (1)" in message
+    # Con --solids footprint ya activo, solo tiene sentido sugerir la omisión.
+    assert "Puede usar --omit-unsupported en cad extract-block" in message
+    assert "dibujar los 3DSOLID como huella 2D" not in message
     assert _names(out) == []
 
 

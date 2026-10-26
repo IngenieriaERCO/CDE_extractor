@@ -108,7 +108,9 @@ def _frontend_messages(frontend: _StrictFrontend) -> tuple[str, ...]:
     return tuple(frontend.messages)
 
 
-def _raise_if_skipped(frontend: _StrictFrontend, stage: str) -> None:
+def _raise_if_skipped(
+    frontend: _StrictFrontend, stage: str, suggest_solids_footprint: bool = False
+) -> None:
     if not frontend.skipped:
         return
     details = ", ".join(frontend.skipped[:8])
@@ -116,9 +118,15 @@ def _raise_if_skipped(frontend: _StrictFrontend, stage: str) -> None:
     if not frontend.omit_unsupported and any(
         item.endswith(": unsupported") for item in frontend.skipped
     ):
-        message += (
-            ". Puede usar --omit-unsupported en cad extract-block para continuar sin ellas."
-        )
+        if suggest_solids_footprint and "3DSOLID: unsupported" in frontend.skipped:
+            message += (
+                ". Puede usar en cad extract-block --solids footprint (dibujar los 3DSOLID "
+                "como huella 2D) o --omit-unsupported (omitirlos)."
+            )
+        else:
+            message += (
+                ". Puede usar --omit-unsupported en cad extract-block para continuar sin ellas."
+            )
     raise CadProcessingError(message)
 
 
@@ -131,7 +139,7 @@ def _omitted_rows(frontend: _StrictFrontend) -> tuple[tuple[str, str, int], ...]
 
 @dataclass(frozen=True, slots=True)
 class ExportReport:
-    svg_path: Path
+    svg_path: Path | None
     pdf_path: Path
     svg_element_count: int
     pdf_page_count: int
@@ -147,6 +155,7 @@ def _draw_to_svg(
     hatch_mode: str = "normal",
     hatch_threshold: int = 50000,
     omit_unsupported: bool = False,
+    suggest_solids_footprint: bool = False,
 ) -> tuple[str, tuple[str, ...], tuple[tuple[str, str, int], ...]]:
     backend = svg_backend.SVGBackend()
     layout_properties = LayoutProperties.from_layout(document.modelspace())
@@ -169,7 +178,7 @@ def _draw_to_svg(
             "Falló la etapa de dibujo SVG: ezdxf agotó el tiempo al dibujar un rayado. "
             "Reintenta con --hatch-mode outline."
         )
-    _raise_if_skipped(frontend, "SVG")
+    _raise_if_skipped(frontend, "SVG", suggest_solids_footprint)
     return (
         backend.get_string(page, settings=settings),
         _frontend_messages(frontend),
@@ -184,6 +193,7 @@ def _draw_to_pdf(
     hatch_mode: str = "normal",
     hatch_threshold: int = 50000,
     omit_unsupported: bool = False,
+    suggest_solids_footprint: bool = False,
 ) -> tuple[bytes, tuple[str, ...], tuple[tuple[str, str, int], ...]]:
     backend = pdf_backend.PyMuPdfBackend()
     layout_properties = LayoutProperties.from_layout(document.modelspace())
@@ -206,7 +216,7 @@ def _draw_to_pdf(
             "Falló la etapa de dibujo PDF: ezdxf agotó el tiempo al dibujar un rayado. "
             "Reintenta con --hatch-mode outline."
         )
-    _raise_if_skipped(frontend, "PDF")
+    _raise_if_skipped(frontend, "PDF", suggest_solids_footprint)
     return (
         backend.get_pdf_bytes(page, settings=settings),
         _frontend_messages(frontend),
@@ -286,8 +296,19 @@ def export_vector_outputs(
     hatch_mode: str = "normal",
     hatch_threshold: int = 50000,
     omit_unsupported: bool = False,
+    suggest_solids_footprint: bool = False,
+    content_size: tuple[float, float] | None = None,
+    draw_svg: bool = True,
 ) -> ExportReport:
-    """Crea SVG/PDF vectoriales ajustados o con escala y página explícitas."""
+    """Crea SVG/PDF vectoriales ajustados o con escala y página explícitas.
+
+    ``content_size`` (ancho y alto del Model Space en unidades CAD) evita recalcular la
+    caja cuando quien llama ya la tiene; si falta, se calcula aquí.
+
+    Con ``draw_svg=False`` no se dibuja ni se escribe el SVG (``svg_path`` queda en
+    None); los avisos, las entidades no visibles y las omitidas salen del dibujo del
+    PDF, que recorre las mismas entidades.
+    """
     source_path = Path(source)
     svg_destination = Path(svg_path)
     pdf_destination = Path(pdf_path)
@@ -326,11 +347,18 @@ def export_vector_outputs(
     fit_page = scale_factor is None
     settings = layout.Settings(scale=scale_factor or 1.0, fit_page=fit_page)
     if page_size_mm is not None and scale_factor is not None:
-        extents = bbox.extents(modelspace)
-        if not extents.has_data:
-            raise CadProcessingError("No se pudieron calcular extensiones para validar la escala")
-        content_width = float(extents.extmax.x - extents.extmin.x) * scale_factor
-        content_height = float(extents.extmax.y - extents.extmin.y) * scale_factor
+        if content_size is None:
+            extents = bbox.extents(modelspace)
+            if not extents.has_data:
+                raise CadProcessingError(
+                    "No se pudieron calcular extensiones para validar la escala"
+                )
+            content_size = (
+                float(extents.extmax.x - extents.extmin.x),
+                float(extents.extmax.y - extents.extmin.y),
+            )
+        content_width = content_size[0] * scale_factor
+        content_height = content_size[1] * scale_factor
         if (
             content_width + 2 * margin_mm > width + 1e-8
             or content_height + 2 * margin_mm > height + 1e-8
@@ -343,14 +371,28 @@ def export_vector_outputs(
     if hatch_threshold < 1:
         raise CadProcessingError("El umbral de rayados debe ser un entero positivo")
     try:
-        svg_content, svg_warnings, svg_omitted = _draw_to_svg(
-            document, page, settings, hatch_mode, hatch_threshold, omit_unsupported
-        )
-        svg_element_count = _validate_svg(svg_content)
+        svg_content, svg_warnings, svg_omitted, svg_element_count = None, (), None, 0
+        if draw_svg:
+            svg_content, svg_warnings, svg_omitted = _draw_to_svg(
+                document,
+                page,
+                settings,
+                hatch_mode,
+                hatch_threshold,
+                omit_unsupported,
+                suggest_solids_footprint,
+            )
+            svg_element_count = _validate_svg(svg_content)
         pdf_content, pdf_warnings, pdf_omitted = _draw_to_pdf(
-            document, page, settings, hatch_mode, hatch_threshold, omit_unsupported
+            document,
+            page,
+            settings,
+            hatch_mode,
+            hatch_threshold,
+            omit_unsupported,
+            suggest_solids_footprint,
         )
-        if svg_omitted != pdf_omitted:
+        if draw_svg and svg_omitted != pdf_omitted:
             raise CadProcessingError(
                 "El SVG y el PDF no coinciden en las entidades omitidas "
                 f"(SVG {svg_omitted}, PDF {pdf_omitted}); no se generaron archivos."
@@ -377,19 +419,20 @@ def export_vector_outputs(
         raise
     pdf_page_count, pdf_vector_count = _validate_pdf(pdf_content)
 
-    _write_atomically(svg_destination, svg_content.encode("utf-8"), overwrite)
+    if svg_content is not None:
+        _write_atomically(svg_destination, svg_content.encode("utf-8"), overwrite)
     try:
         _write_atomically(pdf_destination, pdf_content, overwrite)
     except CadProcessingError:
-        if not overwrite:
+        if not overwrite and svg_content is not None:
             svg_destination.unlink(missing_ok=True)
         raise
     return ExportReport(
-        svg_path=svg_destination,
+        svg_path=svg_destination if svg_content is not None else None,
         pdf_path=pdf_destination,
         svg_element_count=svg_element_count,
         pdf_page_count=pdf_page_count,
         pdf_vector_drawing_count=pdf_vector_count,
         warnings=tuple(dict.fromkeys((*svg_warnings, *pdf_warnings))),
-        omitted=svg_omitted,
+        omitted=pdf_omitted,
     )

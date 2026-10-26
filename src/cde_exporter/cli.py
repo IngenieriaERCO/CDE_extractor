@@ -284,7 +284,9 @@ def _run_cad(args: argparse.Namespace) -> int:
         return None
 
     try:
-        if args.cad_command in {"extract", "extract-block"}:
+        # extract-block configura las fuentes por su cuenta, tras validar el bloque y la
+        # escala y solo con el detalle extraído (ver run_extract_block).
+        if args.cad_command == "extract":
             restore_fonts = configure_fonts(
                 args.font_substitutions, args.font_folder, args.drawing, args.font_fallback
             )

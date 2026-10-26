@@ -10,6 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import ezdxf
+from ezdxf.document import Drawing
 from ezdxf.fonts import fonts
 from ezdxf.fonts.font_manager import get_ttf_font_face
 from fontTools.ttLib import TTFont
@@ -83,8 +84,8 @@ def _font_family(filename: str) -> str:
         logger.removeFilter(message_filter)
 
     return ""
-def _requests(source: str | Path) -> Counter[str]:
-    document = ezdxf.readfile(source)
+def _requests(source: str | Path | Drawing) -> Counter[str]:
+    document = source if isinstance(source, Drawing) else ezdxf.readfile(source)
     result: Counter[str] = Counter()
     for entity in document.entitydb.values():
         if entity is None or entity.dxftype() not in {"TEXT", "MTEXT", "ATTRIB", "DIMENSION"}:
@@ -130,10 +131,14 @@ def _requests(source: str | Path) -> Counter[str]:
 def configure_fonts(
     substitutions: str | None,
     folder: str | None,
-    source: str | Path | None = None,
+    source: str | Path | Drawing | None = None,
     fallback: str = "arial.ttf",
 ) -> Callable[[], None]:
-    """Genera sustituciones para solicitudes no resueltas y las instala en ezdxf."""
+    """Genera sustituciones para solicitudes no resueltas y las instala en ezdxf.
+
+    ``source`` puede ser una ruta o un documento ya leído (por ejemplo, el detalle
+    extraído), para no volver a leer el DXF.
+    """
     global _ACTIVE_SUBSTITUTIONS
     if folder:
         path = Path(folder).expanduser()

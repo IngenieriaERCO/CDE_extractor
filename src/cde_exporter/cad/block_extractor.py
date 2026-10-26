@@ -76,6 +76,39 @@ def _reference_rows(references: tuple[BlockReference, ...]) -> str:
     )
 
 
+# ezdxf.new() crea estos recursos; al copiar, el Loader conserva los del documento nuevo
+# y se pierden los valores del original con el mismo nombre (p. ej. la fuente de Standard).
+_DEFAULT_RESOURCES = (("styles", ("Standard",)), ("layers", ("0", "Defpoints")))
+# Variables de cabecera que lee el dibujo de ezdxf (además de $INSUNITS).
+_RENDER_HEADER = ("$LTSCALE", "$PDMODE", "$PDSIZE", "$MEASUREMENT")
+
+
+def _restore_default_resources(source: Drawing, target: Drawing) -> None:
+    """Copia al DXF extraído los valores originales de los recursos por defecto."""
+    for table_name, names in _DEFAULT_RESOURCES:
+        source_table, target_table = getattr(source, table_name), getattr(target, table_name)
+        for name in names:
+            if name not in source_table or name not in target_table:
+                continue
+            original, copy = source_table.get(name), target_table.get(name)
+            for key, value in original.dxfattribs(drop={"handle", "owner", "name"}).items():
+                # Los handles apuntan a objetos del original; un tipo de línea solo se
+                # asigna si existe en el extraído.
+                if key.endswith("_handle") or (key == "linetype" and value not in target.linetypes):
+                    continue
+                copy.dxf.set(key, value)
+            if table_name == "styles":
+                # Las fuentes TTF guardan su familia en XDATA (datos de fuente extendidos).
+                if original.has_extended_font_data:
+                    family, italic, bold = original.get_extended_font_data()
+                    copy.set_extended_font_data(family, italic=italic, bold=bold)
+                else:
+                    copy.discard_extended_font_data()
+    for name in _RENDER_HEADER:
+        if name in source.header:
+            target.header[name] = source.header[name]
+
+
 def extract_block_reference(
     source: str | Path,
     block_name: str,
@@ -83,11 +116,18 @@ def extract_block_reference(
     output: str | Path,
     *,
     overwrite: bool = False,
+    document: Drawing | None = None,
 ) -> BlockExtraction:
+    """Copia la referencia elegida y su bloque a un DXF nuevo.
+
+    ``document`` permite reutilizar el DXF de origen ya leído; no se modifica, porque
+    las entidades se copian a un documento nuevo.
+    """
     source_path, destination = Path(source), Path(output)
     if source_path.resolve() == destination.resolve():
         raise CadProcessingError("La extracción no puede sobrescribir el DXF original")
-    document = read_dxf(source_path)
+    if document is None:
+        document = read_dxf(source_path)
     if block_name not in document.blocks:
         raise CadProcessingError(
             f"No existe el bloque '{block_name}'.{_similar_names(document, block_name)}"
@@ -111,6 +151,7 @@ def extract_block_reference(
     loader.load_modelspace(filter_fn=lambda candidate: candidate is entity)
     loader.load_block_layout(document.blocks[block_name])
     loader.execute()
+    _restore_default_resources(document, target)
     target.header["$INSUNITS"] = int(document.header.get("$INSUNITS", 0) or 0)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists() and not overwrite:

@@ -41,6 +41,7 @@ from cde_exporter.cad.detail_model import (
 from cde_exporter.cad.detail_text import format_detail_report
 from cde_exporter.cad.exporters import export_vector_outputs
 from cde_exporter.cad.fidelity import print_fidelity_summary, write_fidelity_report
+from cde_exporter.cad.font_config import configure_fonts
 from cde_exporter.cad.models import CadProcessingError
 from cde_exporter.cad.pdf_checks import (
     PdfValidationError,
@@ -206,15 +207,22 @@ def _select_references(args, references: tuple[BlockReference, ...]) -> tuple[Bl
 
 
 def _fit_parameters(
-    args, source: Path, block_name: str, occurrence: int, extracted, bounds_document=None
+    args,
+    source: Path,
+    block_name: str,
+    occurrence: int,
+    extracted,
+    bounds_xyz=None,
+    source_document=None,
 ) -> tuple[float | None, tuple[float, float] | None, bool]:
+    """``bounds_xyz`` (caja ya calculada del documento que se dibuja) sustituye a la caja
+    de la referencia en el DXF de origen; se usa con --solids footprint."""
     if args.scale_factor is not None:
         return args.scale_factor, tuple(args.page_size_mm) if args.page_size_mm else None, False
-    if bounds_document is not None:
-        box = _effective_bounds_xyz(bounds_document)
-        bounds = None if box is None else (box[0][0], box[0][1], box[1][0], box[1][1])
+    if bounds_xyz is not None:
+        bounds = (bounds_xyz[0][0], bounds_xyz[0][1], bounds_xyz[1][0], bounds_xyz[1][1])
     else:
-        document = read_dxf(source)
+        document = source_document if source_document is not None else read_dxf(source)
         references = [
             entity
             for entity in document.modelspace()
@@ -245,14 +253,15 @@ def _fit_parameters(
     return scale, page, not verified
 
 
-def _nominal_scale_parameters(args, extracted, verification, denominator: float):
-    """Calcula dimensiones desde la caja efectiva; INSERT anidados están transformados."""
-    extents = bbox.extents(extracted.modelspace())
-    if not extents.has_data:
+def _nominal_scale_parameters(args, bounds_xyz, verification, denominator: float):
+    """Calcula dimensiones desde la caja efectiva; INSERT anidados están transformados.
+
+    ``bounds_xyz`` es la caja ya calculada con ``_effective_bounds_xyz`` sobre el
+    documento que se dibuja, para no recorrer la geometría otra vez.
+    """
+    if bounds_xyz is None:
         raise CadProcessingError("No se pudo calcular la caja geométrica del detalle")
-    box = tuple(float(value) for value in (
-        extents.extmin.x, extents.extmin.y, extents.extmax.x, extents.extmax.y
-    ))
+    box = (bounds_xyz[0][0], bounds_xyz[0][1], bounds_xyz[1][0], bounds_xyz[1][1])
     width, height = box[2] - box[0], box[3] - box[1]
     factor = verification.millimeters_per_unit / denominator
     content = width * factor, height * factor
@@ -374,6 +383,15 @@ def _publish_files(pairs: list[tuple[Path, Path]], overwrite: bool) -> None:
 
 
 def run_extract_block(args) -> int:
+    font_restorers: list = []
+    try:
+        return _run_extract_block(args, font_restorers)
+    finally:
+        for restore in font_restorers:
+            restore()
+
+
+def _run_extract_block(args, font_restorers: list) -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
@@ -477,9 +495,20 @@ def run_extract_block(args) -> int:
                 references.index(ref) + 1,
                 temp_dxf,
                 overwrite=True,
+                document=document,
             )
             extracted_document = read_dxf(temp_dxf)
-            effective_bounds_xyz = _effective_bounds_xyz(extracted_document)
+            if not font_restorers:
+                # Las fuentes se configuran ya validados el bloque y la escala, y solo con
+                # el detalle extraído; todas las referencias comparten la misma definición.
+                font_restorers.append(
+                    configure_fonts(
+                        args.font_substitutions,
+                        args.font_folder,
+                        extracted_document,
+                        args.font_fallback,
+                    )
+                )
             fidelity_report = write_fidelity_report(
                 temp_dxf,
                 temp_fidelity,
@@ -546,14 +575,24 @@ def run_extract_block(args) -> int:
                     ),
                 )
                 render_document = read_dxf(render_dxf)
-                effective_bounds_xyz = _effective_bounds_xyz(render_document)
                 result = dataclasses.replace(
                     result,
                     unbounded=_definition_has_unbounded(render_document, args.block_name, set()),
                 )
+            # La caja se calcula una sola vez, sobre lo que se dibuja, y se reutiliza para la
+            # sección C, la página y la comprobación de que el dibujo cabe en el exportador.
+            effective_bounds_xyz = _effective_bounds_xyz(render_document)
+            cad_size = (
+                None
+                if effective_bounds_xyz is None
+                else (
+                    effective_bounds_xyz[1][0] - effective_bounds_xyz[0][0],
+                    effective_bounds_xyz[1][1] - effective_bounds_xyz[0][1],
+                )
+            )
             if nominal_denominator is not None:
                 scale, geometry_page_size, geometry_box, content_size = _nominal_scale_parameters(
-                    args, render_document, verification, nominal_denominator
+                    args, effective_bounds_xyz, verification, nominal_denominator
                 )
                 page_size = geometry_page_size
                 geometry_note = (
@@ -573,7 +612,8 @@ def run_extract_block(args) -> int:
                     args.block_name,
                     ref.order,
                     result,
-                    bounds_document=render_document if footprints is not None else None,
+                    bounds_xyz=effective_bounds_xyz if footprints is not None else None,
+                    source_document=document,
                 )
                 verification = verify_drawing_units(
                     result.units_code,
@@ -651,6 +691,10 @@ def run_extract_block(args) -> int:
                     hatch_mode=args.hatch_mode,
                     hatch_threshold=args.hatch_threshold,
                     omit_unsupported=args.omit_unsupported,
+                    suggest_solids_footprint=args.solids is None,
+                    content_size=cad_size,
+                    # El SVG solo se publica con CDE_KEEP_INTERMEDIATES; si no, no se dibuja.
+                    draw_svg=keep,
                 )
             except CadProcessingError as error:
                 if footprints is None or not footprints.failures:

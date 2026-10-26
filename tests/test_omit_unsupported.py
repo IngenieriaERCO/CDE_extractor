@@ -90,7 +90,10 @@ def test_default_is_strict_and_suggests_the_option(tmp_path: Path, capsys) -> No
     captured = capsys.readouterr()
     message = captured.out + captured.err
     assert "3DSOLID: unsupported" in message
-    assert "Puede usar --omit-unsupported en cad extract-block" in message
+    assert (
+        "Puede usar en cad extract-block --solids footprint (dibujar los 3DSOLID como "
+        "huella 2D) o --omit-unsupported (omitirlos)."
+    ) in " ".join(message.split())
     assert _names(out) == []
 
 

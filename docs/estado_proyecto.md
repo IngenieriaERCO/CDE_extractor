@@ -1,6 +1,6 @@
 # Estado del proyecto — Exportador Vectorial
 
-Último hito: ajuste de la Fase 3 — entidades no visibles, omisión y huella de sólidos 3D (consulta git log para el hash). 245 pruebas pasando, ruff limpio.
+Último hito: ajuste de la Fase 3 — rendimiento y fidelidad de estilos en la extracción (consulta git log para el hash). 257 pruebas pasando, ruff limpio.
 
 ## Plan en 4 fases
 1. Selección de bloque + escala — hecha.
@@ -17,10 +17,19 @@ Hecho:
 - Entidades no visibles (capa apagada o congelada, o entidad invisible): ya no detienen la exportación; se cuentan y se avisan en "A tener en cuenta".
 - `--omit-unsupported`: las entidades que ezdxf omite por "unsupported" se cuentan por tipo y capa, salen como "omitidas" en el inventario y se avisan en el TXT y al final de la terminal. Por defecto sigue estricto.
 - `--solids footprint`: los 3DSOLID convertibles con `ezdxf.acis` se dibujan como su huella en planta (una vez por definición, en una copia de render); la caja, el contenido y la página salen de esa copia. Probado con Plano_completo: 17739 sólidos (162 distintos), error máximo 0,001 mm en el papel.
+- El error por 3DSOLID sin soporte sugiere `--solids footprint` (dibujarlos como huella 2D) o `--omit-unsupported` (omitirlos).
+- Rendimiento (Plano_completo: de 166 s a ~85 s; Perfil_K0010: 18,5 s):
+  - El DXF de origen se lee una sola vez (antes, tres).
+  - Fuentes: se configuran después de validar el bloque y la escala, y solo con el detalle extraído (menos ruido en la terminal; terminal e informe cuentan lo mismo).
+  - La caja geométrica se calcula una vez y se reutiliza (sección C, página y comprobación del exportador).
+  - El SVG solo se dibuja con `CDE_KEEP_INTERMEDIATES`; sin él, los avisos salen del dibujo del PDF y el TXT queda igual.
+- Extracción fiel a los recursos por defecto: el estilo de texto `Standard`, las capas `0` y `Defpoints` y las variables de cabecera que lee el dibujo (`$LTSCALE`, `$PDMODE`, `$PDSIZE`, `$MEASUREMENT`) toman los valores del original. Antes, `Standard` salía con la fuente `txt` de ezdxf en lugar de la del dibujo (p. ej. `simplex.shx`).
+
+Opcional (medido; hoy no compensa):
+- Paso 2, parche a pymupdf: `Shape.finish` copia todo el contenido de la página en cada trazo (coste cuadrático). Ahorraría ~25 s en Plano_completo, pero en un detalle como Perfil_K0010 el PDF cuesta 1,1 s de 18,5 s, y el parche depende de una parte interna de pymupdf. Hacerlo solo si los planos grandes pasan a ser habituales; también se puede avisar del defecto a PyMuPDF.
+- Paso 5, evitar relecturas de los DXF temporales: ~10 s en Plano_completo y 0,1 s en Perfil_K0010; el tiempo que queda es sobre todo leer el DXF de origen, que ya ocurre una sola vez.
 
 Pendiente:
-- Fuentes: procesar solo el detalle (hoy se recorre todo el dibujo antes de elegir bloque y se imprime mucho ruido); unificar criterio de "uso de fuente" (terminal 112 vs informe 82).
-- Rendimiento: leer el DXF una sola vez y no dibujar el SVG si no se pide (Plano_completo tarda 145 s).
 - Inventario de entidades no visibles: hoy salen como "conservadas" en la sección E.
 - MULTILEADER marcados como "no soportados" en el inventario aunque se dibujan con su gráfico proxy.
 - Heurística de unidades con falsos positivos (INSERT con escala 0.001 y coordenadas georreferenciadas de millones).
