@@ -45,6 +45,80 @@ from cde_exporter.cad.scale import (
 )
 
 
+def _is_interactive() -> bool:
+    """Indica si hay una persona en la terminal que pueda responder una pregunta."""
+    stdin = sys.stdin
+    return stdin is not None and stdin.isatty()
+
+
+def _prompt_nominal_scale(args, document, references, selected) -> float:
+    """Pide la escala nominal de salida una vez identificada la referencia."""
+    ref = selected[0]
+    block_definition = document.blocks[args.block_name]
+    block_units_code = int(block_definition.block_record.dxf.get("units", 0) or 0)
+    block_extents = bbox.extents(block_definition)
+    max_block_dimension = (
+        max(
+            abs(float(block_extents.extmax.x - block_extents.extmin.x)),
+            abs(float(block_extents.extmax.y - block_extents.extmin.y)),
+            abs(float(block_extents.extmax.z - block_extents.extmin.z)),
+        )
+        if block_extents.has_data
+        else None
+    )
+    verification = verify_drawing_units(
+        int(document.header.get("$INSUNITS", 0) or 0),
+        block_units_code,
+        max_block_dimension=max_block_dimension,
+        insert_scale=(ref.xscale, ref.yscale, ref.zscale),
+        insert_position=ref.insert,
+        override=args.units,
+    )
+    print(
+        f"Referencia: ocurrencia {ref.order} de {len(references)} | handle "
+        f"{ref.handle or '(sin handle)'} | capa {ref.layer}"
+    )
+    if len(selected) > 1:
+        print(f"La misma escala se aplicará a las {len(selected)} referencias seleccionadas.")
+    print(f"Unidades: {verification.unit_name} ({verification.status})")
+    if not verification.verified:
+        print(
+            "ADVERTENCIA: unidades no verificadas; la escala física NO quedará garantizada. "
+            "Puede indicar las unidades con --units (mm, cm, m, in, ft).",
+            file=sys.stderr,
+        )
+    entities = [
+        entity
+        for entity in document.modelspace()
+        if entity.dxftype() == "INSERT" and entity.dxf.name == args.block_name
+    ]
+    extents = bbox.extents([entities[ref.order - 1]])
+    if extents.has_data:
+        width = float(extents.extmax.x - extents.extmin.x)
+        height = float(extents.extmax.y - extents.extmin.y)
+        print(f"Tamaño del detalle: {width:.3f} × {height:.3f} unidades CAD")
+        factor = verification.millimeters_per_unit
+        examples = "; ".join(
+            f"1:{n} = {width * factor / n:.1f} × {height * factor / n:.1f} mm"
+            for n in (20, 50, 100, 500)
+        )
+        print(f"Medida física del detalle según la escala: {examples}")
+    while True:
+        try:
+            answer = input(
+                "Escala nominal de salida (formato 1:N, por ejemplo 1:20, 1:50, 1:100): "
+            )
+        except EOFError as error:
+            raise CadProcessingError("No se indicó la escala nominal; use --scale 1:N.") from error
+        try:
+            return parse_nominal_scale(answer.strip())
+        except ValueError as error:
+            print(
+                f"{error}. Escriba la escala como 1:N, con N mayor que cero "
+                "(por ejemplo 1:50)."
+            )
+
+
 def run_blocks(args) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -310,6 +384,15 @@ def run_extract_block(args) -> int:
             f"El bloque '{args.block_name}' no tiene referencias en modelspace"
         )
     selected = _select_references(args, references)
+    if nominal_denominator is None and args.scale_factor is None:
+        if _is_interactive():
+            nominal_denominator = _prompt_nominal_scale(args, document, references, selected)
+        else:
+            print(
+                "Aviso: no se indicó --scale; el PDF no tendrá una escala nominal. "
+                "Use --scale 1:N para fijarla.",
+                file=sys.stderr,
+            )
     block_definition = document.blocks[args.block_name]
     block_definition_handle = str(block_definition.block_record.dxf.handle)
     if args.all:
