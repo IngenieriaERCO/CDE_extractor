@@ -262,6 +262,170 @@ def finalize_detail(detail: ExtractedDetail, result: ExtractionResult) -> Extrac
     return dataclasses.replace(detail, result=result)
 
 
+OMITTED_REASON = "Omitida por --omit-unsupported: ezdxf no puede dibujar este tipo."
+_OMITTED_GROUP_LIMIT = 10
+
+
+def omitted_entities_message(omitted: tuple[tuple[str, str, int], ...]) -> str:
+    """Resume las entidades omitidas por tipo y capa, con concordancia de número."""
+    total = sum(count for _type, _layer, count in omitted)
+    groups = [
+        f"{entity_type} en capa {layer} ({count})"
+        for entity_type, layer, count in omitted[:_OMITTED_GROUP_LIMIT]
+    ]
+    hidden = len(omitted) - _OMITTED_GROUP_LIMIT
+    if hidden > 0:
+        groups.append(f"… y {hidden} {'grupo' if hidden == 1 else 'grupos'} más")
+    if total == 1:
+        head, tail = "Se omitió 1 entidad no soportada", "no aparece en el PDF"
+    else:
+        head, tail = f"Se omitieron {total} entidades no soportadas", "no aparecen en el PDF"
+    return f"{head} (--omit-unsupported): {'; '.join(groups)}; {tail}."
+
+
+def mark_omitted_entities(
+    detail: ExtractedDetail, omitted: tuple[tuple[str, str, int], ...]
+) -> ExtractedDetail:
+    """Marca como ``omitted`` las no soportadas que el renderizador omitió.
+
+    ``omitted`` contiene (tipo, capa, cantidad) contados por el renderizador. Solo
+    se convierten entidades que el modelo ya clasificó como no soportadas; si el
+    renderizador informa más de las que hay, se añade un aviso de conciliación.
+    """
+    if not isinstance(detail, ExtractedDetail):
+        raise TypeError("detail debe ser un ExtractedDetail")
+    if detail.result is not None:
+        raise ValueError("El detalle ya fue finalizado")
+    if not omitted:
+        return detail
+    requested: dict[tuple[str, str], int] = {}
+    for entity_type, layer, count in omitted:
+        requested[(entity_type, layer)] = requested.get((entity_type, layer), 0) + count
+    converted: dict[tuple[str, str], int] = {}
+    dispositions = []
+    for item in detail.dispositions:
+        key = (item.entity_type, item.layer)
+        if item.status is EntityStatus.UNSUPPORTED and converted.get(key, 0) < requested.get(
+            key, 0
+        ):
+            converted[key] = converted.get(key, 0) + 1
+            item = dataclasses.replace(item, status=EntityStatus.OMITTED, reason=OMITTED_REASON)
+        dispositions.append(item)
+    inventory = _move_unsupported(detail.inventory, converted, EntityStatus.OMITTED)
+    warnings = [
+        ExtractionWarning(
+            "UNSUPPORTED_OMITTED", Severity.WARNING, omitted_entities_message(omitted)
+        )
+    ]
+    for (entity_type, layer), count in sorted(requested.items()):
+        missing = count - converted.get((entity_type, layer), 0)
+        if missing > 0:
+            warnings.append(
+                ExtractionWarning(
+                    "FIDELITY_RECONCILIATION",
+                    Severity.WARNING,
+                    f"No coincide la conciliación de omitidas ({entity_type} en capa {layer}: "
+                    f"renderizador {count}, modelo {count - missing} no soportadas).",
+                )
+            )
+    return dataclasses.replace(
+        detail,
+        inventory=tuple(inventory),
+        dispositions=tuple(dispositions),
+        warnings=(*detail.warnings, *warnings),
+    )
+
+
+def _move_unsupported(
+    inventory: tuple[EntityCount, ...], moved: dict[tuple[str, str], int], status: EntityStatus
+) -> list[EntityCount]:
+    """Pasa ``moved[(tipo, capa)]`` entidades de las filas no soportadas a ``status``."""
+    result = []
+    for row in inventory:
+        count = moved.get((row.entity_type, row.layer), 0)
+        if row.status is not EntityStatus.UNSUPPORTED or not count:
+            result.append(row)
+            continue
+        if row.count > count:
+            result.append(dataclasses.replace(row, count=row.count - count))
+        result.append(dataclasses.replace(row, status=status, count=count))
+    result.sort(key=lambda item: (item.entity_type, item.layer, item.status.value))
+    return result
+
+
+FOOTPRINT_REASON = "3DSOLID dibujado como huella 2D"
+
+
+def mark_footprint_solids(
+    detail: ExtractedDetail,
+    converted_handles: tuple[str, ...],
+    failure_reasons: tuple[tuple[str, int], ...] = (),
+    max_error_mm: float = 0.0,
+) -> ExtractedDetail:
+    """Marca como ``transformed`` los 3DSOLID sustituidos por su huella (--solids footprint).
+
+    Se relacionan por handle: son entidades de la definición del bloque, y cada copia
+    anidada de esa definición tiene su propia disposición con el mismo handle.
+    ``failure_reasons`` agrupa (motivo, cantidad de definiciones) de los no convertidos.
+    """
+    if not isinstance(detail, ExtractedDetail):
+        raise TypeError("detail debe ser un ExtractedDetail")
+    if detail.result is not None:
+        raise ValueError("El detalle ya fue finalizado")
+    _require_finite("max_error_mm", max_error_mm)
+    handles = set(converted_handles)
+    moved: dict[tuple[str, str], int] = {}
+    dispositions = []
+    for item in detail.dispositions:
+        if (
+            item.entity_type == "3DSOLID"
+            and item.status is EntityStatus.UNSUPPORTED
+            and item.handle in handles
+        ):
+            key = (item.entity_type, item.layer)
+            moved[key] = moved.get(key, 0) + 1
+            item = dataclasses.replace(
+                item, status=EntityStatus.TRANSFORMED, reason=FOOTPRINT_REASON
+            )
+        dispositions.append(item)
+    warnings = []
+    total = sum(moved.values())
+    if total:
+        drawn = "Se dibujó 1 3DSOLID" if total == 1 else f"Se dibujaron {total} 3DSOLID"
+        distinct = "1 sólido distinto" if len(handles) == 1 else f"{len(handles)} sólidos distintos"
+        warnings.append(
+            ExtractionWarning(
+                "SOLIDS_AS_FOOTPRINT",
+                Severity.WARNING,
+                f"{drawn} como huella 2D (proyección en planta; {distinct}); "
+                f"error máximo estimado {max_error_mm:.3f} mm en el papel.",
+            )
+        )
+    if failure_reasons:
+        count = sum(amount for _reason, amount in failure_reasons)
+        reasons = "; ".join(f"{reason} ({amount})" for reason, amount in failure_reasons)
+        head = (
+            "1 sólido distinto no se pudo"
+            if count == 1
+            else f"{count} sólidos distintos no se pudieron"
+        )
+        warnings.append(
+            ExtractionWarning(
+                "SOLIDS_NOT_CONVERTED",
+                Severity.WARNING,
+                f"{head} convertir en huella 2D: {reasons}.",
+            )
+        )
+    if not total and not warnings:
+        return detail
+    return dataclasses.replace(
+        detail,
+        inventory=tuple(_move_unsupported(detail.inventory, moved, EntityStatus.TRANSFORMED)),
+        dispositions=tuple(dispositions),
+        warnings=(*detail.warnings, *warnings),
+    )
+
+
 class SelectionMethod(StrEnum):
     AUTOMATIC = "automatic"
     OCCURRENCE = "occurrence"

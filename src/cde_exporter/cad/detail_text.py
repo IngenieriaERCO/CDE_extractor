@@ -38,6 +38,8 @@ _ADVICE = {
     "ENTITIES_WITHOUT_BOUNDS": "Revise que no falte contenido en los bordes del PDF.",
     "UNITS_UNVERIFIED": _UNITS_ADVICE,
     "UNITS_SUSPECT": _UNITS_ADVICE,
+    "UNSUPPORTED_OMITTED": "Revise en el CAD si esa geometría es necesaria en el PDF.",
+    "SOLIDS_AS_FOOTPRINT": "La huella muestra la planta del sólido, no su volumen ni su altura.",
 }
 
 
@@ -209,8 +211,13 @@ def _format_inventory(detail: ExtractedDetail) -> list[str]:
     lines += _line("Total de entidades", str(sum(totals.values())))
     for status in EntityStatus:
         value = str(totals[status])
-        if status is EntityStatus.OMITTED:
-            value += "; toda omisión del renderizador detiene la extracción"
+        if status is EntityStatus.OMITTED and totals[status]:
+            value += "; omitidas por --omit-unsupported (ezdxf no puede dibujarlas)"
+        elif status is EntityStatus.OMITTED:
+            value += (
+                "; toda omisión del renderizador detiene la extracción, "
+                "salvo entidades no visibles"
+            )
         lines += _line(_STATUS_NAMES[status].capitalize(), value)
     lines += ["Tipo | Capa | Estado | Cantidad"]
     for row in sorted(

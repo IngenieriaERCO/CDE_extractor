@@ -149,9 +149,11 @@ def build_extracted_detail(
     ``unsupported`` usa las mismas reglas y motivos que ``inspect_fidelity``;
     ``simplified`` refleja las políticas de HATCH y sus umbrales; ``transformed``
     marca texto cuya fuente figura como sustituta en el informe de fidelidad.
-    El resto queda ``conserved``. ``omitted`` se reserva para omisiones explícitas
-    del renderizador; actualmente esas omisiones abortan la exportación y no llegan
-    a producir un detalle serializado.
+    El resto queda ``conserved``. ``omitted`` no se asigna aquí: tras exportar con
+    --omit-unsupported, ``mark_omitted_entities`` convierte en ``omitted`` las no
+    soportadas que el renderizador omitió; sin esa opción, toda omisión aborta la
+    exportación. Las entidades no visibles (capa apagada o congelada) no abortan:
+    el exportador las cuenta y las informa como aviso.
     """
     selected_reference = SelectedReference(
         occurrence=reference.order,

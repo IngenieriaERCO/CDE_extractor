@@ -8,6 +8,7 @@ import math
 import os
 import uuid
 import xml.etree.ElementTree as ET
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,15 +26,30 @@ from cde_exporter.cad.reader import ensure_layer_table_entries, read_dxf
 
 
 class _StrictFrontend(Frontend):
-    """Registra las entidades que ezdxf omite en el renderizado."""
+    """Registra las entidades que ezdxf omite en el renderizado.
 
-    def __init__(self, *args, **kwargs) -> None:
+    Las omitidas por "invisible" (capa apagada o congelada, o entidad invisible)
+    solo se cuentan. Con ``omit_unsupported`` las omitidas por "unsupported" se
+    cuentan por (tipo, capa). Cualquier otra omisión se guarda en ``skipped``.
+    """
+
+    def __init__(self, *args, omit_unsupported: bool = False, **kwargs) -> None:
         self.skipped: list[str] = []
+        self.invisible = 0
+        self.omit_unsupported = omit_unsupported
+        self.omitted: Counter[tuple[str, str]] = Counter()
         self.messages: list[str] = []
         self.auto_hatch_threshold: int | None = None
         super().__init__(*args, **kwargs)
 
     def skip_entity(self, entity, msg: str) -> None:
+        if msg == "invisible":
+            self.invisible += 1
+            return
+        if msg == "unsupported" and self.omit_unsupported:
+            layer = str(entity.dxf.get("layer", "0") or "0")
+            self.omitted[(entity.dxftype(), layer)] += 1
+            return
         self.skipped.append(f"{entity.dxftype()}: {msg}")
 
     def log_message(self, message: str) -> None:
@@ -74,6 +90,45 @@ def _estimate_hatch_segments(entity) -> int:
     return estimate
 
 
+def _invisible_warning(count: int) -> str:
+    if count == 1:
+        return (
+            "Se ignoró 1 entidad no visible (capa apagada o congelada, o entidad marcada "
+            "como invisible); no aparece en el PDF porque tampoco se ve en el CAD."
+        )
+    return (
+        f"Se ignoraron {count} entidades no visibles (capa apagada o congelada, o entidades "
+        "marcadas como invisibles); no aparecen en el PDF porque tampoco se ven en el CAD."
+    )
+
+
+def _frontend_messages(frontend: _StrictFrontend) -> tuple[str, ...]:
+    if frontend.invisible:
+        return (*frontend.messages, _invisible_warning(frontend.invisible))
+    return tuple(frontend.messages)
+
+
+def _raise_if_skipped(frontend: _StrictFrontend, stage: str) -> None:
+    if not frontend.skipped:
+        return
+    details = ", ".join(frontend.skipped[:8])
+    message = f"La exportación {stage} detuvo la operación porque ezdxf omite entidades: {details}"
+    if not frontend.omit_unsupported and any(
+        item.endswith(": unsupported") for item in frontend.skipped
+    ):
+        message += (
+            ". Puede usar --omit-unsupported en cad extract-block para continuar sin ellas."
+        )
+    raise CadProcessingError(message)
+
+
+def _omitted_rows(frontend: _StrictFrontend) -> tuple[tuple[str, str, int], ...]:
+    return tuple(
+        (entity_type, layer, count)
+        for (entity_type, layer), count in sorted(frontend.omitted.items())
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ExportReport:
     svg_path: Path
@@ -82,6 +137,7 @@ class ExportReport:
     pdf_page_count: int
     pdf_vector_drawing_count: int
     warnings: tuple[str, ...]
+    omitted: tuple[tuple[str, str, int], ...] = ()
 
 
 def _draw_to_svg(
@@ -90,7 +146,8 @@ def _draw_to_svg(
     settings: layout.Settings,
     hatch_mode: str = "normal",
     hatch_threshold: int = 50000,
-) -> tuple[str, tuple[str, ...]]:
+    omit_unsupported: bool = False,
+) -> tuple[str, tuple[str, ...], tuple[tuple[str, str, int], ...]]:
     backend = svg_backend.SVGBackend()
     layout_properties = LayoutProperties.from_layout(document.modelspace())
     layout_properties.set_colors("#ffffff")
@@ -101,6 +158,7 @@ def _draw_to_svg(
             background_policy=config.BackgroundPolicy.WHITE,
             hatch_policy=_hatch_policy(hatch_mode),
         ),
+        omit_unsupported=omit_unsupported,
     )
     frontend.auto_hatch_threshold = hatch_threshold if hatch_mode == "auto" else None
     output = io.StringIO()
@@ -111,12 +169,12 @@ def _draw_to_svg(
             "Falló la etapa de dibujo SVG: ezdxf agotó el tiempo al dibujar un rayado. "
             "Reintenta con --hatch-mode outline."
         )
-    if frontend.skipped:
-        details = ", ".join(frontend.skipped[:8])
-        raise CadProcessingError(
-            f"La exportación SVG detuvo la operación porque ezdxf omite entidades: {details}"
-        )
-    return backend.get_string(page, settings=settings), tuple(frontend.messages)
+    _raise_if_skipped(frontend, "SVG")
+    return (
+        backend.get_string(page, settings=settings),
+        _frontend_messages(frontend),
+        _omitted_rows(frontend),
+    )
 
 
 def _draw_to_pdf(
@@ -125,7 +183,8 @@ def _draw_to_pdf(
     settings: layout.Settings,
     hatch_mode: str = "normal",
     hatch_threshold: int = 50000,
-) -> tuple[bytes, tuple[str, ...]]:
+    omit_unsupported: bool = False,
+) -> tuple[bytes, tuple[str, ...], tuple[tuple[str, str, int], ...]]:
     backend = pdf_backend.PyMuPdfBackend()
     layout_properties = LayoutProperties.from_layout(document.modelspace())
     layout_properties.set_colors("#ffffff")
@@ -136,6 +195,7 @@ def _draw_to_pdf(
             background_policy=config.BackgroundPolicy.WHITE,
             hatch_policy=_hatch_policy(hatch_mode),
         ),
+        omit_unsupported=omit_unsupported,
     )
     frontend.auto_hatch_threshold = hatch_threshold if hatch_mode == "auto" else None
     output = io.StringIO()
@@ -146,12 +206,12 @@ def _draw_to_pdf(
             "Falló la etapa de dibujo PDF: ezdxf agotó el tiempo al dibujar un rayado. "
             "Reintenta con --hatch-mode outline."
         )
-    if frontend.skipped:
-        details = ", ".join(frontend.skipped[:8])
-        raise CadProcessingError(
-            f"La exportación PDF detuvo la operación porque ezdxf omite entidades: {details}"
-        )
-    return backend.get_pdf_bytes(page, settings=settings), tuple(frontend.messages)
+    _raise_if_skipped(frontend, "PDF")
+    return (
+        backend.get_pdf_bytes(page, settings=settings),
+        _frontend_messages(frontend),
+        _omitted_rows(frontend),
+    )
 
 
 def _hatch_policy(mode: str) -> config.HatchPolicy:
@@ -225,6 +285,7 @@ def export_vector_outputs(
     exact_page_size: bool = False,
     hatch_mode: str = "normal",
     hatch_threshold: int = 50000,
+    omit_unsupported: bool = False,
 ) -> ExportReport:
     """Crea SVG/PDF vectoriales ajustados o con escala y página explícitas."""
     source_path = Path(source)
@@ -282,13 +343,18 @@ def export_vector_outputs(
     if hatch_threshold < 1:
         raise CadProcessingError("El umbral de rayados debe ser un entero positivo")
     try:
-        svg_content, svg_warnings = _draw_to_svg(
-            document, page, settings, hatch_mode, hatch_threshold
+        svg_content, svg_warnings, svg_omitted = _draw_to_svg(
+            document, page, settings, hatch_mode, hatch_threshold, omit_unsupported
         )
         svg_element_count = _validate_svg(svg_content)
-        pdf_content, pdf_warnings = _draw_to_pdf(
-            document, page, settings, hatch_mode, hatch_threshold
+        pdf_content, pdf_warnings, pdf_omitted = _draw_to_pdf(
+            document, page, settings, hatch_mode, hatch_threshold, omit_unsupported
         )
+        if svg_omitted != pdf_omitted:
+            raise CadProcessingError(
+                "El SVG y el PDF no coinciden en las entidades omitidas "
+                f"(SVG {svg_omitted}, PDF {pdf_omitted}); no se generaron archivos."
+            )
         if exact_page_size and page_size_mm is not None:
             with pymupdf.open(stream=pdf_content, filetype="pdf") as sized_pdf:
                 pdf_page = sized_pdf[0]
@@ -325,4 +391,5 @@ def export_vector_outputs(
         pdf_page_count=pdf_page_count,
         pdf_vector_drawing_count=pdf_vector_count,
         warnings=tuple(dict.fromkeys((*svg_warnings, *pdf_warnings))),
+        omitted=svg_omitted,
     )

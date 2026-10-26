@@ -9,7 +9,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - Lee cada archivo antes de editarlo. Pide confirmación antes de cambios grandes.
 
 ## Verificación (siempre antes de dar algo por terminado)
-- `python -m pytest -q --tb=short` (referencia: 211 pruebas pasando).
+- `python -m pytest -q --tb=short` (referencia: 245 pruebas pasando).
 - `ruff check src tests`.
 - NO ejecutar `ruff format` sobre archivos existentes (solo en archivos nuevos).
 - NO usar `pytest -s` (las pruebas del aviso de escala esperarían entrada).
@@ -31,10 +31,16 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - La escala se pide al usuario tras identificar el bloque (`--scale 1:N` o pregunta interactiva). Sin terminal y sin `--scale`: aviso.
 - Factor de salida = mm por unidad CAD × escala del INSERT ÷ N. No afirmar escala física si las unidades no están verificadas.
 - `detail_model.py` solo usa la biblioteca estándar (sin ezdxf).
-- Variable de desarrollo `CDE_KEEP_INTERMEDIATES=1` conserva `.dxf` y `.svg`.
+- Variable de desarrollo `CDE_KEEP_INTERMEDIATES=1` conserva `.dxf` y `.svg` (con `--solids footprint`, el `.dxf` es la copia de render).
+
+## Reglas de uso (qué sale en el PDF)
+- El PDF contiene solo lo que está dentro del bloque elegido.
+- Lo apagado o congelado en el CAD no sale (se cuenta y se avisa en el TXT).
+- Los objetos de Civil 3D requieren `EXPORTTOAUTOCAD` antes de guardar el DXF.
+- Los sólidos 3D (3DSOLID) se dibujan como huella en planta con `--solids footprint` o se omiten con `--omit-unsupported`; sin ninguna de las dos opciones, la extracción se detiene.
 
 ## Arquitectura (src/cde_exporter/cad)
-`detail_model.py` (modelo v2), `detail_builder.py`, `detail_extras.py`, `detail_text.py` (TXT), `pdf_checks.py`, `block_commands.py` (flujo), `scale.py`, `fidelity.py`, `exporters.py`, `block_catalog.py`, `block_extractor.py`.
+`detail_model.py` (modelo v2), `detail_builder.py`, `detail_extras.py`, `detail_text.py` (TXT), `pdf_checks.py`, `block_commands.py` (flujo), `scale.py`, `fidelity.py`, `exporters.py`, `solids.py` (huella de 3DSOLID), `block_catalog.py`, `block_extractor.py`.
 
 ## Estado y pendientes
 Ver `docs/estado_proyecto.md`.

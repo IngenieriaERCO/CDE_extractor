@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shutil
@@ -17,6 +18,7 @@ from cde_exporter import __version__
 from cde_exporter.cad.block_catalog import format_block_catalog, list_referenced_blocks
 from cde_exporter.cad.block_extractor import (
     BlockReference,
+    _definition_has_unbounded,
     extract_block_reference,
     references_for_block,
 )
@@ -27,7 +29,15 @@ from cde_exporter.cad.detail_extras import (
     nested_blocks,
     transformation_steps,
 )
-from cde_exporter.cad.detail_model import SelectionMethod, detail_to_dict, finalize_detail
+from cde_exporter.cad.detail_model import (
+    FOOTPRINT_REASON,
+    EntityStatus,
+    SelectionMethod,
+    detail_to_dict,
+    finalize_detail,
+    mark_footprint_solids,
+    mark_omitted_entities,
+)
 from cde_exporter.cad.detail_text import format_detail_report
 from cde_exporter.cad.exporters import export_vector_outputs
 from cde_exporter.cad.fidelity import print_fidelity_summary, write_fidelity_report
@@ -43,6 +53,7 @@ from cde_exporter.cad.scale import (
     parse_nominal_scale,
     verify_drawing_units,
 )
+from cde_exporter.cad.solids import FootprintResult, footprint_document
 
 
 def _is_interactive() -> bool:
@@ -195,18 +206,21 @@ def _select_references(args, references: tuple[BlockReference, ...]) -> tuple[Bl
 
 
 def _fit_parameters(
-    args, source: Path, block_name: str, occurrence: int, extracted
+    args, source: Path, block_name: str, occurrence: int, extracted, bounds_document=None
 ) -> tuple[float | None, tuple[float, float] | None, bool]:
     if args.scale_factor is not None:
         return args.scale_factor, tuple(args.page_size_mm) if args.page_size_mm else None, False
-    document = read_dxf(source)
-    references = [
-        entity
-        for entity in document.modelspace()
-        if entity.dxftype() == "INSERT" and entity.dxf.name == block_name
-    ]
-    reference = references[occurrence - 1]
-    bounds = entity_bounds(reference)
+    if bounds_document is not None:
+        box = _effective_bounds_xyz(bounds_document)
+        bounds = None if box is None else (box[0][0], box[0][1], box[1][0], box[1][1])
+    else:
+        document = read_dxf(source)
+        references = [
+            entity
+            for entity in document.modelspace()
+            if entity.dxftype() == "INSERT" and entity.dxf.name == block_name
+        ]
+        bounds = entity_bounds(references[occurrence - 1])
     if bounds is None:
         return None, tuple(args.page_size_mm) if args.page_size_mm else None, True
     width, height = max(bounds[2] - bounds[0], 1e-9), max(bounds[3] - bounds[1], 1e-9)
@@ -515,9 +529,31 @@ def run_extract_block(args) -> int:
             print(transform)
             if scale_note:
                 print(scale_note)
+            # Con --solids footprint se dibuja una copia de render; la caja, el contenido
+            # y la página salen de ella para coincidir con el PDF. El inventario sigue
+            # usando el DXF extraído, donde los 3DSOLID conservan su tipo y su handle.
+            render_dxf, render_document, footprints = temp_dxf, extracted_document, None
+            if args.solids == "footprint":
+                render_dxf = work / f"{order_prefix.name}_render.dxf"
+                footprints = footprint_document(
+                    temp_dxf,
+                    render_dxf,
+                    millimeters_per_unit_on_paper=_paper_factor(
+                        args,
+                        result,
+                        nominal_denominator,
+                        verification if nominal_denominator is not None else None,
+                    ),
+                )
+                render_document = read_dxf(render_dxf)
+                effective_bounds_xyz = _effective_bounds_xyz(render_document)
+                result = dataclasses.replace(
+                    result,
+                    unbounded=_definition_has_unbounded(render_document, args.block_name, set()),
+                )
             if nominal_denominator is not None:
                 scale, geometry_page_size, geometry_box, content_size = _nominal_scale_parameters(
-                    args, extracted_document, verification, nominal_denominator
+                    args, render_document, verification, nominal_denominator
                 )
                 page_size = geometry_page_size
                 geometry_note = (
@@ -532,7 +568,12 @@ def run_extract_block(args) -> int:
                 unknown_units = not verification.verified
             else:
                 scale, page_size, unknown_units = _fit_parameters(
-                    args, source, args.block_name, ref.order, result
+                    args,
+                    source,
+                    args.block_name,
+                    ref.order,
+                    result,
+                    bounds_document=render_document if footprints is not None else None,
                 )
                 verification = verify_drawing_units(
                     result.units_code,
@@ -570,6 +611,13 @@ def run_extract_block(args) -> int:
                 page_size_mm=geometry_page_size,
                 margin_mm=args.margin_mm if nominal_denominator is not None else None,
             )
+            if footprints is not None:
+                detail = mark_footprint_solids(
+                    detail,
+                    footprints.converted,
+                    footprints.failure_reasons,
+                    footprints.max_error_mm,
+                )
             if result.unbounded:
                 print(
                     "Aviso: el bloque contiene entidades sin caja; la página se ajusta a la "
@@ -590,18 +638,28 @@ def run_extract_block(args) -> int:
                 )
             if args.hatch_mode != "normal":
                 print(f"Rayados simplificados: modo --hatch-mode {args.hatch_mode}.")
-            export_report = export_vector_outputs(
-                temp_dxf,
-                temp_svg,
-                temp_pdf,
-                overwrite=True,
-                page_size_mm=page_size,
-                margin_mm=args.margin_mm,
-                scale_factor=scale,
-                exact_page_size=nominal_denominator is not None,
-                hatch_mode=args.hatch_mode,
-                hatch_threshold=args.hatch_threshold,
-            )
+            try:
+                export_report = export_vector_outputs(
+                    render_dxf,
+                    temp_svg,
+                    temp_pdf,
+                    overwrite=True,
+                    page_size_mm=page_size,
+                    margin_mm=args.margin_mm,
+                    scale_factor=scale,
+                    exact_page_size=nominal_denominator is not None,
+                    hatch_mode=args.hatch_mode,
+                    hatch_threshold=args.hatch_threshold,
+                    omit_unsupported=args.omit_unsupported,
+                )
+            except CadProcessingError as error:
+                if footprints is None or not footprints.failures:
+                    raise
+                raise CadProcessingError(
+                    f"{error} 3DSOLID que no se pudieron convertir en huella: "
+                    f"{_failure_text(footprints)}."
+                ) from error
+            detail = mark_omitted_entities(detail, export_report.omitted)
             checks = validate_output_pdf(temp_pdf, geometry_page_size)
             try:
                 extraction_result = build_extraction_result(
@@ -619,7 +677,7 @@ def run_extract_block(args) -> int:
             temp_report.write_text(format_detail_report(detail), encoding="utf-8", newline="\n")
             pairs = [(temp_pdf, pdf_destination), (temp_report, txt_destination)]
             if keep:
-                pairs += [(temp_dxf, dxf_output), (temp_svg, svg_output)]
+                pairs += [(render_dxf, dxf_output), (temp_svg, svg_output)]
             if detail_json_output is not None:
                 try:
                     with temp_json.open("w", encoding="utf-8", newline="\n") as stream:
@@ -651,4 +709,55 @@ def run_extract_block(args) -> int:
             print(f"Creado: {svg_output}")
         if detail_json_output is not None:
             print(f"JSON del detalle creado: {detail_json_output}")
+        if footprints is not None:
+            drawn = sum(
+                1
+                for item in detail.dispositions
+                if item.status is EntityStatus.TRANSFORMED and item.reason == FOOTPRINT_REASON
+            )
+            distinct = len(footprints.converted)
+            distinct_text = "sólido distinto" if distinct == 1 else "sólidos distintos"
+            print(
+                f"Huellas: {drawn} 3DSOLID {'dibujado' if drawn == 1 else 'dibujados'} como "
+                f"huella 2D ({distinct} {distinct_text})."
+            )
+            if footprints.failures:
+                print(f"Aviso: 3DSOLID sin huella: {_failure_text(footprints)}.")
+        if export_report.omitted:
+            # stdout puede tener búfer (p. ej. redirigido); se vacía para que el aviso salga último.
+            sys.stdout.flush()
+            print(_omitted_terminal_line(export_report.omitted), file=sys.stderr)
     return 0
+
+
+def _failure_text(footprints: FootprintResult) -> str:
+    return "; ".join(f"{reason} ({count})" for reason, count in footprints.failure_reasons)
+
+
+def _paper_factor(args, result, nominal_denominator, verification) -> float:
+    """mm de papel por unidad CAD para estimar el error de huella antes de exportar.
+
+    Sin escala nominal ni --scale-factor se supone 1:1; si después la página se ajusta
+    a un tamaño menor, el error real es menor que el estimado.
+    """
+    if nominal_denominator is not None:
+        return verification.millimeters_per_unit / nominal_denominator
+    if args.scale_factor is not None:
+        return args.scale_factor
+    if result.units_code:
+        return units.conversion_factor(result.units_code, ezdxf.units.InsertUnits.Millimeters)
+    return 1.0
+
+
+def _omitted_terminal_line(omitted: tuple[tuple[str, str, int], ...]) -> str:
+    total = sum(count for _type, _layer, count in omitted)
+    if len(omitted) == 1:
+        groups = f"{omitted[0][0]} en {omitted[0][1]}"
+    else:
+        groups = "; ".join(f"{kind} en {layer}: {count}" for kind, layer, count in omitted[:3])
+        hidden = len(omitted) - 3
+        if hidden > 0:
+            groups += f"; y {hidden} {'grupo' if hidden == 1 else 'grupos'} más"
+    if total == 1:
+        return f"Aviso: se omitió 1 entidad no soportada ({groups}); no aparece en el PDF."
+    return f"Aviso: se omitieron {total} entidades no soportadas ({groups}); no aparecen en el PDF."

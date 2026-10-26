@@ -91,6 +91,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
     )
     block_extract_command.add_argument("--overwrite", action="store_true")
+    block_extract_command.add_argument(
+        "--omit-unsupported",
+        action="store_true",
+        help="Omite (y declara) las entidades que ezdxf no puede dibujar en vez de detenerse",
+    )
+    block_extract_command.add_argument(
+        "--solids",
+        choices=("footprint",),
+        help="footprint: dibuja cada 3DSOLID convertible como su huella en planta",
+    )
     block_extract_command.add_argument("--hatch-threshold", type=int, default=50000)
     block_extract_command.add_argument("--font-substitutions", help="JSON UTF-8 familia→fuente")
     block_extract_command.add_argument("--font-folder", help="Carpeta de fuentes del proyecto")
