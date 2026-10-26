@@ -112,9 +112,9 @@ def _prompt_nominal_scale(args, document, references, selected) -> float:
             raise CadProcessingError("No se indicó la escala nominal; use --scale 1:N.") from error
         try:
             return parse_nominal_scale(answer.strip())
-        except ValueError as error:
+        except ValueError:
             print(
-                f"{error}. Escriba la escala como 1:N, con N mayor que cero "
+                "Escala no válida. Escriba la escala como 1:N, con N mayor que cero "
                 "(por ejemplo 1:50)."
             )
 
@@ -559,6 +559,7 @@ def run_extract_block(args) -> int:
                 nested_blocks=nested_blocks(extracted_document),
                 fonts=font_uses(fidelity_report),
                 hatches=hatch_summary(fidelity_report),
+                total_references=len(references),
                 include_dependencies=True,
                 extracted_at=datetime.now().astimezone().isoformat(timespec="seconds"),
                 exporter_version=__version__,

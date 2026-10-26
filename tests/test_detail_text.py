@@ -225,6 +225,13 @@ def test_report_is_deterministic_and_all_lines_fit_width() -> None:
     assert all(len(line) <= 100 for line in report.splitlines())
 
 
+def test_occurrence_shows_total_when_known() -> None:
+    known = _detail(reference=SelectedReference(2, "A1", "0", (1, 2, 3), 0, (1, 1, 1), 3))
+
+    assert "Ocurrencia: 2 de 3\n" in format_detail_report(known)
+    assert "Ocurrencia: 1\n" in format_detail_report(_detail())
+
+
 def test_windows_source_path_extracts_filename() -> None:
     detail = _detail(source=DetailSource(r"C:\\entrada\\perfil.dxf", "Detalle"))
 

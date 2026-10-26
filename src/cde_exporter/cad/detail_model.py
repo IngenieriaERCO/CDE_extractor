@@ -62,10 +62,17 @@ class SelectedReference:
     insertion_xyz: tuple[float, float, float]
     rotation_deg: float
     scale_xyz: tuple[float, float, float]
+    total_occurrences: int | None = None
 
     def __post_init__(self) -> None:
         if self.occurrence < 1:
             raise ValueError("occurrence debe ser un entero desde 1")
+        if self.total_occurrences is not None and (
+            isinstance(self.total_occurrences, bool)
+            or not isinstance(self.total_occurrences, int)
+            or self.total_occurrences < self.occurrence
+        ):
+            raise ValueError("total_occurrences debe ser un entero mayor o igual que occurrence")
         _require_finite_tuple("insertion_xyz", self.insertion_xyz, 3)
         _require_finite("rotation_deg", self.rotation_deg)
         _require_finite_tuple("scale_xyz", self.scale_xyz, 3)

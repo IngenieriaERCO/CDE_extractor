@@ -92,7 +92,10 @@ def _format_block(detail: ExtractedDetail) -> list[str]:
     lines = _section("B. IDENTIFICACIÓN DEL BLOQUE")
     lines += _line("Nombre del bloque", detail.source.block_name or "no disponible")
     lines += _line("Handle de la definición", detail.block_definition_handle or "no disponible")
-    lines += _line("Ocurrencia", str(reference.occurrence))
+    occurrence = str(reference.occurrence)
+    if reference.total_occurrences is not None:
+        occurrence += f" de {reference.total_occurrences}"
+    lines += _line("Ocurrencia", occurrence)
     lines += _line("Método de selección", method)
     lines += _line("Handle de la referencia", reference.handle or "no disponible")
     lines += _line("Capa de la referencia", reference.layer or "no disponible")

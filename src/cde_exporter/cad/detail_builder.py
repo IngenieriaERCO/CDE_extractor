@@ -137,6 +137,7 @@ def build_extracted_detail(
     nested_blocks: tuple[NestedBlockInfo, ...] = (),
     fonts: tuple[FontUse, ...] = (),
     hatches: HatchSummary | None = None,
+    total_references: int | None = None,
 ) -> ExtractedDetail:
     """Construye el detalle y clasifica cada entidad según la fidelidad existente.
 
@@ -159,6 +160,7 @@ def build_extracted_detail(
         insertion_xyz=reference.insert,
         rotation_deg=reference.rotation,
         scale_xyz=(reference.xscale, reference.yscale, reference.zscale),
+        total_occurrences=total_references,
     )
     units = UnitInfo(
         declared_code=extraction.units_code,

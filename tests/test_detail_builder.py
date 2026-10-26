@@ -137,4 +137,7 @@ def test_detail_json_adds_occurrence_suffix_for_all(tmp_path: Path) -> None:
     second = json.loads((tmp_path / "manifest_002.json").read_text(encoding="utf-8"))
     assert first["reference"]["occurrence"] == 1
     assert second["reference"]["occurrence"] == 2
+    assert first["reference"]["total_occurrences"] == 2
+    assert second["reference"]["total_occurrences"] == 2
+    assert first["model_version"] == "2"
     assert not manifest.exists()

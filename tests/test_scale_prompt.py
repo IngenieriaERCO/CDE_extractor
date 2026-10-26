@@ -62,7 +62,10 @@ def test_invalid_answers_are_asked_again(tmp_path, monkeypatch, capsys):
     assert main(_arguments(source, out / "detalle")) == 0
 
     assert len(prompts) == 3
-    assert "Escriba la escala como 1:N" in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert printed.count("Escala no válida. Escriba la escala como 1:N") == 2
+    assert "usa 1:N" not in printed
+    assert "El denominador" not in printed
     report = (out / "detalle.txt").read_text(encoding="utf-8")
     assert "Escala nominal: 1:20" in report
 

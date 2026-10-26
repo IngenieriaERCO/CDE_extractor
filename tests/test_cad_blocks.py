@@ -177,7 +177,7 @@ def test_occurrence_two_and_out_of_range(tmp_path: Path, capsys) -> None:
                  "--occurrence", "2", "--output-prefix", str(prefix)]) == 0
     assert "Ocurrencia usada: 2 de 3" in capsys.readouterr().out
     report = prefix.with_suffix(".txt").read_text(encoding="utf-8")
-    assert "Ocurrencia: 2" in report
+    assert "Ocurrencia: 2 de 3" in report
     assert "Método de selección: por ocurrencia" in report
     assert "(1.000, 0.000, 0.000)" in report
     assert main(["cad", "extract-block", str(path), "--block-name", "Detalle",

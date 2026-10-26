@@ -108,6 +108,19 @@ def test_non_finite_coordinates_and_scale_values_are_rejected(factory) -> None:
         factory()
 
 
+def test_total_occurrences_is_optional_and_serialized() -> None:
+    reference = SelectedReference(2, "2A", "0", (0.0, 0.0, 0.0), 0.0, (1.0, 1.0, 1.0), 3)
+    assert reference.total_occurrences == 3
+    assert make_detail().reference.total_occurrences is None
+    assert detail_to_dict(make_detail())["reference"]["total_occurrences"] is None
+
+
+@pytest.mark.parametrize("total", [1, 0, 2.5, True])
+def test_total_occurrences_rejects_invalid_values(total) -> None:
+    with pytest.raises(ValueError, match="total_occurrences"):
+        SelectedReference(2, None, "0", (0.0, 0.0, 0.0), 0.0, (1.0, 1.0, 1.0), total)
+
+
 def test_bounds_reject_minimum_greater_than_maximum() -> None:
     with pytest.raises(ValueError, match="min_xyz"):
         Bounds3D((1.0, 0.0, 0.0), (0.0, 1.0, 1.0))
