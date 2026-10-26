@@ -21,7 +21,7 @@ from ezdxf.addons.drawing.config import HatchPolicy
 from ezdxf.addons.drawing.properties import LayoutProperties
 from ezdxf.document import Drawing
 
-from cde_exporter.cad.models import CadProcessingError
+from cde_exporter.cad.models import INVALID_DATA, CadProcessingError, invalid_data_reason
 from cde_exporter.cad.reader import ensure_layer_table_entries, read_dxf
 
 
@@ -29,8 +29,9 @@ class _StrictFrontend(Frontend):
     """Registra las entidades que ezdxf omite en el renderizado.
 
     Las omitidas por "invisible" (capa apagada o congelada, o entidad invisible)
-    solo se cuentan. Con ``omit_unsupported`` las omitidas por "unsupported" se
-    cuentan por (tipo, capa). Cualquier otra omisión se guarda en ``skipped``.
+    solo se cuentan. Con ``omit_unsupported`` las omitidas por "unsupported" o por
+    datos inválidos se cuentan por (tipo, capa). Cualquier otra omisión se guarda en
+    ``skipped``.
     """
 
     def __init__(self, *args, omit_unsupported: bool = False, **kwargs) -> None:
@@ -41,14 +42,36 @@ class _StrictFrontend(Frontend):
         self.messages: list[str] = []
         self.auto_hatch_threshold: int | None = None
         super().__init__(*args, **kwargs)
+        backend = args[1] if len(args) > 1 else kwargs.get("backend")
+        # Los backends SVG y PDF de ezdxf graban los trazos en ``records``.
+        self._records = getattr(backend, "records", None)
+
+    def draw_entity(self, entity, properties) -> None:
+        # Una entidad que lanza un error al dibujarse se trata como no soportada por datos
+        # inválidos; se deshacen los trazos que hubiera grabado para no dejarla a medias.
+        start = len(self._records) if self._records is not None else None
+        try:
+            super().draw_entity(entity, properties)
+        except (MemoryError, TimeoutError):
+            raise  # agotamiento de recursos al dibujar rayados: se trata en export_vector_outputs
+        except Exception as error:  # noqa: BLE001 - ezdxf puede lanzar cualquier error
+            if start is not None:
+                del self._records[start:]
+            self.skip_entity(entity, invalid_data_reason(error))
 
     def skip_entity(self, entity, msg: str) -> None:
         if msg == "invisible":
             self.invisible += 1
             return
-        if msg == "unsupported" and self.omit_unsupported:
-            layer = str(entity.dxf.get("layer", "0") or "0")
+        original = getattr(entity, "source_of_copy", None) or entity
+        layer = str(original.dxf.get("layer", "0") or "0")
+        invalid = msg.startswith(INVALID_DATA)
+        if (msg == "unsupported" or invalid) and self.omit_unsupported:
             self.omitted[(entity.dxftype(), layer)] += 1
+            return
+        if invalid:
+            handle = original.dxf.get("handle") or "(sin handle)"
+            self.skipped.append(f"{entity.dxftype()} (handle {handle}, capa {layer}): {msg}")
             return
         self.skipped.append(f"{entity.dxftype()}: {msg}")
 
@@ -116,7 +139,8 @@ def _raise_if_skipped(
     details = ", ".join(frontend.skipped[:8])
     message = f"La exportación {stage} detuvo la operación porque ezdxf omite entidades: {details}"
     if not frontend.omit_unsupported and any(
-        item.endswith(": unsupported") for item in frontend.skipped
+        item.endswith(": unsupported") or f": {INVALID_DATA}: " in item
+        for item in frontend.skipped
     ):
         if suggest_solids_footprint and "3DSOLID: unsupported" in frontend.skipped:
             message += (

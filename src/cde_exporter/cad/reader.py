@@ -10,6 +10,7 @@ import ezdxf
 from ezdxf import bbox
 from ezdxf.document import Drawing
 from ezdxf.entities import DXFEntity
+from ezdxf.math import BoundingBox
 from ezdxf.units import unit_name
 
 from cde_exporter.cad.models import Bounds2D, CadProcessingError, CadWindow, DxfInspection
@@ -55,6 +56,72 @@ class UnboundedDiagnosticReport:
     inspect_total: int
 
 
+@dataclass(frozen=True, slots=True)
+class InvalidEntity:
+    """Entidad que ezdxf no pudo medir (datos inválidos), con su origen para el aviso."""
+
+    entity_type: str
+    handle: str | None
+    layer: str
+    block: str | None
+    reason: str
+    entity: object | None = None
+
+
+def _original(entity):
+    """Entidad de la definición de la que procede una copia virtual (o la misma)."""
+    return getattr(entity, "source_of_copy", None) or entity
+
+
+def safe_extents(entities, *, block: str | None = None):
+    """Caja de ``entities`` que salta las entidades cuya medición lanza un error.
+
+    Primero intenta medirlo todo de una vez (el caso normal, igual de rápido). Si falla,
+    mide entidad por entidad; los INSERT que fallan se abren con ``virtual_entities()``
+    para saltar solo la entidad dañada y no el bloque entero. Devuelve la caja y las
+    entidades saltadas. ezdxf puede lanzar cualquier excepción ante datos inválidos
+    (p. ej. un override de DIMSTYLE que apunta a un XRECORD), por eso se captura todo.
+    ``entities`` debe poder recorrerse dos veces (un layout o una lista).
+    """
+    try:
+        return bbox.extents(entities), ()
+    except Exception:  # noqa: BLE001 - se mide de nuevo entidad por entidad
+        pass
+    box = BoundingBox()
+    invalid: list[InvalidEntity] = []
+
+    def measure(items, owner: str | None) -> None:
+        for entity in items:
+            try:
+                extents = bbox.extents([entity])
+            except Exception as error:  # noqa: BLE001 - ver la docstring
+                if entity.dxftype() == "INSERT":
+                    try:
+                        children = list(entity.virtual_entities())
+                    except Exception:  # noqa: BLE001 - el INSERT entero es inválido
+                        children = None
+                    if children is not None:
+                        measure(children, entity.dxf.name)
+                        continue
+                original = _original(entity)
+                invalid.append(
+                    InvalidEntity(
+                        entity_type=entity.dxftype(),
+                        handle=original.dxf.get("handle"),
+                        layer=str(original.dxf.get("layer", "0") or "0"),
+                        block=owner,
+                        reason=f"{type(error).__name__}: {error}",
+                        entity=original,
+                    )
+                )
+                continue
+            if extents.has_data:
+                box.extend([extents.extmin, extents.extmax])
+
+    measure(entities, block)
+    return box, tuple(invalid)
+
+
 def read_dxf(path: str | Path) -> Drawing:
     """Abre un DXF; no convierte ni intenta interpretar archivos DWG."""
     source = Path(path)
@@ -85,7 +152,7 @@ def entity_bounds(entity: DXFEntity) -> Bounds2D | None:
             float(extent.extmax.x),
             float(extent.extmax.y),
         )
-    except (ArithmeticError, AttributeError, TypeError, ValueError):
+    except Exception:  # noqa: BLE001 - datos inválidos: ezdxf puede lanzar cualquier error
         return None
 
 

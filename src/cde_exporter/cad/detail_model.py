@@ -309,7 +309,13 @@ def mark_omitted_entities(
             key, 0
         ):
             converted[key] = converted.get(key, 0) + 1
-            item = dataclasses.replace(item, status=EntityStatus.OMITTED, reason=OMITTED_REASON)
+            # Si la causa son datos inválidos (no el tipo), se conserva ese motivo.
+            reason = item.reason or ""
+            if reason.startswith("Datos inválidos"):
+                reason = f"Omitida por --omit-unsupported: {reason[0].lower()}{reason[1:]}"
+            else:
+                reason = OMITTED_REASON
+            item = dataclasses.replace(item, status=EntityStatus.OMITTED, reason=reason)
         dispositions.append(item)
     inventory = _move_unsupported(detail.inventory, converted, EntityStatus.OMITTED)
     warnings = [

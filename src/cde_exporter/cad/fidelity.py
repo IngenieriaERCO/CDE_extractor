@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import ezdxf
+from ezdxf import bbox
 from ezdxf.addons.drawing import Frontend, RenderContext, config, svg
 from ezdxf.addons.drawing.config import HatchPolicy
 from ezdxf.document import Drawing
@@ -16,7 +17,7 @@ from ezdxf.protocols import SupportsVirtualEntities
 
 from cde_exporter.cad.exporters import _estimate_hatch_segments
 from cde_exporter.cad.font_config import active_substitutions
-from cde_exporter.cad.models import CadProcessingError
+from cde_exporter.cad.models import INVALID_DATA, CadProcessingError, invalid_data_reason
 from cde_exporter.cad.reader import read_dxf
 
 _HATCH_POLICIES = {
@@ -27,6 +28,10 @@ _HATCH_POLICIES = {
     "auto": HatchPolicy.NORMAL,
 }
 _TEXT_TYPES = {"TEXT", "MTEXT", "DIMENSION", "ATTRIB"}
+# Entidades cuya geometría ezdxf genera a partir de estilos y overrides (no INSERT).
+_PROBED_COMPOSITES = frozenset(
+    {"LEADER", "DIMENSION", "ARC_DIMENSION", "LARGE_RADIAL_DIMENSION", "MLINE", "ACAD_TABLE"}
+)
 _INLINE_FONT = re.compile(r"\\f([^|;]+)(?:\|[^;]*)?;", re.IGNORECASE)
 
 
@@ -75,7 +80,12 @@ def fidelity_dispatch(document: Drawing):
 
 
 def unsupported_entity_reason(entity, dispatch) -> str | None:
-    """Aplica las mismas reglas de tipo no soportado que usa inspect_fidelity."""
+    """Aplica las mismas reglas de tipo no soportado que usa inspect_fidelity.
+
+    Las entidades compuestas de ``_PROBED_COMPOSITES`` se miden: si ezdxf no puede
+    generar su geometría, son no soportadas por datos inválidos. Solo esos tipos, para
+    no recorrer la geometría de todas las entidades.
+    """
     kind = entity.dxftype()
     proxy = bool(getattr(entity, "proxy_graphic", None))
     virtual = isinstance(entity, SupportsVirtualEntities)
@@ -85,6 +95,11 @@ def unsupported_entity_reason(entity, dispatch) -> str | None:
         return "proxy gráfico disponible" if proxy else "proxy gráfico ausente"
     if kind not in dispatch and not virtual:
         return "sin soporte de dibujo"
+    if kind in _PROBED_COMPOSITES:
+        try:
+            bbox.extents([entity])
+        except Exception as error:  # noqa: BLE001 - ezdxf puede lanzar cualquier error
+            return invalid_data_reason(error)
     return None
 
 
@@ -192,7 +207,8 @@ def inspect_fidelity(
         reason = unsupported_entity_reason(entity, dispatch)
         if reason is not None:
             unsupported[(kind, layer, reason)] += 1
-        if kind in _TEXT_TYPES:
+        # Con datos inválidos tampoco se leen sus fuentes (el inventario hace lo mismo).
+        if kind in _TEXT_TYPES and not (reason or "").startswith(INVALID_DATA):
             text_fonts[_style_and_font(entity, document)] += 1
         if kind == "HATCH":
             hatch_kind = _hatch_type(entity)

@@ -15,6 +15,14 @@ class CadProcessingError(RuntimeError):
     """Error controlado al inspeccionar, extraer o exportar un dibujo CAD."""
 
 
+# Motivo con el que se trata como no soportada una entidad cuyo procesamiento falla.
+INVALID_DATA = "datos inválidos"
+
+
+def invalid_data_reason(error: BaseException) -> str:
+    return f"{INVALID_DATA}: {type(error).__name__}: {error}"
+
+
 @dataclass(frozen=True, slots=True)
 class CadWindow:
     """Ventana axis-alineada en XY, expresada en coordenadas del dibujo."""

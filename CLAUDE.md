@@ -9,7 +9,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - Lee cada archivo antes de editarlo. Pide confirmación antes de cambios grandes.
 
 ## Verificación (siempre antes de dar algo por terminado)
-- `python -m pytest -q --tb=short` (referencia: 257 pruebas pasando).
+- `python -m pytest -q --tb=short` (referencia: 269 pruebas pasando).
 - `ruff check src tests`.
 - NO ejecutar `ruff format` sobre archivos existentes (solo en archivos nuevos).
 - NO usar `pytest -s` (las pruebas del aviso de escala esperarían entrada).
@@ -32,6 +32,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - Factor de salida = mm por unidad CAD × escala del INSERT ÷ N. No afirmar escala física si las unidades no están verificadas.
 - `detail_model.py` solo usa la biblioteca estándar (sin ezdxf).
 - Variable de desarrollo `CDE_KEEP_INTERMEDIATES=1` conserva `.dxf` y `.svg` (con `--solids footprint`, el `.dxf` es la copia de render).
+- Los errores inesperados se muestran sin traceback ("Error CAD inesperado …"); `CDE_DEBUG=1` muestra el traceback completo.
 
 ## Reglas de uso (qué sale en el PDF)
 - El PDF contiene solo lo que está dentro del bloque elegido.

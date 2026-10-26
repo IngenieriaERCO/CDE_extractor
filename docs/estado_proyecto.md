@@ -1,6 +1,6 @@
 # Estado del proyecto — Exportador Vectorial
 
-Último hito: ajuste de la Fase 3 — rendimiento y fidelidad de estilos en la extracción (consulta git log para el hash). 257 pruebas pasando, ruff limpio.
+Último hito: ajuste de la Fase 3 — rendimiento y fidelidad de estilos en la extracción (consulta git log para el hash). 269 pruebas pasando, ruff limpio.
 
 ## Plan en 4 fases
 1. Selección de bloque + escala — hecha.
@@ -24,6 +24,12 @@ Hecho:
   - La caja geométrica se calcula una vez y se reutiliza (sección C, página y comprobación del exportador).
   - El SVG solo se dibuja con `CDE_KEEP_INTERMEDIATES`; sin él, los avisos salen del dibujo del PDF y el TXT queda igual.
 - Extracción fiel a los recursos por defecto: el estilo de texto `Standard`, las capas `0` y `Defpoints` y las variables de cabecera que lee el dibujo (`$LTSCALE`, `$PDMODE`, `$PDSIZE`, `$MEASUREMENT`) toman los valores del original. Antes, `Standard` salía con la fuente `txt` de ezdxf en lugar de la del dibujo (p. ej. `simplex.shx`).
+- Entidades con datos inválidos (caso VIA_2MA.dxf: un LEADER cuyo override de DIMSTYLE apuntaba a un XRECORD como estilo de texto, que tumbaba la extracción con traceback):
+  - Caja entidad por entidad (`safe_extents` en `reader.py`): primero se mide todo de una vez; si falla, se mide entidad por entidad, entrando en los bloques anidados, y se salta solo la dañada. Se usa en todos los cálculos de caja.
+  - Aviso `ENTITIES_INVALID_DATA` en la terminal y en "A tener en cuenta", con tipo, handle, capa y bloque, y lo que pasa realmente con la entidad (p. ej. "Se dibuja con el estilo de texto por defecto" si la extracción la reparó).
+  - Al dibujar y en el inventario, una entidad que lanza error se trata como no soportada con el motivo "datos inválidos: …" (sin trazos a medias): con `--omit-unsupported` se omite con aviso; sin ella, la extracción se detiene con un mensaje claro. La prueba de caja del inventario solo corre en entidades compuestas (LEADER, DIMENSION, MLINE, ACAD_TABLE…), sin coste apreciable.
+  - El aviso "entidades sin caja" se recalcula sobre lo que se dibuja (antes salía falso por la entidad inválida del origen), y la línea "Huellas: 0 3DSOLID…" ya no sale si el bloque no tiene sólidos.
+- Error CAD sin traceback: cualquier excepción inesperada termina con "Error CAD inesperado (Tipo): mensaje. No se generaron archivos.", código 1 y sin archivos. Con la variable `CDE_DEBUG=1` se muestra el traceback completo.
 
 Opcional (medido; hoy no compensa):
 - Paso 2, parche a pymupdf: `Shape.finish` copia todo el contenido de la página en cada trazo (coste cuadrático). Ahorraría ~25 s en Plano_completo, pero en un detalle como Perfil_K0010 el PDF cuesta 1,1 s de 18,5 s, y el parche depende de una parte interna de pymupdf. Hacerlo solo si los planos grandes pasan a ser habituales; también se puede avisar del defecto a PyMuPDF.

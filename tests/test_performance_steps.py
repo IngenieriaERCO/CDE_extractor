@@ -79,7 +79,7 @@ def test_modelspace_bounds_are_computed_once(tmp_path: Path, monkeypatch) -> Non
     from ezdxf import bbox
     from ezdxf.layouts import Modelspace
 
-    from cde_exporter.cad import block_commands, exporters
+    from cde_exporter.cad import exporters, reader
 
     calls = []
 
@@ -88,8 +88,9 @@ def test_modelspace_bounds_are_computed_once(tmp_path: Path, monkeypatch) -> Non
             calls.append(entities)
         return bbox.extents(entities, *args, **kwargs)
 
+    # Las cajas del flujo se calculan con reader.safe_extents; el exportador, con la suya.
     fake = types.SimpleNamespace(extents=counting)
-    monkeypatch.setattr(block_commands, "bbox", fake)
+    monkeypatch.setattr(reader, "bbox", fake)
     monkeypatch.setattr(exporters, "bbox", fake)
 
     assert _run(_source(tmp_path / "origen.dxf"), tmp_path / "salida") == 0

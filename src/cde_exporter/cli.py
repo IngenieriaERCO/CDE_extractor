@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 import tempfile
+import traceback
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -468,6 +469,15 @@ def _run_cad(args: argparse.Namespace) -> int:
         return 0
     except (CadProcessingError, OSError, ValueError, MemoryError) as error:
         print(f"Error CAD: {error}", file=sys.stderr)
+        return 1
+    except Exception as error:  # noqa: BLE001 - nada inesperado debe mostrar un traceback
+        if os.environ.get("CDE_DEBUG", "").strip().lower() in {"1", "true", "yes", "si", "sí"}:
+            traceback.print_exc()
+        print(
+            f"Error CAD inesperado ({type(error).__name__}): {error}. "
+            "No se generaron archivos. Para ver el detalle técnico, ejecute con CDE_DEBUG=1.",
+            file=sys.stderr,
+        )
         return 1
     finally:
         restore_fonts()

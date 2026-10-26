@@ -321,6 +321,19 @@ def test_non_convex_and_invalid_acis_are_not_converted(tmp_path: Path) -> None:
     assert "huella no convexa (1)" in notes
 
 
+def test_no_footprint_line_when_the_block_has_no_solids(tmp_path: Path, capsys) -> None:
+    document = ezdxf.new("R2018")
+    document.units = ezdxf.units.InsertUnits.Millimeters
+    document.blocks.new("Detalle").add_line((0, 0), (10, 5))
+    document.modelspace().add_blockref("Detalle", (0, 0))
+    source = tmp_path / "origen.dxf"
+    document.saveas(source)
+
+    assert _run(source, tmp_path / "salida", "--scale", "1:50", "--solids", "footprint") == 0
+
+    assert "Huellas:" not in capsys.readouterr().out
+
+
 def test_source_dxf_is_never_modified(tmp_path: Path) -> None:
     source = _source(tmp_path / "origen.dxf")
     before = hashlib.sha256(source.read_bytes()).hexdigest()

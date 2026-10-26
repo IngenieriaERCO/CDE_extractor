@@ -8,11 +8,12 @@ import os
 import shutil
 import sys
 import tempfile
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
 import ezdxf
-from ezdxf import bbox, units
+from ezdxf import units
 
 from cde_exporter import __version__
 from cde_exporter.cad.block_catalog import format_block_catalog, list_referenced_blocks
@@ -32,7 +33,9 @@ from cde_exporter.cad.detail_extras import (
 from cde_exporter.cad.detail_model import (
     FOOTPRINT_REASON,
     EntityStatus,
+    ExtractionWarning,
     SelectionMethod,
+    Severity,
     detail_to_dict,
     finalize_detail,
     mark_footprint_solids,
@@ -48,7 +51,7 @@ from cde_exporter.cad.pdf_checks import (
     build_extraction_result,
     validate_output_pdf,
 )
-from cde_exporter.cad.reader import entity_bounds, read_dxf
+from cde_exporter.cad.reader import InvalidEntity, entity_bounds, read_dxf, safe_extents
 from cde_exporter.cad.scale import (
     output_factor,
     parse_nominal_scale,
@@ -68,7 +71,8 @@ def _prompt_nominal_scale(args, document, references, selected) -> float:
     ref = selected[0]
     block_definition = document.blocks[args.block_name]
     block_units_code = int(block_definition.block_record.dxf.get("units", 0) or 0)
-    block_extents = bbox.extents(block_definition)
+    # Las entidades que no se pueden medir se avisan después, en el flujo principal.
+    block_extents, _invalid = safe_extents(block_definition, block=args.block_name)
     max_block_dimension = (
         max(
             abs(float(block_extents.extmax.x - block_extents.extmin.x)),
@@ -104,7 +108,7 @@ def _prompt_nominal_scale(args, document, references, selected) -> float:
         for entity in document.modelspace()
         if entity.dxftype() == "INSERT" and entity.dxf.name == args.block_name
     ]
-    extents = bbox.extents([entities[ref.order - 1]])
+    extents, _invalid = safe_extents([entities[ref.order - 1]])
     if extents.has_data:
         width = float(extents.extmax.x - extents.extmin.x)
         height = float(extents.extmax.y - extents.extmin.y)
@@ -296,7 +300,7 @@ def _validate_nominal_page_sizes(
             insert_position=ref.insert,
             override=args.units,
         )
-        extents = bbox.extents([insert_entities[ref.order - 1]])
+        extents, _invalid = safe_extents([insert_entities[ref.order - 1]])
         if not extents.has_data:
             continue
         width = float(extents.extmax.x - extents.extmin.x)
@@ -327,14 +331,17 @@ def _detail_json_output(path: str | None, occurrence: int, multiple: bool) -> Pa
 
 
 def _effective_bounds_xyz(document):
-    """Caja efectiva (mínimo y máximo, con Z) del Model Space del DXF extraído."""
-    extents = bbox.extents(document.modelspace())
+    """Caja efectiva (mínimo y máximo, con Z) del Model Space del DXF extraído.
+
+    Devuelve también las entidades que no se pudieron medir por datos inválidos.
+    """
+    extents, invalid = safe_extents(document.modelspace())
     if not extents.has_data:
-        return None
+        return None, invalid
     return (
         (float(extents.extmin.x), float(extents.extmin.y), float(extents.extmin.z)),
         (float(extents.extmax.x), float(extents.extmax.y), float(extents.extmax.z)),
-    )
+    ), invalid
 
 
 def _keep_intermediates() -> bool:
@@ -436,7 +443,7 @@ def _run_extract_block(args, font_restorers: list) -> int:
     else:
         selection_method = SelectionMethod.AUTOMATIC
     block_units_code = int(block_definition.block_record.dxf.get("units", 0) or 0)
-    block_extents = bbox.extents(block_definition)
+    block_extents, source_invalid = safe_extents(block_definition, block=args.block_name)
     max_block_dimension = (
         max(
             abs(float(block_extents.extmax.x - block_extents.extmin.x)),
@@ -575,13 +582,16 @@ def _run_extract_block(args, font_restorers: list) -> int:
                     ),
                 )
                 render_document = read_dxf(render_dxf)
+            if footprints is not None or source_invalid:
+                # «Sin caja» se midió en el original; con huellas, o si el original tenía
+                # entidades que no se podían medir, se mide de nuevo en lo que se dibuja.
                 result = dataclasses.replace(
                     result,
                     unbounded=_definition_has_unbounded(render_document, args.block_name, set()),
                 )
             # La caja se calcula una sola vez, sobre lo que se dibuja, y se reutiliza para la
             # sección C, la página y la comprobación de que el dibujo cabe en el exportador.
-            effective_bounds_xyz = _effective_bounds_xyz(render_document)
+            effective_bounds_xyz, render_invalid = _effective_bounds_xyz(render_document)
             cad_size = (
                 None
                 if effective_bounds_xyz is None
@@ -658,6 +668,7 @@ def _run_extract_block(args, font_restorers: list) -> int:
                     footprints.failure_reasons,
                     footprints.max_error_mm,
                 )
+            sys.stdout.flush()  # para que los avisos de stderr salgan en orden
             if result.unbounded:
                 print(
                     "Aviso: el bloque contiene entidades sin caja; la página se ajusta a la "
@@ -704,6 +715,24 @@ def _run_extract_block(args, font_restorers: list) -> int:
                     f"{_failure_text(footprints)}."
                 ) from error
             detail = mark_omitted_entities(detail, export_report.omitted)
+            # Se decide tras dibujar, para no afirmar que una entidad se dibuja si se omitió.
+            invalid_messages = _invalid_data_messages(
+                document, source_invalid, render_invalid, export_report.omitted
+            )
+            if invalid_messages:
+                detail = dataclasses.replace(
+                    detail,
+                    warnings=(
+                        *detail.warnings,
+                        *(
+                            ExtractionWarning("ENTITIES_INVALID_DATA", Severity.WARNING, message)
+                            for message in invalid_messages
+                        ),
+                    ),
+                )
+                sys.stdout.flush()
+                for message in invalid_messages:
+                    print(f"Aviso: {message}", file=sys.stderr)
             checks = validate_output_pdf(temp_pdf, geometry_page_size)
             try:
                 extraction_result = build_extraction_result(
@@ -753,7 +782,7 @@ def _run_extract_block(args, font_restorers: list) -> int:
             print(f"Creado: {svg_output}")
         if detail_json_output is not None:
             print(f"JSON del detalle creado: {detail_json_output}")
-        if footprints is not None:
+        if footprints is not None and (footprints.converted or footprints.failures):
             drawn = sum(
                 1
                 for item in detail.dispositions
@@ -772,6 +801,81 @@ def _run_extract_block(args, font_restorers: list) -> int:
             sys.stdout.flush()
             print(_omitted_terminal_line(export_report.omitted), file=sys.stderr)
     return 0
+
+
+_INVALID_MESSAGE_LIMIT = 10
+
+
+def _describe_invalid(item: InvalidEntity) -> str:
+    where = f"capa {item.layer}" + (f", bloque {item.block}" if item.block else "")
+    return f"{item.entity_type} {item.handle or '(sin handle)'} ({where})"
+
+
+def _repair_note(entity, document) -> str:
+    """Explica cómo se dibuja una entidad que falló en el original y no en el extraído.
+
+    Al copiar, ezdxf deja en blanco los handles que no apuntan a un objeto válido; si el
+    override de DIMSTYLE señalaba como estilo de texto algo que no lo es, se usa el de
+    por defecto.
+    """
+    try:
+        tags = list(entity.get_xdata_list("ACAD", "DSTYLE"))
+    except Exception:  # noqa: BLE001 - sin override legible no se puede precisar más
+        tags = []
+    for current, following in zip(tags, tags[1:], strict=False):
+        if current.code == 1070 and current.value == 340 and following.code == 1005:
+            target = document.entitydb.get(following.value)
+            if target is None or target.dxftype() != "STYLE":
+                return "Se dibuja con el estilo de texto por defecto."
+    return "Se dibuja con los datos corregidos al extraer."
+
+
+def _invalid_data_messages(
+    document,
+    source_invalid: tuple[InvalidEntity, ...],
+    render_invalid: tuple[InvalidEntity, ...],
+    omitted: tuple[tuple[str, str, int], ...],
+) -> list[str]:
+    """Un aviso por entidad excluida de la medición, con lo que pasa realmente con ella.
+
+    Las del original se relacionan con las del DXF dibujado por tipo y capa (los handles
+    cambian al extraer). Si en el dibujado sigue fallando o el dibujo la omitió, no se
+    afirma que se dibuje.
+    """
+    still_invalid = Counter((item.entity_type, item.layer) for item in render_invalid)
+    omitted_keys = Counter({(kind, layer): count for kind, layer, count in omitted})
+    messages = []
+    for item in source_invalid:
+        key = (item.entity_type, item.layer)
+        if omitted_keys[key]:
+            omitted_keys[key] -= 1
+            if still_invalid[key]:
+                still_invalid[key] -= 1
+            note = "No se pudo dibujar y se omitió (--omit-unsupported)."
+        elif still_invalid[key]:
+            still_invalid[key] -= 1
+            note = "En el DXF extraído tampoco se puede medir; consulte el inventario."
+        else:
+            note = _repair_note(item.entity, document)
+        messages.append(
+            f"Se excluyó de la medición 1 entidad con datos inválidos: "
+            f"{_describe_invalid(item)}. {note}"
+        )
+    for item in render_invalid:
+        key = (item.entity_type, item.layer)
+        if still_invalid[key] <= 0:
+            continue
+        still_invalid[key] -= 1
+        messages.append(
+            f"Se excluyó de la medición 1 entidad con datos inválidos en el DXF extraído: "
+            f"{_describe_invalid(item)}; consulte el inventario."
+        )
+    if len(messages) > _INVALID_MESSAGE_LIMIT:
+        hidden = len(messages) - _INVALID_MESSAGE_LIMIT
+        messages = messages[:_INVALID_MESSAGE_LIMIT] + [
+            f"… y {hidden} {'entidad' if hidden == 1 else 'entidades'} más con datos inválidos."
+        ]
+    return messages
 
 
 def _failure_text(footprints: FootprintResult) -> str:

@@ -38,6 +38,7 @@ from cde_exporter.cad.fidelity import (
     iter_detail_entities,
     unsupported_entity_reason,
 )
+from cde_exporter.cad.models import INVALID_DATA
 from cde_exporter.cad.scale import UnitVerification
 
 _URL_REFERENCE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
@@ -249,7 +250,11 @@ def build_extracted_detail(
             reason = unsupported_entity_reason(entity, dispatch)
             if reason is not None:
                 status = EntityStatus.UNSUPPORTED
-                reason = f"Tipo no soportado o condicionado: {reason}."
+                reason = (
+                    f"{reason[0].upper()}{reason[1:]}."
+                    if reason.startswith(INVALID_DATA)
+                    else f"Tipo no soportado o condicionado: {reason}."
+                )
             elif entity_type == "HATCH" and (
                 hatch_reason := hatch_simplification_reason(entity, hatch_mode, hatch_threshold)
             ):
