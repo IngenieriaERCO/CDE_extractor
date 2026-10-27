@@ -9,11 +9,11 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - Lee cada archivo antes de editarlo. Pide confirmación antes de cambios grandes.
 
 ## Verificación (siempre antes de dar algo por terminado)
-- `python -m pytest -q --tb=short` (referencia: 269 pruebas pasando).
+- `python -m pytest -q --tb=short` (referencia: 289 pruebas pasando).
 - `ruff check src tests`.
 - NO ejecutar `ruff format` sobre archivos existentes (solo en archivos nuevos).
 - NO usar `pytest -s` (las pruebas del aviso de escala esperarían entrada).
-- Regresión gráfica: el SVG de Perfil_K0010 a 1:50 con `--hatch-mode auto --font-substitutions Pruebas/fonts/sustituciones_arial.json` debe tener hash SHA256 `973120C38D22C1F60998AE52ACC117A47F510FE951F0B6FA83CC16305BA7B83D` (se obtiene con `CDE_KEEP_INTERMEDIATES=1`). Nunca comparar DXF por hash (no es determinista).
+- Regresión gráfica: el SVG de Perfil_K0010 a 1:50 con `--hatch-mode auto --font-substitutions Pruebas/fonts/sustituciones_arial.json` debe tener hash SHA256 `BD488686F7EC29105A0911618545C012AEDB35462010B7D2B3119AAC8194B6E1` (se obtiene con `CDE_KEEP_INTERMEDIATES=1`). Cambió a propósito (antes `973120C3…7B83D`) por el arreglo de fuentes instaladas: 4 textos de Perfil_K0010 pasaron de Arial a Verdana. Nunca comparar DXF por hash (no es determinista).
 
 ## Git
 - Añadir archivos por nombre; nunca `git add .`.
@@ -37,6 +37,8 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 ## Reglas de uso (qué sale en el PDF)
 - El PDF contiene solo lo que está dentro del bloque elegido.
 - Lo apagado o congelado en el CAD no sale (se cuenta y se avisa en el TXT).
+- El texto va en el PDF como trazados vectoriales (se ve igual, pero no se puede seleccionar ni buscar); el TXT lo declara en "A tener en cuenta".
+- El TXT registra cada HATCH por tipo, patrón y escala con su tratamiento (conservado, relleno sólido, solo contorno u omitido) y el motivo.
 - Los objetos de Civil 3D requieren `EXPORTTOAUTOCAD` antes de guardar el DXF.
 - Los sólidos 3D (3DSOLID) se dibujan como huella en planta con `--solids footprint` o se omiten con `--omit-unsupported`; sin ninguna de las dos opciones, la extracción se detiene.
 

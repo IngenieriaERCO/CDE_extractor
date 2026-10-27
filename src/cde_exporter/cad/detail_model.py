@@ -478,9 +478,28 @@ class HatchDetail:
     scale: float | None
     action: str
     reason: str | None
+    operation: str | None = None
 
     def __post_init__(self) -> None:
         _require_finite("scale", self.scale)
+
+
+@dataclass(frozen=True, slots=True)
+class HatchGroup:
+    """HATCH del mismo tipo, patrón y escala que recibieron el mismo tratamiento."""
+
+    kind: str
+    pattern: str
+    scale: float | None
+    count: int
+    action: str
+    operation: str
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_finite("scale", self.scale)
+        if self.count < 1:
+            raise ValueError("count debe ser mayor que cero")
 
 
 @dataclass(frozen=True, slots=True)
@@ -488,6 +507,8 @@ class HatchSummary:
     total: int
     simplified: int
     details: tuple[HatchDetail, ...] = ()
+    groups: tuple[HatchGroup, ...] = ()
+    mode: str | None = None
 
     def __post_init__(self) -> None:
         if self.total < 0:
@@ -497,6 +518,7 @@ class HatchSummary:
         if self.simplified > self.total:
             raise ValueError("simplified debe ser menor o igual que total")
         _require_tuple("details", self.details)
+        _require_tuple("groups", self.groups)
 
 
 class ResultStatus(StrEnum):

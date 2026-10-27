@@ -16,7 +16,12 @@ from ezdxf.fonts import fonts
 from ezdxf.protocols import SupportsVirtualEntities
 
 from cde_exporter.cad.exporters import _estimate_hatch_segments
-from cde_exporter.cad.font_config import active_substitutions
+from cde_exporter.cad.font_config import (
+    active_substitutions,
+    font_is_installed,
+    is_installed_font,
+    is_shx_request,
+)
 from cde_exporter.cad.models import INVALID_DATA, CadProcessingError, invalid_data_reason
 from cde_exporter.cad.reader import read_dxf
 
@@ -45,6 +50,7 @@ class FidelityReport:
     simplified_hatches: int
     lineweight_policy: str
     hatch_simplifications: tuple[tuple[str, str, str, int], ...] = ()
+    hatch_threshold: int = 50000
 
     @property
     def entity_total(self) -> int:
@@ -128,19 +134,22 @@ def _style_and_font(entity, document: Drawing) -> tuple[str, str, str, bool]:
     configured = active_substitutions().get(raw_name.casefold()) if raw_name else None
     if configured:
         return style_name, raw_name, configured[1], False
-    if (
-        raw_name
-        and not fonts.is_shx_font_name(raw_name)
-        and not raw_name.lower().endswith((".ttf", ".otf"))
-    ):
+    is_file_name = raw_name.lower().endswith((".ttf", ".otf"))
+    if raw_name and not is_shx_request(raw_name) and not is_file_name:
         matched = fonts.find_best_match(family=raw_name)
-        if matched is None:
+        if not is_installed_font(raw_name, matched):
             fallback = fonts.font_manager.get_font_face(fonts.font_manager.fallback_font_name())
             return style_name, raw_name, fallback.filename, False
         return style_name, raw_name, matched.filename, True
     if not raw_name:
         return style_name, "(fuente por defecto)", "(fuente por defecto)", True
     face = fonts.get_entity_font_face(entity, document)
+    if is_file_name:
+        # Archivo TrueType pedido por nombre: ezdxf lo resuelve por ese nombre.
+        if font_is_installed(raw_name):
+            return style_name, raw_name, face.filename, True
+        fallback = fonts.font_manager.get_font_face(fonts.font_manager.fallback_font_name())
+        return style_name, raw_name, fallback.filename, False
     if face.family:
         matched_face = fonts.font_manager.find_best_match(face)
         available = matched_face is not None
@@ -235,6 +244,7 @@ def inspect_fidelity(
         lineweight_policy=config.Configuration().lineweight_policy.name,
         simplified_hatches=len(simplified_rows) if hatch_mode == "auto" else simplified,
         hatch_simplifications=tuple(simplified_rows),
+        hatch_threshold=hatch_threshold,
     )
 
 

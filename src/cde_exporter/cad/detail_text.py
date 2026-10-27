@@ -43,6 +43,15 @@ _ADVICE = {
 }
 
 
+def _text_as_paths_note(count: int) -> str:
+    entities = "1 entidad de texto" if count == 1 else f"{count} entidades de texto"
+    return (
+        f"El texto del PDF ({entities}: TEXT, MTEXT, ATTRIB y DIMENSION) está dibujado como "
+        "trazados vectoriales: se ve igual que en el CAD, pero no se puede seleccionar, copiar "
+        "ni buscar."
+    )
+
+
 def _number(value: float | int) -> str:
     return f"{value:.3f}"
 
@@ -251,15 +260,31 @@ def _format_fidelity(detail: ExtractedDetail) -> list[str]:
     else:
         lines += _line("HATCH total", str(detail.hatches.total))
         lines += _line("HATCH simplificados", str(detail.hatches.simplified))
+        if detail.hatches.mode:
+            lines += _line("Modo de rayado", detail.hatches.mode)
+        if detail.hatches.groups:
+            lines += ["Tratamiento de los HATCH (tipo | patrón | escala | tratamiento | cantidad)"]
+            for group in detail.hatches.groups:
+                scale = "no disponible" if group.scale is None else f"{group.scale:g}"
+                treatment = group.operation
+                if group.reason:
+                    treatment += f"; motivo: {group.reason}"
+                lines += _line(
+                    "",
+                    f"{group.kind} | {group.pattern} | {scale} | {treatment} | {group.count}",
+                    indent="  ",
+                )
         if detail.hatches.details:
             for hatch in detail.hatches.details:
                 scale = "no disponible" if hatch.scale is None else _number(hatch.scale)
                 reason = hatch.reason or "no disponible"
+                operation = f"; operación: {hatch.operation}" if hatch.operation else ""
                 lines += _line(
                     "Simplificación HATCH",
-                    f"capa {hatch.layer}, patrón {hatch.pattern}, escala {scale}; motivo: {reason}",
+                    f"capa {hatch.layer}, patrón {hatch.pattern}, escala {scale}"
+                    f"{operation}; motivo: {reason}",
                 )
-        elif detail.hatches.simplified:
+        elif detail.hatches.simplified and not detail.hatches.groups:
             lines += _line("Motivo de simplificación HATCH", "no disponible")
 
     groups: dict[tuple[str, str, str, str], int] = {}
@@ -321,6 +346,9 @@ def _format_result(detail: ExtractedDetail) -> list[str]:
         notes.append(f"{warning.message} {advice}" if advice else warning.message)
     if detail.physical_scale_guaranteed is False and detail.physical_scale_note:
         notes.append(f"Escala física no garantizada: {detail.physical_scale_note}")
+    text_entities = sum(font.uses for font in detail.fonts)
+    if text_entities:
+        notes.append(_text_as_paths_note(text_entities))
     for item in result.warnings_after_export:
         notes.append(f"Aviso del renderizador (ezdxf): {item}")
     if notes:

@@ -1,6 +1,6 @@
 # Estado del proyecto — Exportador Vectorial
 
-Último hito: ajuste de la Fase 3 — rendimiento y fidelidad de estilos en la extracción (consulta git log para el hash). 269 pruebas pasando, ruff limpio.
+Último hito: ajuste de la Fase 3 — rendimiento y fidelidad de estilos en la extracción (consulta git log para el hash). 289 pruebas pasando, ruff limpio.
 
 ## Plan en 4 fases
 1. Selección de bloque + escala — hecha.
@@ -29,6 +29,9 @@ Hecho:
   - Aviso `ENTITIES_INVALID_DATA` en la terminal y en "A tener en cuenta", con tipo, handle, capa y bloque, y lo que pasa realmente con la entidad (p. ej. "Se dibuja con el estilo de texto por defecto" si la extracción la reparó).
   - Al dibujar y en el inventario, una entidad que lanza error se trata como no soportada con el motivo "datos inválidos: …" (sin trazos a medias): con `--omit-unsupported` se omite con aviso; sin ella, la extracción se detiene con un mensaje claro. La prueba de caja del inventario solo corre en entidades compuestas (LEADER, DIMENSION, MLINE, ACAD_TABLE…), sin coste apreciable.
   - El aviso "entidades sin caja" se recalcula sobre lo que se dibuja (antes salía falso por la entidad inválida del origen), y la línea "Huellas: 0 3DSOLID…" ya no sale si el bloque no tiene sólidos.
+- Registro de HATCH en el TXT (sección F): modo de rayado y una tabla "tipo | patrón | escala | tratamiento | cantidad" con todos los HATCH. El tratamiento es "conservado" o la operación aplicada (relleno sólido en lugar del patrón, solo contorno, no se dibuja) con su motivo. Las simplificaciones por umbral indican además la operación. Campos nuevos opcionales (`HatchGroup`, `HatchSummary.groups/mode`, `HatchDetail.operation`): `model_version` sigue en "2".
+- Texto como trazados: "A tener en cuenta" declara cuántas entidades de texto van dibujadas como trazados vectoriales (no seleccionables ni buscables). Una prueba lo contrasta con el PDF real.
+- Fuentes instaladas ya no se sustituyen por el respaldo (p. ej. Verdana). Había dos causas en `font_config.py`: `ezdxf.fonts.is_shx_font_name` da verdadero para cualquier nombre sin `.ttf` (los nombres de familia como "Verdana" nunca se comprobaban), y la comprobación abría `matched.filename` como si fuera una ruta (es solo el nombre). Ahora `font_is_installed` acepta la fuente si coincide la familia o el archivo, y el informe de fidelidad usa la misma regla. Cambió el hash del SVG de Perfil_K0010 (4 textos pasan de Arial a Verdana); el hash nuevo está pendiente de fijar en CLAUDE.md.
 - Error CAD sin traceback: cualquier excepción inesperada termina con "Error CAD inesperado (Tipo): mensaje. No se generaron archivos.", código 1 y sin archivos. Con la variable `CDE_DEBUG=1` se muestra el traceback completo.
 
 Opcional (medido; hoy no compensa):
@@ -36,6 +39,8 @@ Opcional (medido; hoy no compensa):
 - Paso 5, evitar relecturas de los DXF temporales: ~10 s en Plano_completo y 0,1 s en Perfil_K0010; el tiempo que queda es sobre todo leer el DXF de origen, que ya ocurre una sola vez.
 
 Pendiente:
+- Texto seleccionable y buscable en el PDF (hoy 0 caracteres extraíbles): propuesta de capa de texto invisible pendiente de decisión.
+- HATCH "degradado" de Civil 3D: los rellenos `SOLID` y `SOLID,_O` (19 de los 21 HATCH de Perfil_K0010) salen etiquetados como "degradado" en la tabla de HATCH del TXT, porque `has_gradient_data` de ezdxf es verdadero. Conviene revisar si de verdad son degradados o rellenos sólidos con datos de degradado.
 - Inventario de entidades no visibles: hoy salen como "conservadas" en la sección E.
 - MULTILEADER marcados como "no soportados" en el inventario aunque se dibujan con su gráfico proxy.
 - Heurística de unidades con falsos positivos (INSERT con escala 0.001 y coordenadas georreferenciadas de millones).

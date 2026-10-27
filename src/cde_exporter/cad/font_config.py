@@ -13,7 +13,6 @@ import ezdxf
 from ezdxf.document import Drawing
 from ezdxf.fonts import fonts
 from ezdxf.fonts.font_manager import get_ttf_font_face
-from fontTools.ttLib import TTFont
 
 from cde_exporter.cad.models import CadProcessingError
 
@@ -47,43 +46,50 @@ def _fallback_path(name: str, folder: str | None) -> Path:
     raise CadProcessingError(f"No se encontró la fuente de respaldo '{name}'")
 
 
-def _font_family(filename: str) -> str:
-    import logging
+_FONT_FILE_SUFFIXES = (".ttf", ".otf", ".ttc", ".shx")
 
-    logger = logging.getLogger(
-        "fontTools.ttLib.tables._n_a_m_e"
+
+def is_shx_request(name: str) -> bool:
+    """Solo los archivos .shx son fuentes de trazo; un nombre sin extensión es una familia.
+
+    ``ezdxf.fonts.is_shx_font_name`` da True para cualquier nombre que no acabe en .ttf, así
+    que no distingue la familia "Verdana" de una fuente SHX.
+    """
+    return name.casefold().endswith(".shx")
+
+
+def font_stem(name: str) -> str:
+    """Nombre de la fuente sin la extensión de archivo (los nombres de familia no cambian)."""
+    lowered = name.casefold()
+    for suffix in _FONT_FILE_SUFFIXES:
+        if lowered.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def is_installed_font(requested: str, matched) -> bool:
+    """Indica si la fuente que ezdxf encontró es la pedida y no una aproximada.
+
+    ``find_best_match`` devuelve la más parecida; solo se acepta si su familia o su nombre de
+    archivo coinciden con lo pedido (``matched.filename`` es el nombre, no una ruta).
+    """
+    if matched is None or not matched.filename:
+        return False
+    return (
+        str(matched.family).casefold() == font_stem(requested).casefold()
+        or str(matched.filename).casefold() == requested.casefold()
     )
 
-    class _ExpectedNameTableMessage(logging.Filter):
-        def filter(self, record):
-            return (
-                "name table stringOffset incorrect"
-                not in record.getMessage()
-            )
 
-    message_filter = _ExpectedNameTableMessage()
-    logger.addFilter(message_filter)
-    font = None
+def font_is_installed(name: str) -> bool:
+    """Indica si ezdxf encuentra exactamente esa fuente (por archivo TrueType o por familia)."""
+    if is_shx_request(name):
+        return False
+    if name.casefold().endswith((".ttf", ".otf", ".ttc")) and fonts.font_manager.has_font(name):
+        return True
+    return is_installed_font(name, fonts.find_best_match(family=font_stem(name)))
 
-    try:
-        font = TTFont(filename, lazy=True)
 
-        if "name" not in font:
-            return ""
-
-        for record in font["name"].names:
-            if record.nameID == 1:
-                return record.toUnicode().casefold()
-
-    except (OSError, KeyError, ValueError):
-        return ""
-
-    finally:
-        if font is not None:
-            font.close()
-        logger.removeFilter(message_filter)
-
-    return ""
 def _requests(source: str | Path | Drawing) -> Counter[str]:
     document = source if isinstance(source, Drawing) else ezdxf.readfile(source)
     result: Counter[str] = Counter()
@@ -172,14 +178,8 @@ def configure_fonts(
         for family, count in counts.items():
             if family.casefold() in configured:
                 continue
-            if not fonts.is_shx_font_name(family):
-                matched = fonts.find_best_match(family=Path(family).stem)
-                if (
-                    matched
-                    and matched.filename
-                    and _font_family(matched.filename) == Path(family).stem.casefold()
-                ):
-                    continue
+            if font_is_installed(family):
+                continue
             automatic[family.casefold()] = (
                 family,
                 fallback_path.name,

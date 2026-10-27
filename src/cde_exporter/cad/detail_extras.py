@@ -10,6 +10,7 @@ from ezdxf.document import Drawing
 from cde_exporter.cad.detail_model import (
     FontUse,
     HatchDetail,
+    HatchGroup,
     HatchSummary,
     NestedBlockInfo,
     SelectedReference,
@@ -64,8 +65,49 @@ def font_uses(report: FidelityReport) -> tuple[FontUse, ...]:
     )
 
 
+_SOLID_INSTEAD_OF_PATTERN = "relleno sólido en lugar del patrón"
+_KEPT = "conservado"
+
+
+def _hatch_groups(report: FidelityReport) -> tuple[HatchGroup, ...]:
+    """Reparte los HATCH por (tipo, patrón, escala) según el tratamiento del modo de rayado."""
+    mode = report.hatch_mode
+    over_threshold = Counter(
+        (pattern, scale) for _layer, pattern, scale, _estimate in report.hatch_simplifications
+    )
+    groups = []
+    for (kind, pattern, scale), count in report.hatches.items():
+        simplified = 0
+        operation = reason = ""
+        if mode == "auto" and kind == "patrón":
+            simplified = min(count, over_threshold[(pattern, scale)])
+            operation = _SOLID_INSTEAD_OF_PATTERN
+            reason = f"estimación de tramos superior a --hatch-threshold {report.hatch_threshold}"
+        elif mode == "solid" and kind != "sólido":
+            simplified = count
+            operation = f"relleno sólido en lugar del {kind}"
+            reason = "--hatch-mode solid"
+        elif mode == "outline":
+            simplified = count
+            operation = "solo contorno, sin relleno ni patrón"
+            reason = "--hatch-mode outline"
+        elif mode == "ignore":
+            simplified = count
+            operation = "no se dibuja"
+            reason = "--hatch-mode ignore"
+        for number, action, text, why in (
+            (count - simplified, "conserved", _KEPT, None),
+            (simplified, "simplified", operation, reason),
+        ):
+            if number:
+                groups.append(
+                    HatchGroup(kind, pattern, float(scale), number, action, text, why)
+                )
+    return tuple(groups)
+
+
 def hatch_summary(report: FidelityReport) -> HatchSummary | None:
-    """Resume los hatch presentes y las simplificaciones registradas."""
+    """Resume los hatch presentes, su tratamiento y las simplificaciones registradas."""
     total = sum(report.hatches.values())
     if not total:
         return None
@@ -76,10 +118,17 @@ def hatch_summary(report: FidelityReport) -> HatchSummary | None:
             scale=float(scale),
             action="simplified",
             reason=f"Simplificado por estimación de {estimate} tramos.",
+            operation=_SOLID_INSTEAD_OF_PATTERN,
         )
         for layer, pattern, scale, estimate in report.hatch_simplifications
     )
-    return HatchSummary(total, report.simplified_hatches, details)
+    return HatchSummary(
+        total,
+        report.simplified_hatches,
+        details,
+        groups=_hatch_groups(report),
+        mode=report.hatch_mode,
+    )
 
 
 def nested_blocks(document: Drawing) -> tuple[NestedBlockInfo, ...]:
