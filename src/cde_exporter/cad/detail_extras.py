@@ -60,7 +60,13 @@ def font_uses(report: FidelityReport) -> tuple[FontUse, ...]:
     for (_style, requested, resolved, found), uses in report.fonts.items():
         totals[(requested, resolved, found)] += uses
     return tuple(
-        FontUse(requested, resolved, found, uses)
+        FontUse(
+            requested,
+            resolved,
+            found,
+            uses,
+            None if found else report.font_origins.get(requested.casefold()),
+        )
         for (requested, resolved, found), uses in sorted(totals.items())
     )
 

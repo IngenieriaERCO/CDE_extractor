@@ -30,15 +30,15 @@ from cde_exporter.cad.detail_model import (
     Severity,
     UnitInfo,
 )
+from cde_exporter.cad.entity_policy import PolicyContext, decide
 from cde_exporter.cad.fidelity import (
     FidelityReport,
-    _style_and_font,
+    entity_facts,
     fidelity_dispatch,
-    hatch_simplification_reason,
     iter_detail_entities,
-    unsupported_entity_reason,
+    iter_detail_entities_with_visibility,
+    missing_glyphs_message,
 )
-from cde_exporter.cad.models import INVALID_DATA
 from cde_exporter.cad.scale import UnitVerification
 
 _URL_REFERENCE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
@@ -234,6 +234,14 @@ def build_extracted_detail(
                 "La extracción contiene entidades sin caja geométrica calculable.",
             )
         )
+    if fidelity_report is not None and fidelity_report.missing_glyphs:
+        warnings.append(
+            ExtractionWarning(
+                "GLYPHS_MISSING",
+                Severity.WARNING,
+                missing_glyphs_message(fidelity_report.missing_glyphs),
+            )
+        )
 
     counts: Counter[tuple[str, str, EntityStatus]] = Counter()
     dispositions = []
@@ -244,33 +252,21 @@ def build_extracted_detail(
         and hatch_threshold is not None
     ):
         dispatch = fidelity_dispatch(document)
-        for index, entity in enumerate(iter_detail_entities(document)):
+        context = PolicyContext(hatch_mode, hatch_threshold)
+        for index, item in enumerate(iter_detail_entities_with_visibility(document)):
+            entity = item.entity
             entity_type = entity.dxftype()
             layer = str(entity.dxf.get("layer", "0") or "0")
-            reason = unsupported_entity_reason(entity, dispatch)
-            if reason is not None:
-                status = EntityStatus.UNSUPPORTED
-                reason = (
-                    f"{reason[0].upper()}{reason[1:]}."
-                    if reason.startswith(INVALID_DATA)
-                    else f"Tipo no soportado o condicionado: {reason}."
-                )
-            elif entity_type == "HATCH" and (
-                hatch_reason := hatch_simplification_reason(entity, hatch_mode, hatch_threshold)
-            ):
-                status = EntityStatus.SIMPLIFIED
-                reason = hatch_reason
-            elif entity_type in {"TEXT", "MTEXT", "DIMENSION", "ATTRIB"}:
-                _style, source_font, resolved_font, found = _style_and_font(entity, document)
-                if not found:
-                    status = EntityStatus.TRANSFORMED
-                    reason = (
-                        f"Fuente sustituida: {source_font} se representa con {resolved_font}."
-                    )
-                else:
-                    status = EntityStatus.CONSERVED
-            else:
-                status = EntityStatus.CONSERVED
+            facts = entity_facts(
+                entity,
+                dispatch,
+                document,
+                hatch_mode,
+                visible=item.visible,
+                hidden_by_ancestor=item.hidden_by_ancestor,
+            )
+            decision = decide(facts, context)
+            status, reason = decision.status, decision.reason
             counts[(entity_type, layer, status)] += 1
             if status is not EntityStatus.CONSERVED:
                 dispositions.append(
@@ -324,6 +320,14 @@ def build_extracted_detail(
             mismatches.append(
                 f"HATCH simplificados: inventario {model_simplified_hatches}, "
                 f"informe {fidelity_report.simplified_hatches}"
+            )
+        model_hidden = sum(
+            row.count for row in inventory if row.status is EntityStatus.NOT_VISIBLE
+        )
+        if model_hidden != fidelity_report.hidden_total:
+            mismatches.append(
+                f"entidades no visibles: inventario {model_hidden}, "
+                f"informe {fidelity_report.hidden_total}"
             )
         model_transformed = sum(
             row.count for row in inventory if row.status is EntityStatus.TRANSFORMED

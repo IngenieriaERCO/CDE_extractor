@@ -46,6 +46,29 @@ def _fallback_path(name: str, folder: str | None) -> Path:
     raise CadProcessingError(f"No se encontró la fuente de respaldo '{name}'")
 
 
+def register_font_file(path: Path) -> None:
+    """Hace que ezdxf conozca un archivo de fuente concreto por su nombre de archivo.
+
+    ezdxf 1.4 no ofrece una API pública para añadir un solo archivo: ``scan_folder`` escanea
+    toda una carpeta y puede cambiar la fuente que se resuelve para otras familias. Por eso se
+    usa la caché interna del administrador de fuentes, y solo aquí. Si una versión futura de
+    ezdxf la cambia, falla con un mensaje claro en lugar de un AttributeError.
+    """
+    try:
+        add_entry = fonts.font_manager._font_cache.add_entry
+    except AttributeError as error:
+        raise CadProcessingError(
+            f"La versión de ezdxf instalada ({ezdxf.__version__}) cambió el administrador de "
+            "fuentes que usa el exportador, que está probado con ezdxf 1.4.x. Instale una "
+            "versión 1.4.x de ezdxf o actualice el exportador."
+        ) from error
+    try:
+        face = get_ttf_font_face(path)
+    except Exception as error:  # noqa: BLE001 - fontTools puede lanzar cualquier error
+        raise CadProcessingError(f"No se pudo leer la fuente '{path}': {error}") from error
+    add_entry(path, face)
+
+
 _FONT_FILE_SUFFIXES = (".ttf", ".otf", ".ttc", ".shx")
 
 
@@ -172,9 +195,7 @@ def configure_fonts(
     fallback_path = _fallback_path(fallback, folder) if counts else None
     automatic = {}
     if fallback_path:
-        fonts.font_manager._font_cache.add_entry(
-                fallback_path, get_ttf_font_face(fallback_path)
-            )
+        register_font_file(fallback_path)
         for family, count in counts.items():
             if family.casefold() in configured:
                 continue
@@ -193,9 +214,7 @@ def configure_fonts(
     for family, target, _origin in combined.values():
         target_path = Path(target).expanduser()
         if target_path.is_file():
-            fonts.font_manager._font_cache.add_entry(
-                target_path, get_ttf_font_face(target_path)
-            )
+            register_font_file(target_path)
             target = target_path.name
         face = fonts.resolve_font_face(target)
         if not face.filename:

@@ -19,6 +19,7 @@ _STATUS_NAMES = {
     EntityStatus.SIMPLIFIED: "simplificadas",
     EntityStatus.OMITTED: "omitidas",
     EntityStatus.UNSUPPORTED: "no soportadas",
+    EntityStatus.NOT_VISIBLE: "no visibles",
 }
 _SELECTION_NAMES = {
     SelectionMethod.AUTOMATIC: "automática",
@@ -40,6 +41,11 @@ _ADVICE = {
     "UNITS_SUSPECT": _UNITS_ADVICE,
     "UNSUPPORTED_OMITTED": "Revise en el CAD si esa geometría es necesaria en el PDF.",
     "SOLIDS_AS_FOOTPRINT": "La huella muestra la planta del sólido, no su volumen ni su altura.",
+    "GLYPHS_MISSING": "Indique con --font-substitutions una fuente que contenga esos caracteres.",
+}
+_FONT_ORIGINS = {
+    "configurada": "sustitución configurada (JSON --font-substitutions)",
+    "respaldo automático": "sustitución automática (fuente de respaldo)",
 }
 
 
@@ -219,6 +225,8 @@ def _format_inventory(detail: ExtractedDetail) -> list[str]:
     lines = _section("E. ENTIDADES CAD PROCESADAS")
     lines += _line("Total de entidades", str(sum(totals.values())))
     for status in EntityStatus:
+        if status is EntityStatus.NOT_VISIBLE and not totals[status]:
+            continue  # solo se informa si hay alguna
         value = str(totals[status])
         if status is EntityStatus.OMITTED and totals[status]:
             value += "; omitidas por --omit-unsupported (ezdxf no puede dibujarlas)"
@@ -247,9 +255,11 @@ def _format_fidelity(detail: ExtractedDetail) -> list[str]:
     substituted = [font for font in detail.fonts if not font.found]
     if substituted:
         for font in sorted(substituted, key=lambda item: (item.requested, item.resolved)):
+            origin = _FONT_ORIGINS.get(font.origin or "")
             lines += _line(
                 "Fuente sustituida",
-                f"{font.requested} → {font.resolved}; usos {font.uses}; no se encontró",
+                f"{font.requested} → {font.resolved}; usos {font.uses}; no se encontró"
+                + (f"; {origin}" if origin else ""),
             )
         total_uses = sum(font.uses for font in substituted)
         lines += _line("Total de usos de fuentes sustituidas", str(total_uses))

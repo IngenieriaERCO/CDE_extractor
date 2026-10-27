@@ -21,6 +21,7 @@ from ezdxf.addons.drawing.config import HatchPolicy
 from ezdxf.addons.drawing.properties import LayoutProperties
 from ezdxf.document import Drawing
 
+from cde_exporter.cad.entity_policy import GEOMETRY_FROM_DATA_TYPES, unsupported_hint
 from cde_exporter.cad.models import INVALID_DATA, CadProcessingError, invalid_data_reason
 from cde_exporter.cad.reader import ensure_layer_table_entries, read_dxf
 
@@ -50,6 +51,7 @@ class _StrictFrontend(Frontend):
         # Una entidad que lanza un error al dibujarse se trata como no soportada por datos
         # inválidos; se deshacen los trazos que hubiera grabado para no dejarla a medias.
         start = len(self._records) if self._records is not None else None
+        reported = len(self.skipped) + sum(self.omitted.values()) + self.invisible
         try:
             super().draw_entity(entity, properties)
         except (MemoryError, TimeoutError):
@@ -58,6 +60,16 @@ class _StrictFrontend(Frontend):
             if start is not None:
                 del self._records[start:]
             self.skip_entity(entity, invalid_data_reason(error))
+        else:
+            # ezdxf no avisa si un MULTILEADER no genera ninguna geometría: se trata como no
+            # soportado (el inventario ya lo clasifica así), no se deja pasar en silencio.
+            if (
+                start is not None
+                and entity.dxftype() in GEOMETRY_FROM_DATA_TYPES
+                and len(self._records) == start
+                and len(self.skipped) + sum(self.omitted.values()) + self.invisible == reported
+            ):
+                self.skip_entity(entity, "unsupported")
 
     def skip_entity(self, entity, msg: str) -> None:
         if msg == "invisible":
@@ -142,15 +154,10 @@ def _raise_if_skipped(
         item.endswith(": unsupported") or f": {INVALID_DATA}: " in item
         for item in frontend.skipped
     ):
-        if suggest_solids_footprint and "3DSOLID: unsupported" in frontend.skipped:
-            message += (
-                ". Puede usar en cad extract-block --solids footprint (dibujar los 3DSOLID "
-                "como huella 2D) o --omit-unsupported (omitirlos)."
-            )
-        else:
-            message += (
-                ". Puede usar --omit-unsupported en cad extract-block para continuar sin ellas."
-            )
+        unsupported_types = {
+            item.split(":", 1)[0] for item in frontend.skipped if item.endswith(": unsupported")
+        }
+        message += unsupported_hint(unsupported_types, suggest_solids_footprint)
     raise CadProcessingError(message)
 
 
@@ -170,6 +177,8 @@ class ExportReport:
     pdf_vector_drawing_count: int
     warnings: tuple[str, ...]
     omitted: tuple[tuple[str, str, int], ...] = ()
+    # Entidades que ezdxf descartó una a una por no ser visibles (capa apagada, etc.).
+    invisible: int = 0
 
 
 def _draw_to_svg(
@@ -218,6 +227,7 @@ def _draw_to_pdf(
     hatch_threshold: int = 50000,
     omit_unsupported: bool = False,
     suggest_solids_footprint: bool = False,
+    stats: dict[str, int] | None = None,
 ) -> tuple[bytes, tuple[str, ...], tuple[tuple[str, str, int], ...]]:
     backend = pdf_backend.PyMuPdfBackend()
     layout_properties = LayoutProperties.from_layout(document.modelspace())
@@ -241,6 +251,8 @@ def _draw_to_pdf(
             "Reintenta con --hatch-mode outline."
         )
     _raise_if_skipped(frontend, "PDF", suggest_solids_footprint)
+    if stats is not None:
+        stats["invisible"] = frontend.invisible
     return (
         backend.get_pdf_bytes(page, settings=settings),
         _frontend_messages(frontend),
@@ -407,6 +419,7 @@ def export_vector_outputs(
                 suggest_solids_footprint,
             )
             svg_element_count = _validate_svg(svg_content)
+        stats: dict[str, int] = {}
         pdf_content, pdf_warnings, pdf_omitted = _draw_to_pdf(
             document,
             page,
@@ -415,6 +428,7 @@ def export_vector_outputs(
             hatch_threshold,
             omit_unsupported,
             suggest_solids_footprint,
+            stats=stats,
         )
         if draw_svg and svg_omitted != pdf_omitted:
             raise CadProcessingError(
@@ -459,4 +473,5 @@ def export_vector_outputs(
         pdf_vector_drawing_count=pdf_vector_count,
         warnings=tuple(dict.fromkeys((*svg_warnings, *pdf_warnings))),
         omitted=pdf_omitted,
+        invisible=stats.get("invisible", 0),
     )

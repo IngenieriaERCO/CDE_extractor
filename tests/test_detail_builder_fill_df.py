@@ -50,6 +50,7 @@ def test_detail_json_fills_extra_fields_from_existing_flow(tmp_path: Path, capsy
             "resolved": detail["fonts"][0]["resolved"],
             "found": False,
             "uses": 1,
+            "origin": "respaldo automático",
         },
     ]
     assert detail["hatches"]["total"] == 1

@@ -14,6 +14,7 @@ class EntityStatus(StrEnum):
     SIMPLIFIED = "simplified"
     OMITTED = "omitted"
     UNSUPPORTED = "unsupported"
+    NOT_VISIBLE = "not_visible"
 
 
 class Severity(StrEnum):
@@ -465,6 +466,7 @@ class FontUse:
     resolved: str
     found: bool
     uses: int
+    origin: str | None = None
 
     def __post_init__(self) -> None:
         if self.uses < 0:

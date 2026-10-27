@@ -4,17 +4,28 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import ezdxf
 from ezdxf import bbox
 from ezdxf.addons.drawing import Frontend, RenderContext, config, svg
 from ezdxf.addons.drawing.config import HatchPolicy
+from ezdxf.addons.drawing.properties import Properties
 from ezdxf.document import Drawing
 from ezdxf.fonts import fonts
-from ezdxf.protocols import SupportsVirtualEntities
+from ezdxf.protocols import SupportsVirtualEntities, virtual_entities
+from ezdxf.tools.text import fast_plain_mtext
 
+from cde_exporter.cad.detail_model import EntityStatus
+from cde_exporter.cad.entity_policy import (
+    GEOMETRY_FROM_DATA_TYPES,
+    PROBED_COMPOSITES,
+    TEXT_TYPES,
+    EntityFacts,
+    PolicyContext,
+    decide,
+)
 from cde_exporter.cad.exporters import _estimate_hatch_segments
 from cde_exporter.cad.font_config import (
     active_substitutions,
@@ -22,7 +33,7 @@ from cde_exporter.cad.font_config import (
     is_installed_font,
     is_shx_request,
 )
-from cde_exporter.cad.models import INVALID_DATA, CadProcessingError, invalid_data_reason
+from cde_exporter.cad.models import CadProcessingError, invalid_data_reason
 from cde_exporter.cad.reader import read_dxf
 
 _HATCH_POLICIES = {
@@ -32,11 +43,6 @@ _HATCH_POLICIES = {
     "ignore": HatchPolicy.IGNORE,
     "auto": HatchPolicy.NORMAL,
 }
-_TEXT_TYPES = {"TEXT", "MTEXT", "DIMENSION", "ATTRIB"}
-# Entidades cuya geometría ezdxf genera a partir de estilos y overrides (no INSERT).
-_PROBED_COMPOSITES = frozenset(
-    {"LEADER", "DIMENSION", "ARC_DIMENSION", "LARGE_RADIAL_DIMENSION", "MLINE", "ACAD_TABLE"}
-)
 _INLINE_FONT = re.compile(r"\\f([^|;]+)(?:\|[^;]*)?;", re.IGNORECASE)
 
 
@@ -51,6 +57,13 @@ class FidelityReport:
     lineweight_policy: str
     hatch_simplifications: tuple[tuple[str, str, str, int], ...] = ()
     hatch_threshold: int = 50000
+    # Origen de cada sustitución de fuente: familia pedida (en minúsculas) → "configurada" o
+    # "respaldo automático".
+    font_origins: dict[str, str] = field(default_factory=dict)
+    # Caracteres que la fuente sustituta no tiene: (archivo de fuente, carácter) → textos.
+    missing_glyphs: dict[tuple[str, str], int] = field(default_factory=dict)
+    # Entidades contabilizadas que no se dibujan por no ser visibles en el CAD.
+    hidden_total: int = 0
 
     @property
     def entity_total(self) -> int:
@@ -80,33 +93,128 @@ def iter_detail_entities(document: Drawing):
 _entities_with_nested_blocks = iter_detail_entities
 
 
+@dataclass(frozen=True, slots=True)
+class EntityVisibility:
+    entity: object
+    visible: bool
+    # No se ve porque un INSERT que la contiene está marcado como invisible.
+    hidden_by_ancestor: bool = False
+    # Veces que ezdxf la recorre (un INSERT en matriz repite su contenido en cada celda).
+    weight: int = 1
+
+
+def iter_detail_entities_with_visibility(document: Drawing):
+    """Como ``iter_detail_entities``, indicando si ezdxf dibujaría cada entidad.
+
+    Aplica las reglas del exportador con el mismo ``RenderContext``: un INSERT solo depende de
+    su indicador de invisible (el estado de su capa no cuenta); el resto, de su capa
+    (apagada, congelada), de su indicador de invisible y, en la capa "0" de un bloque, de la
+    capa del INSERT que lo contiene. El contenido de un INSERT invisible no se recorre al
+    dibujar, pero aquí se sigue contando (marcado ``hidden_by_ancestor``).
+    """
+    ctx = RenderContext(document)
+
+    def visit(entity, block_stack: tuple[str, ...], hidden_above: bool, weight: int):
+        visible = not hidden_above and ctx.resolve_visible(entity)
+        yield EntityVisibility(entity, visible, hidden_above, weight)
+        if entity.dxftype() != "INSERT":
+            return
+        pushed = False
+        if visible:
+            state = Properties()
+            state.layer = ctx.resolve_layer(entity)
+            ctx.push_state(state)
+            pushed = True
+        try:
+            hidden = hidden_above or not visible
+            inner_weight = weight * max(1, entity.mcount) if visible else weight
+            for attrib in entity.attribs:
+                yield from visit(attrib, block_stack, hidden, inner_weight)
+            name = entity.dxf.name
+            if name in block_stack:
+                return
+            try:
+                block = document.blocks[name]
+            except ezdxf.DXFError:
+                return
+            for child in block:
+                yield from visit(child, (*block_stack, name), hidden, inner_weight)
+        finally:
+            if pushed:
+                ctx.pop_state()
+
+    for entity in document.modelspace():
+        yield from visit(entity, (), False, 1)
+
+
+def hidden_skip_events(document: Drawing) -> int:
+    """Entidades que ezdxf descarta una a una por no ser visibles al dibujar el documento.
+
+    Las que están dentro de un INSERT invisible no cuentan: ezdxf no llega a recorrerlas.
+    """
+    return sum(
+        item.weight
+        for item in iter_detail_entities_with_visibility(document)
+        if not item.visible and not item.hidden_by_ancestor
+    )
+
+
 def fidelity_dispatch(document: Drawing):
     """Devuelve la tabla de tipos que el Frontend de fidelidad puede dibujar."""
     return Frontend(RenderContext(document), svg.SVGBackend())._dispatch
 
 
-def unsupported_entity_reason(entity, dispatch) -> str | None:
-    """Aplica las mismas reglas de tipo no soportado que usa inspect_fidelity.
+def entity_facts(
+    entity,
+    dispatch,
+    document: Drawing,
+    hatch_mode: str = "normal",
+    *,
+    visible: bool = True,
+    hidden_by_ancestor: bool = False,
+) -> EntityFacts:
+    """Reúne con ezdxf lo observado de una entidad; ``entity_policy.decide`` decide qué hacer.
 
-    Las entidades compuestas de ``_PROBED_COMPOSITES`` se miden: si ezdxf no puede
-    generar su geometría, son no soportadas por datos inválidos. Solo esos tipos, para
-    no recorrer la geometría de todas las entidades.
+    Las entidades compuestas de ``PROBED_COMPOSITES`` se miden y los MULTILEADER se
+    descomponen: si ezdxf no puede generar su geometría son datos inválidos. Solo esos tipos,
+    para no recorrer la geometría de todas las entidades.
     """
     kind = entity.dxftype()
-    proxy = bool(getattr(entity, "proxy_graphic", None))
-    virtual = isinstance(entity, SupportsVirtualEntities)
-    if kind == "IMAGE":
-        return "requiere archivo raster externo"
-    if kind in {"ACAD_PROXY_ENTITY", "MLEADER", "MULTILEADER"}:
-        return "proxy gráfico disponible" if proxy else "proxy gráfico ausente"
-    if kind not in dispatch and not virtual:
-        return "sin soporte de dibujo"
-    if kind in _PROBED_COMPOSITES:
-        try:
+    if not visible:
+        return EntityFacts(kind, visible=False, hidden_by_ancestor=hidden_by_ancestor)
+    drawable = kind in dispatch or isinstance(entity, SupportsVirtualEntities)
+    invalid_error = None
+    has_geometry = True
+    try:
+        if kind in PROBED_COMPOSITES and drawable:
             bbox.extents([entity])
-        except Exception as error:  # noqa: BLE001 - ezdxf puede lanzar cualquier error
-            return invalid_data_reason(error)
-    return None
+        elif kind in GEOMETRY_FROM_DATA_TYPES:
+            has_geometry = isinstance(entity, SupportsVirtualEntities) and any(
+                True for _ in virtual_entities(entity)
+            )
+    except Exception as error:  # noqa: BLE001 - ezdxf puede lanzar cualquier error
+        invalid_error = invalid_data_reason(error)
+    hatch_kind = None
+    estimate = 0
+    if kind == "HATCH":
+        hatch_kind = _hatch_type(entity)
+        estimate = _estimate_hatch_segments(entity) if hatch_mode == "auto" else 0
+    # Con datos inválidos tampoco se leen sus fuentes.
+    font = (
+        _style_and_font(entity, document)
+        if kind in TEXT_TYPES and invalid_error is None
+        else None
+    )
+    return EntityFacts(
+        kind,
+        drawable=drawable,
+        has_proxy=bool(getattr(entity, "proxy_graphic", None)),
+        has_geometry=has_geometry,
+        invalid_error=invalid_error,
+        hatch_kind=hatch_kind,
+        hatch_estimate=estimate,
+        font=font,
+    )
 
 
 def _style_and_font(entity, document: Drawing) -> tuple[str, str, str, bool]:
@@ -165,33 +273,82 @@ def _style_and_font(entity, document: Drawing) -> tuple[str, str, str, bool]:
     return style_name, raw_name, resolved, available
 
 
+def _text_content(entity) -> str:
+    """Texto visible de la entidad, sin códigos de formato; vacío si no se puede leer."""
+    try:
+        if entity.dxftype() == "DIMENSION":
+            override = str(entity.dxf.get("text", "") or "").replace("<>", "")
+            return fast_plain_mtext(override) if override.strip() else ""
+        return entity.plain_text()
+    except Exception:  # noqa: BLE001 - un texto con datos inválidos no detiene el informe
+        return ""
+
+
+class _GlyphChecker:
+    """Busca los caracteres de un texto que la fuente sustituta no tiene."""
+
+    def __init__(self) -> None:
+        self.missing: Counter[tuple[str, str]] = Counter()
+        self._codepoints: dict[str, frozenset[int] | None] = {}
+        self._by_text: dict[tuple[str, str], frozenset[str]] = {}
+
+    def _font_codepoints(self, name: str) -> frozenset[int] | None:
+        if name not in self._codepoints:
+            codepoints = None
+            if fonts.font_manager.has_font(name):
+                try:
+                    codepoints = frozenset(fonts.font_manager.get_ttf_font(name).getBestCmap())
+                except Exception:  # noqa: BLE001 - fuente ilegible: no se puede comprobar
+                    pass
+            self._codepoints[name] = codepoints
+        return self._codepoints[name]
+
+    def check(self, entity, resolved_font: str) -> None:
+        name = Path(str(resolved_font)).name
+        if not name.casefold().endswith((".ttf", ".otf", ".ttc")):
+            return
+        codepoints = self._font_codepoints(name)
+        if codepoints is None:
+            return
+        text = _text_content(entity)
+        key = (name, text)
+        if key not in self._by_text:
+            self._by_text[key] = frozenset(
+                char
+                for char in text
+                if ord(char) >= 32 and not char.isspace() and ord(char) not in codepoints
+            )
+        for char in self._by_text[key]:
+            self.missing[(name, char)] += 1
+
+
+def missing_glyphs_message(missing: dict[tuple[str, str], int]) -> str:
+    """Aviso de los caracteres que la fuente sustituta no tiene (agrupado por fuente)."""
+    by_font: dict[str, list[tuple[str, int]]] = {}
+    for (font, char), uses in sorted(missing.items()):
+        by_font.setdefault(font, []).append((char, uses))
+    parts = []
+    for font, items in by_font.items():
+        shown = ", ".join(
+            f"«{char}» U+{ord(char):04X} ({uses} {'texto' if uses == 1 else 'textos'})"
+            for char, uses in items[:8]
+        )
+        if len(items) > 8:
+            shown += f", … y {len(items) - 8} más"
+        noun = "carácter" if len(items) == 1 else "caracteres"
+        parts.append(f"{font}: {len(items)} {noun} sin glifo ({shown})")
+    return (
+        "La fuente sustituta no tiene todos los caracteres del texto; pueden salir vacíos o "
+        f"como un recuadro en el PDF. {'; '.join(parts)}."
+    )
+
+
 def _hatch_type(entity) -> str:
     if entity.has_gradient_data:
         return "degradado"
     if entity.dxf.get("solid_fill", 0) or entity.dxf.get("pattern_name", "").upper() == "SOLID":
         return "sólido"
     return "patrón"
-
-
-def hatch_simplification_reason(entity, hatch_mode: str, hatch_threshold: int) -> str | None:
-    """Devuelve el motivo de simplificación usado por el modo de fidelidad actual."""
-    if entity.dxftype() != "HATCH":
-        return None
-    if hatch_mode == "auto":
-        estimate = _estimate_hatch_segments(entity)
-        if estimate > hatch_threshold:
-            return (
-                f"HATCH simplificado por --hatch-threshold {hatch_threshold}; "
-                f"estimación de {estimate} tramos"
-            )
-        return None
-    if hatch_mode == "solid" and _hatch_type(entity) != "sólido":
-        return "HATCH convertido a relleno sólido por --hatch-mode solid"
-    if hatch_mode == "outline":
-        return "HATCH mostrado solo como contorno por --hatch-mode outline"
-    if hatch_mode == "ignore":
-        return "HATCH omitido deliberadamente por --hatch-mode ignore"
-    return None
 
 
 def inspect_fidelity(
@@ -208,25 +365,38 @@ def inspect_fidelity(
     text_fonts: Counter[tuple[str, str, str, bool]] = Counter()
     hatches: Counter[tuple[str, str, str]] = Counter()
     simplified_rows = []
+    glyphs = _GlyphChecker()
+    context = PolicyContext(hatch_mode, hatch_threshold)
 
-    for entity in iter_detail_entities(document):
-        kind = entity.dxftype()
+    hidden_total = 0
+    for item in iter_detail_entities_with_visibility(document):
+        entity = item.entity
+        facts = entity_facts(
+            entity,
+            dispatch,
+            document,
+            hatch_mode,
+            visible=item.visible,
+            hidden_by_ancestor=item.hidden_by_ancestor,
+        )
+        decision = decide(facts, context)
+        kind = facts.kind
         layer = str(entity.dxf.get("layer", "0") or "0")
         entities[(kind, layer)] += 1
-        reason = unsupported_entity_reason(entity, dispatch)
-        if reason is not None:
-            unsupported[(kind, layer, reason)] += 1
-        # Con datos inválidos tampoco se leen sus fuentes (el inventario hace lo mismo).
-        if kind in _TEXT_TYPES and not (reason or "").startswith(INVALID_DATA):
-            text_fonts[_style_and_font(entity, document)] += 1
-        if kind == "HATCH":
-            hatch_kind = _hatch_type(entity)
+        if decision.status is EntityStatus.NOT_VISIBLE:
+            hidden_total += 1
+        if decision.status is EntityStatus.UNSUPPORTED:
+            unsupported[(kind, layer, decision.cause)] += 1
+        if facts.font is not None:
+            text_fonts[facts.font] += 1
+            if not facts.font[3]:  # fuente sustituta: ¿tiene todos los caracteres del texto?
+                glyphs.check(entity, facts.font[2])
+        if facts.hatch_kind is not None:
             pattern = str(entity.dxf.get("pattern_name", "SOLID") or "SOLID")
             scale = f"{float(entity.dxf.get('pattern_scale', 1.0)):g}"
-            hatches[(hatch_kind, pattern, scale)] += 1
-            estimate = _estimate_hatch_segments(entity) if hatch_mode == "auto" else 0
-            if estimate > hatch_threshold:
-                simplified_rows.append((layer, pattern, scale, estimate))
+            hatches[(facts.hatch_kind, pattern, scale)] += 1
+            if facts.hatch_estimate > hatch_threshold:
+                simplified_rows.append((layer, pattern, scale, facts.hatch_estimate))
 
     hatch_total = sum(hatches.values())
     if hatch_mode in {"normal", "auto"}:
@@ -245,6 +415,9 @@ def inspect_fidelity(
         simplified_hatches=len(simplified_rows) if hatch_mode == "auto" else simplified,
         hatch_simplifications=tuple(simplified_rows),
         hatch_threshold=hatch_threshold,
+        font_origins={key: item[2] for key, item in active_substitutions().items()},
+        missing_glyphs=dict(sorted(glyphs.missing.items())),
+        hidden_total=hidden_total,
     )
 
 
@@ -343,3 +516,5 @@ def print_fidelity_summary(report: FidelityReport, destination: str | Path) -> N
             "Fuentes que requieren sustitución: "
             + ", ".join(f"{name} ({count})" for name, count in sorted(missing.items()))
         )
+    if report.missing_glyphs:
+        print(f"Aviso: {missing_glyphs_message(report.missing_glyphs)}")

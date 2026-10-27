@@ -1,6 +1,6 @@
 # Estado del proyecto — Exportador Vectorial
 
-Último hito: ajuste de la Fase 3 — rendimiento y fidelidad de estilos en la extracción (consulta git log para el hash). 289 pruebas pasando, ruff limpio.
+Último hito: ajuste de la Fase 3 — rendimiento y fidelidad de estilos en la extracción (consulta git log para el hash). 343 pruebas pasando, ruff limpio.
 
 ## Plan en 4 fases
 1. Selección de bloque + escala — hecha.
@@ -32,6 +32,10 @@ Hecho:
 - Registro de HATCH en el TXT (sección F): modo de rayado y una tabla "tipo | patrón | escala | tratamiento | cantidad" con todos los HATCH. El tratamiento es "conservado" o la operación aplicada (relleno sólido en lugar del patrón, solo contorno, no se dibuja) con su motivo. Las simplificaciones por umbral indican además la operación. Campos nuevos opcionales (`HatchGroup`, `HatchSummary.groups/mode`, `HatchDetail.operation`): `model_version` sigue en "2".
 - Texto como trazados: "A tener en cuenta" declara cuántas entidades de texto van dibujadas como trazados vectoriales (no seleccionables ni buscables). Una prueba lo contrasta con el PDF real.
 - Fuentes instaladas ya no se sustituyen por el respaldo (p. ej. Verdana). Había dos causas en `font_config.py`: `ezdxf.fonts.is_shx_font_name` da verdadero para cualquier nombre sin `.ttf` (los nombres de familia como "Verdana" nunca se comprobaban), y la comprobación abría `matched.filename` como si fuera una ruta (es solo el nombre). Ahora `font_is_installed` acepta la fuente si coincide la familia o el archivo, y el informe de fidelidad usa la misma regla. Cambió el hash del SVG de Perfil_K0010 (4 textos pasan de Arial a Verdana); el hash nuevo está pendiente de fijar en CLAUDE.md.
+- Fuentes (paso 6): (1) el TXT indica si cada sustitución fue "configurada (JSON --font-substitutions)" o "automática (fuente de respaldo)" (`FontUse.origin`, opcional; la clave `origin` aparece en el JSON de `fonts`, `model_version` sigue en "2"); (2) aviso `GLYPHS_MISSING` si la fuente sustituta no tiene caracteres que usa el texto, con el carácter, su código y cuántos textos lo usan (terminal y TXT; cuenta como advertencia); se comprueba con `get_ttf_font().getBestCmap()` de ezdxf, sin coste medible (Plano_completo: 1,24 s con la comprobación, 1,31 s sin ella); (3) ezdxf 1.4 no ofrece API pública para registrar un solo archivo de fuente, así que el uso de `_font_cache` queda aislado en `register_font_file`: si ezdxf lo cambia, falla con un mensaje claro (versión de ezdxf y "1.4.x"), y una prueba avisa del cambio.
+- Tabla de política por tipo de entidad (paso 5), en `entity_policy.py` (solo biblioteca estándar): `fidelity.entity_facts` reúne con ezdxf lo observado de cada entidad y `decide` da el estado, el motivo y la causa. El inventario (`detail_builder`), el informe de fidelidad (`inspect_fidelity`) y las pistas de error de `exporters` usan las mismas reglas; antes decidían por separado.
+  - MULTILEADER: se conservan si ezdxf genera geometría con sus propios datos (no dependen del gráfico proxy). Antes salían siempre como "no soportados": en Plano_completo, 5 MULTILEADER con proxy se dibujaban y figuraban como no soportados. Si no generan geometría son "no soportados" y el exportador los detiene o los omite con `--omit-unsupported`, como el resto (ezdxf los descartaba en silencio).
+  - Estado nuevo "no visibles" en la sección E (solo se imprime si hay alguna): capa apagada o congelada, entidad invisible, 3DFACE con todos los bordes invisibles, o contenido de un INSERT invisible. Se calcula con el mismo `RenderContext` que el exportador (un INSERT solo depende de su indicador `invisible`; en la capa "0" de un bloque se hereda la capa del INSERT). Una entidad no visible no cuenta como fuente sustituta, HATCH ni no soportada (un 3DSOLID oculto ya no detiene la extracción). La conciliación con lo que descarta el exportador sigue en tiempo de ejecución (`FIDELITY_RECONCILIATION`). Valor nuevo `not_visible` en `EntityStatus` (`model_version` sigue en "2").
 - Error CAD sin traceback: cualquier excepción inesperada termina con "Error CAD inesperado (Tipo): mensaje. No se generaron archivos.", código 1 y sin archivos. Con la variable `CDE_DEBUG=1` se muestra el traceback completo.
 
 Opcional (medido; hoy no compensa):
@@ -41,14 +45,12 @@ Opcional (medido; hoy no compensa):
 Pendiente:
 - Texto seleccionable y buscable en el PDF (hoy 0 caracteres extraíbles): propuesta de capa de texto invisible pendiente de decisión.
 - HATCH "degradado" de Civil 3D: los rellenos `SOLID` y `SOLID,_O` (19 de los 21 HATCH de Perfil_K0010) salen etiquetados como "degradado" en la tabla de HATCH del TXT, porque `has_gradient_data` de ezdxf es verdadero. Conviene revisar si de verdad son degradados o rellenos sólidos con datos de degradado.
-- Inventario de entidades no visibles: hoy salen como "conservadas" en la sección E.
-- MULTILEADER marcados como "no soportados" en el inventario aunque se dibujan con su gráfico proxy.
 - Heurística de unidades con falsos positivos (INSERT con escala 0.001 y coordenadas georreferenciadas de millones).
 - Ruido de ezdxf en la terminal (STYLE inexistente, handles duplicados, DIMASSOC).
 - Z mínima sospechosa de −1,5 millones en la caja de Plano_completo (sección C): buscar qué entidad la produce.
-- REGION no soportado por ezdxf (aborta el render, p. ej. Cont. 40ft HC (planta)).
+- REGION no soportado por ezdxf (aborta el render, p. ej. Cont. 40ft HC (planta)). Sigue "no soportada" con la pista de `--omit-unsupported`. Queda fuera por ahora dibujar su contorno con `ezdxf.acis`, como se hace con los 3DSOLID (`--solids footprint`); `solids.py` ya tiene la infraestructura.
 - Aviso "relative point size is not supported" mostrado como nota del renderizador.
-- Caché de fuentes usa `_font_cache` privado de ezdxf.
+- Solicitudes de fuente: `_requests` (font_config.py) toma como nombre de fuente el primer texto del XDATA `ACAD`, que en los overrides de estilo de cota es `DSTYLE` (el nombre del grupo, no una fuente). Se vio al medir con el DXF de render de Plano_completo ("DSTYLE → arial.ttf", 11 textos); no se comprobó si ocurre en el flujo real, revisar.
 
 ## Fase 4
 - Condensar advertencias de handles duplicados; rutas con `/` en el JSON.

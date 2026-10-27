@@ -43,7 +43,11 @@ from cde_exporter.cad.detail_model import (
 )
 from cde_exporter.cad.detail_text import format_detail_report
 from cde_exporter.cad.exporters import export_vector_outputs
-from cde_exporter.cad.fidelity import print_fidelity_summary, write_fidelity_report
+from cde_exporter.cad.fidelity import (
+    hidden_skip_events,
+    print_fidelity_summary,
+    write_fidelity_report,
+)
 from cde_exporter.cad.font_config import configure_fonts
 from cde_exporter.cad.models import CadProcessingError
 from cde_exporter.cad.pdf_checks import (
@@ -715,6 +719,22 @@ def _run_extract_block(args, font_restorers: list) -> int:
                     f"{_failure_text(footprints)}."
                 ) from error
             detail = mark_omitted_entities(detail, export_report.omitted)
+            # Conciliación en tiempo de ejecución: lo que ezdxf descartó por no ser visible
+            # debe coincidir con lo que el inventario clasificó como tal en lo que se dibuja.
+            expected_hidden = hidden_skip_events(render_document)
+            if expected_hidden != export_report.invisible:
+                detail = dataclasses.replace(
+                    detail,
+                    warnings=(
+                        *detail.warnings,
+                        ExtractionWarning(
+                            "FIDELITY_RECONCILIATION",
+                            Severity.WARNING,
+                            "No coincide la conciliación de entidades no visibles "
+                            f"(modelo {expected_hidden}, renderizador {export_report.invisible}).",
+                        ),
+                    ),
+                )
             # Se decide tras dibujar, para no afirmar que una entidad se dibuja si se omitió.
             invalid_messages = _invalid_data_messages(
                 document, source_invalid, render_invalid, export_report.omitted

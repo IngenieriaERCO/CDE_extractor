@@ -8,15 +8,13 @@ from pathlib import Path
 
 from ezdxf.entities import DXFEntity
 
+from cde_exporter.cad.entity_policy import INVALID_DATA
+
 Bounds2D = tuple[float, float, float, float]
 
 
 class CadProcessingError(RuntimeError):
     """Error controlado al inspeccionar, extraer o exportar un dibujo CAD."""
-
-
-# Motivo con el que se trata como no soportada una entidad cuyo procesamiento falla.
-INVALID_DATA = "datos inválidos"
 
 
 def invalid_data_reason(error: BaseException) -> str:
