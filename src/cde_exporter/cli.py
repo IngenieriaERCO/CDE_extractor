@@ -25,6 +25,11 @@ from cde_exporter.config import get_settings
 from cde_exporter.converters.pdf_to_svg import PDFConversionError, convert_page_to_svg
 from cde_exporter.validators.pdf_validator import validate_pdf
 
+_NO_TEXT_LAYER_HELP = (
+    "No añade al PDF la capa de texto invisible: el texto queda solo como trazados "
+    "(no se puede buscar, seleccionar ni copiar)"
+)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -107,6 +112,9 @@ def build_parser() -> argparse.ArgumentParser:
     block_extract_command.add_argument("--font-folder", help="Carpeta de fuentes del proyecto")
     block_extract_command.add_argument(
         "--font-fallback", help="Fuente de respaldo (default: arial.ttf)"
+    )
+    block_extract_command.add_argument(
+        "--no-text-layer", action="store_true", help=_NO_TEXT_LAYER_HELP
     )
 
     inspect_command = cad_subcommands.add_parser(
@@ -191,6 +199,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract_command.add_argument("--font-substitutions", help="JSON UTF-8 familia→fuente")
     extract_command.add_argument("--font-folder", help="Carpeta de fuentes del proyecto")
     extract_command.add_argument("--font-fallback", help="Fuente de respaldo (default: arial.ttf)")
+    extract_command.add_argument("--no-text-layer", action="store_true", help=_NO_TEXT_LAYER_HELP)
     return parser
 
 
@@ -423,6 +432,7 @@ def _run_cad(args: argparse.Namespace) -> int:
                 scale_factor=args.scale_factor,
                 hatch_mode=args.hatch_mode,
                 hatch_threshold=args.hatch_threshold,
+                text_layer=not args.no_text_layer,
             )
             for warning in export_report.warnings:
                 print(f"Advertencia de renderizado: {warning}", file=sys.stderr)

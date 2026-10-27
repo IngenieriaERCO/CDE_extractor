@@ -6,6 +6,8 @@ import textwrap
 from pathlib import PureWindowsPath
 
 from cde_exporter.cad.detail_model import (
+    ADVISORY_CHECKS,
+    SEARCHABLE_TEXT_CHECK,
     EntityStatus,
     ExtractedDetail,
     ResultStatus,
@@ -52,8 +54,17 @@ _FONT_ORIGINS = {
 }
 
 
-def _text_as_paths_note(count: int) -> str:
+def _text_as_paths_note(count: int, searchable: bool) -> str:
     entities = "1 entidad de texto" if count == 1 else f"{count} entidades de texto"
+    if searchable:
+        return (
+            f"El texto del PDF ({entities}: TEXT, MTEXT, ATTRIB y DIMENSION) está dibujado como "
+            "trazados vectoriales y lleva encima una capa de texto invisible: se ve igual que en "
+            "el CAD y se puede buscar, seleccionar y copiar. Al copiar, los saltos de línea "
+            "siguen los cortes de línea del dibujo (no los párrafos del CAD), y la caja de "
+            "búsqueda sigue la anchura de la fuente usada en el dibujo, que puede ser una "
+            "sustituta."
+        )
     return (
         f"El texto del PDF ({entities}: TEXT, MTEXT, ATTRIB y DIMENSION) está dibujado como "
         "trazados vectoriales: se ve igual que en el CAD, pero no se puede seleccionar, copiar "
@@ -350,7 +361,10 @@ def _format_result(detail: ExtractedDetail) -> list[str]:
     lines += _line("PDF", result.pdf_name or "no disponible")
     lines += _line("Estado final", status)
     for check in result.validations:
-        marker = "[OK]" if check.passed else "[FALLÓ]"
+        if check.passed:
+            marker = "[OK]"
+        else:
+            marker = "[AVISO]" if check.name in ADVISORY_CHECKS else "[FALLÓ]"
         lines += _line("", f"{marker} {check.name}: {check.detail or 'no disponible'}")
     lines += ["A tener en cuenta"]
     notes = []
@@ -361,7 +375,8 @@ def _format_result(detail: ExtractedDetail) -> list[str]:
         notes.append(f"Escala física no garantizada: {detail.physical_scale_note}")
     text_entities = sum(font.uses for font in detail.fonts)
     if text_entities:
-        notes.append(_text_as_paths_note(text_entities))
+        searchable = any(check.name == SEARCHABLE_TEXT_CHECK for check in result.validations)
+        notes.append(_text_as_paths_note(text_entities, searchable))
     for item in result.warnings_after_export:
         notes.append(f"Aviso del renderizador (ezdxf): {item}")
     if notes:

@@ -9,7 +9,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - Lee cada archivo antes de editarlo. Pide confirmación antes de cambios grandes.
 
 ## Verificación (siempre antes de dar algo por terminado)
-- `python -m pytest -q --tb=short` (referencia: 373 pruebas pasando).
+- `python -m pytest -q --tb=short` (referencia: 383 pruebas pasando).
 - `ruff check src tests`.
 - NO ejecutar `ruff format` sobre archivos existentes (solo en archivos nuevos).
 - NO usar `pytest -s` (las pruebas del aviso de escala esperarían entrada).
@@ -37,7 +37,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 ## Reglas de uso (qué sale en el PDF)
 - El PDF contiene solo lo que está dentro del bloque elegido.
 - Lo apagado o congelado en el CAD no sale (se cuenta y se avisa en el TXT).
-- El texto va en el PDF como trazados vectoriales (se ve igual, pero no se puede seleccionar ni buscar); el TXT lo declara en "A tener en cuenta".
+- El texto va en el PDF como trazados vectoriales y, encima, una capa de texto invisible (TextWriter + Helvetica) que se puede buscar, seleccionar y copiar; se desactiva con `--no-text-layer`. La comprobación "Texto buscable: N de N" de `pdf_checks` lo verifica; si falta alguna línea es una advertencia (no impide publicar). El TXT lo declara en "A tener en cuenta".
 - El TXT registra cada HATCH por tipo, patrón y escala con su tratamiento (conservado, relleno sólido, solo contorno u omitido) y el motivo.
 - Los objetos de Civil 3D requieren `EXPORTTOAUTOCAD` antes de guardar el DXF.
 - Los sólidos 3D (3DSOLID) se dibujan como huella en planta con `--solids footprint` o se omiten con `--omit-unsupported`; sin ninguna de las dos opciones, la extracción se detiene.

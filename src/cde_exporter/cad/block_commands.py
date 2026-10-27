@@ -56,6 +56,7 @@ from cde_exporter.cad.models import CadProcessingError
 from cde_exporter.cad.pdf_checks import (
     PdfValidationError,
     build_extraction_result,
+    searchable_text_warnings,
     validate_output_pdf,
 )
 from cde_exporter.cad.reader import InvalidEntity, entity_bounds, read_dxf, safe_extents
@@ -713,6 +714,7 @@ def _run_extract_block(args, font_restorers: list) -> int:
                     content_size=cad_size,
                     # El SVG solo se publica con CDE_KEEP_INTERMEDIATES; si no, no se dibuja.
                     draw_svg=keep,
+                    text_layer=not args.no_text_layer,
                 )
             except CadProcessingError as error:
                 if footprints is None or not footprints.failures:
@@ -761,7 +763,16 @@ def _run_extract_block(args, font_restorers: list) -> int:
                 sys.stdout.flush()
                 for message in invalid_messages:
                     print(f"Aviso: {message}", file=sys.stderr)
-            checks = validate_output_pdf(temp_pdf, geometry_page_size)
+            checks = validate_output_pdf(
+                temp_pdf, geometry_page_size, export_report.text_lines
+            )
+            # Texto que no se encuentra al buscarlo: se publica igual, con advertencia.
+            text_warnings = searchable_text_warnings(checks)
+            if text_warnings:
+                detail = dataclasses.replace(detail, warnings=(*detail.warnings, *text_warnings))
+                sys.stdout.flush()
+                for warning in text_warnings:
+                    print(f"Aviso: {warning.message}", file=sys.stderr)
             try:
                 extraction_result = build_extraction_result(
                     pdf_destination.name,

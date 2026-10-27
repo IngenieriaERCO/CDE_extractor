@@ -163,18 +163,34 @@ def test_report_explains_every_hatch_when_the_mode_simplifies_all(
 
 
 @pytest.mark.skipif(not _ARIAL.is_file(), reason="arial.ttf no está instalado")
-def test_report_notes_that_text_is_drawn_as_paths_and_the_pdf_agrees(tmp_path: Path) -> None:
-    report, pdf = _extract(_source(tmp_path / "origen.dxf"), tmp_path / "salida")
+def test_pdf_text_matches_the_text_and_mtext_of_the_detail(tmp_path: Path) -> None:
+    source = _source(tmp_path / "origen.dxf", hatches=False)
+    document = ezdxf.readfile(source)
+    block = document.blocks.get("DET")
+    block.add_text("Cota -9.70 m", dxfattribs={"height": 1, "insert": (0, 6)})
+    block.add_mtext(
+        "Primera línea\\PSegunda línea", dxfattribs={"insert": (0, 14), "char_height": 1}
+    )
+    document.saveas(source)
 
+    report, pdf = _extract(source, tmp_path / "salida")
+
+    # Lo que contiene el detalle: el texto de cada TEXT y cada línea de cada MTEXT.
+    expected = [entity.dxf.text for entity in block.query("TEXT")]
+    for mtext in block.query("MTEXT"):
+        expected += mtext.plain_text().split("\n")
+    with pymupdf.open(pdf) as opened:
+        extracted = [line.strip() for line in opened[0].get_text().splitlines()]
+    assert sorted(line for line in extracted if line) == sorted(expected)
     notes = _flat(report.split("A tener en cuenta", 1)[1])
     assert (
-        "El texto del PDF (1 entidad de texto: TEXT, MTEXT, ATTRIB y DIMENSION) está dibujado "
-        "como trazados vectoriales" in notes
+        "El texto del PDF (3 entidades de texto: TEXT, MTEXT, ATTRIB y DIMENSION) está dibujado "
+        "como trazados vectoriales y lleva encima una capa de texto invisible" in notes
     )
-    assert "no se puede seleccionar, copiar ni buscar" in notes
-    # La nota describe el PDF real: si el texto pasa a ser buscable, hay que cambiar la nota.
-    with pymupdf.open(pdf) as document:
-        assert document[0].get_text().strip() == ""
+    assert "se puede buscar, seleccionar y copiar" in notes
+    assert "los saltos de línea siguen los cortes de línea del dibujo" in notes
+    assert "la caja de búsqueda sigue la anchura de la fuente usada en el dibujo" in notes
+    assert "[OK] Texto buscable: 4 de 4 líneas de texto" in _flat(report)
 
 
 def test_report_has_no_text_note_without_text(tmp_path: Path) -> None:

@@ -1,11 +1,11 @@
 # Estado del proyecto — Exportador Vectorial
 
-Último hito: ajuste de la Fase 3 — rendimiento y fidelidad de estilos en la extracción (consulta git log para el hash). 373 pruebas pasando, ruff limpio.
+Último hito: cierre de la Fase 3 — texto buscable en el PDF (consulta git log para el hash). 383 pruebas pasando, ruff limpio.
 
 ## Plan en 4 fases
 1. Selección de bloque + escala — hecha.
 2. Modelo interno del detalle (v2) + informe TXT A–G + contrato de salida PDF+TXT — hecha.
-3. Motor de representación vectorial (política de fuentes, rayados, entidades) — en curso.
+3. Motor de representación vectorial (política de fuentes, rayados, entidades) — hecha (quedan pendientes menores, abajo).
 4. Manifiesto JSON + validación — pendiente.
 Después: componedor de PDF (plancha A1) y guía de usuario en el README.
 
@@ -45,6 +45,13 @@ Hecho:
   - Líneas de patrón más juntas que 0,0001 unidades (ezdxf las rellena en silencio): la tabla de política las declara "simplificadas" con su motivo. El recuento de HATCH simplificados del informe de fidelidad sale de las mismas decisiones que el inventario.
   - Límites: la corrección del patrón supone INSERT con escala uniforme y sin simetría; la comprobación de líneas demasiado juntas se hace sobre la definición del HATCH.
 
+- Texto buscable (paso 3), según el prototipo (ver «Prototipo de texto buscable» más abajo):
+  - `exporters.py`: con `capture_text`, `_StrictFrontend` envuelve `pipeline.draw_text` y anota cada línea que ezdxf llega a dibujar (`TextRun`); solo durante el dibujo del PDF, así que el SVG y su hash no cambian. Una entidad que falla al dibujarse (omitida por datos inválidos) deshace también su texto; las no visibles no llegan a dibujarse. `_TextLayerPdfBackend` calcula la misma matriz CAD → página que `get_replay` y `write_text_layer` escribe la capa con `TextWriter` + Helvetica (`render_mode=3`, matriz `morph` corregida para el eje Y invertido de PyMuPDF) y reduce las fuentes a subconjunto.
+  - Opción `--no-text-layer` (en `extract-block` y en `extract`); la capa está activada por defecto.
+  - `pdf_checks.check_searchable_text`: comprobación "Texto buscable: N de N líneas de texto" con `search_for`; solo se cuentan las líneas dibujadas (un MTEXT vacío no cuenta). Es una comprobación de aviso (`ADVISORY_CHECKS` en `detail_model.py`): si falta alguna línea, el PDF se publica igual, la comprobación sale como `[AVISO]` en el TXT, el aviso `TEXT_NOT_SEARCHABLE` (cuántas líneas faltan y cuáles, hasta 10) va a "A tener en cuenta" y a la terminal, y el estado final es "completa con advertencias".
+  - TXT: la nota de "A tener en cuenta" dice que el texto se puede buscar, seleccionar y copiar, que al copiar los saltos de línea siguen los cortes del dibujo y que la caja de búsqueda sigue la fuente usada en el dibujo. Con `--no-text-layer` queda la nota anterior.
+  - Medido (antes → después; tiempo de la exportación completa, que varía unos segundos entre ejecuciones): Perfil_K0010 14,6 → 14,1 s, 206 686 → 247 744 bytes (+20 %), 120/120 líneas; VIA_2MA 54,1 → 52,3 s, 1 612 892 → 1 815 311 bytes (+13 %), 775/775; Plano_completo 75,5 → 68,5 s, 1 205 812 → 1 273 981 bytes (+6 %), 230/230. El coste de la capa queda por debajo de la variación entre ejecuciones.
+
 Fallo de ezdxf 1.4.4 (documentado; todavía sin avisar a ezdxf): `DXFPolygon.transform` (ezdxf/entities/polygon.py, líneas 402-410) calcula bien la escala y el ángulo nuevos del patrón, pero los aplica enteros (`self.pattern.scale(factor, angle)`) sobre unas líneas que ya los incluían, en lugar de aplicar solo el cambio. Todo HATCH de patrón con escala ≠ 1 o ángulo ≠ 0 que se dibuja dentro de un INSERT sale con la escala aplicada dos veces y girado dos veces. Reproducción mínima (solo datos sintéticos):
 
 ```python
@@ -62,13 +69,22 @@ print(virtual.pattern.lines[0])  # [105.0, (0.0, 0.0), (-0.7667036246, -0.205437
 # Esperado: el mismo ángulo (75°) y el mismo desplazamiento; ezdxf gira otros 30° y escala ×0,5.
 ```
 
+Prototipo de texto buscable (2026-10-27; script fuera del proyecto en `data/output/auditoria_fase3/texto_buscable/prototipo_texto.py`):
+- Idea: capturar cada línea de texto que ezdxf convierte en trazados (`RenderPipeline2d.draw_text`: texto, transformación, altura de mayúsculas, anchura de avance) y la matriz CAD → página (`Layout.get_placement_matrix`), y añadir encima de los glifos una capa de texto invisible (`render_mode=3`), estirada a la anchura dibujada.
+- Perfil_K0010 (1:50): 120 líneas de 81 MTEXT con texto (el 82.º está vacío); `search_for` encuentra 120/120 en su sitio. Desviación inicio/fin de palabra (≥ 3 caracteres): mediana 0,11 mm, máx. 0,71 mm (márgenes laterales de las letras); giro máx. 0,05°. La caja de búsqueda sobresale 0,5–1,8 mm arriba/abajo (va de ascendentes a descendentes). PDF 206 686 → 247 744 bytes (+20 %); capa en 0,10 s. El SVG no cambia.
+- DXF sintético (0°, 90°, 45°, 30° y 120° por anidamiento hasta 3 niveles, factor de anchura, oblicuo, MTEXT de varias líneas y con formato, `romans.shx`, fuente inexistente, Unicode): 32/32 encontrados, mismos órdenes de error.
+- Variantes descartadas: `insert_text` + Helvetica (solo Latin‑1: ≥, ⌀, α, √ salen como «·»; 1,1 s por la copia del contenido de la página en cada inserción); Arial incrustada (el guion «-» se extrae como U+00AD y el espacio como U+00A0: «-9.70» no se encuentra; 92/120). Elegida: `TextWriter` + Helvetica (fuente Type0, Unicode con respaldo Noto en subconjunto).
+- PyMuPDF aplica la matriz `morph` con el eje Y invertido: para la matriz de página (a, b, c, d) hay que pasar (a, −b, −c, d). Sin esa corrección los textos girados salen con el giro cambiado de signo y no se encuentran.
+- MTEXT: cada línea dibujada es una línea de texto; las búsquedas que cruzan líneas funcionan; al copiar, los saltos siguen los cortes del dibujo (no se distingue `\P` del ajuste automático). El MTEXT con formato llega por palabras pero se extrae unido.
+- Fuentes sustituidas: la búsqueda no depende de la fuente; la caja sigue la anchura de la fuente con la que se dibujó. Con `GLYPHS_MISSING`, el carácter está en la capa aunque no se vea en el dibujo.
+
 Opcional (medido; hoy no compensa):
 - Paso 2, parche a pymupdf: `Shape.finish` copia todo el contenido de la página en cada trazo (coste cuadrático). Ahorraría ~25 s en Plano_completo, pero en un detalle como Perfil_K0010 el PDF cuesta 1,1 s de 18,5 s, y el parche depende de una parte interna de pymupdf. Hacerlo solo si los planos grandes pasan a ser habituales; también se puede avisar del defecto a PyMuPDF.
 - Paso 5, evitar relecturas de los DXF temporales: ~10 s en Plano_completo y 0,1 s en Perfil_K0010; el tiempo que queda es sobre todo leer el DXF de origen, que ya ocurre una sola vez.
 
 Pendiente:
 - Avisar a ezdxf del fallo de `DXFPolygon.transform` (reproducción arriba). Cuando lo corrijan, quitar `restore_hatch_pattern`; la prueba `test_ezdxf_still_scales_and_rotates_the_pattern_twice` avisará.
-- Texto seleccionable y buscable en el PDF (hoy 0 caracteres extraíbles): propuesta de capa de texto invisible pendiente de decisión.
+- Fuente inexistente: en un DXF sintético con un estilo que apunta a "Fuente Inexistente.ttf", el TXT y la terminal dicen "→ arial.ttf (respaldo automático)", pero ezdxf parece dibujarla con `ARIALUNI.ttf` (Arial Unicode MS: es la `FontFace` que llega a `draw_text`). Sin verificar; revisar si el informe declara la fuente que de verdad se usa.
 - HATCH "degradado" de Civil 3D: los rellenos `SOLID` y `SOLID,_O` (19 de los 21 HATCH de Perfil_K0010) salen etiquetados como "degradado" en la tabla de HATCH del TXT, porque `has_gradient_data` de ezdxf es verdadero. Conviene revisar si de verdad son degradados o rellenos sólidos con datos de degradado.
 - Heurística de unidades con falsos positivos (INSERT con escala 0.001 y coordenadas georreferenciadas de millones).
 - Ruido de ezdxf en la terminal (STYLE inexistente, handles duplicados, DIMASSOC).

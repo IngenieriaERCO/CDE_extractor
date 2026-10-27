@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import io
 import math
 import os
@@ -20,9 +21,10 @@ from ezdxf.addons.drawing import Frontend, RenderContext, config, layout
 from ezdxf.addons.drawing import pymupdf as pdf_backend
 from ezdxf.addons.drawing import svg as svg_backend
 from ezdxf.addons.drawing.config import HatchPolicy
+from ezdxf.addons.drawing.pipeline import prepare_string_for_rendering
 from ezdxf.addons.drawing.properties import LayoutProperties
 from ezdxf.document import Drawing
-from ezdxf.math import Vec2, Vec3
+from ezdxf.math import Matrix44, Vec2, Vec3
 from ezdxf.path import nesting
 from ezdxf.render import hatching
 from ezdxf.tools.pattern import scale_pattern
@@ -38,6 +40,25 @@ from cde_exporter.cad.reader import ensure_layer_table_entries, read_dxf
 
 # Tiempo máximo para dibujar el patrón de un HATCH (el valor por defecto de ezdxf).
 HATCHING_TIMEOUT = 30.0
+# Altura de las mayúsculas de Helvetica, en fracción del tamaño de letra.
+HELVETICA_CAP_HEIGHT = 0.718
+
+
+@dataclass(frozen=True, slots=True)
+class TextRun:
+    """Una línea (o trozo) de texto tal como ezdxf la dibuja, en coordenadas CAD.
+
+    ``origin``, ``x_axis`` e ``y_axis`` son los puntos (0, 0), (1, 0) y (0, 1) del texto
+    llevados al dibujo (incluyen giro, escala de bloques anidados, factor de anchura y
+    oblicuo); ``advance`` es la anchura de la línea con la fuente usada en el dibujo.
+    """
+
+    text: str
+    origin: Vec3
+    x_axis: Vec3
+    y_axis: Vec3
+    cap_height: float
+    advance: float
 
 
 class _StrictFrontend(Frontend):
@@ -49,8 +70,12 @@ class _StrictFrontend(Frontend):
     ``skipped``.
     """
 
-    def __init__(self, *args, omit_unsupported: bool = False, **kwargs) -> None:
+    def __init__(
+        self, *args, omit_unsupported: bool = False, capture_text: bool = False, **kwargs
+    ) -> None:
         self.skipped: list[str] = []
+        # Con ``capture_text``, cada línea de texto dibujada (para la capa de texto del PDF).
+        self.text_runs: list[TextRun] = []
         self.invisible = 0
         self.omit_unsupported = omit_unsupported
         self.omitted: Counter[tuple[str, str]] = Counter()
@@ -65,11 +90,45 @@ class _StrictFrontend(Frontend):
         backend = args[1] if len(args) > 1 else kwargs.get("backend")
         # Los backends SVG y PDF de ezdxf graban los trazos en ``records``.
         self._records = getattr(backend, "records", None)
+        if capture_text:
+            self.pipeline.draw_text = self._capture_text(self.pipeline.draw_text)
+
+    def _capture_text(self, draw_text):
+        """Envuelve ``pipeline.draw_text`` (TEXT, MTEXT, ATTRIB y texto de cotas pasan por él)."""
+
+        def capture(text, transform, properties, cap_height, dxftype="TEXT") -> None:
+            start = len(self._records) if self._records is not None else 0
+            draw_text(text, transform, properties, cap_height, dxftype)
+            # Solo cuenta lo que ezdxf llegó a dibujar (no un texto vacío o sin glifos).
+            if self._records is None or len(self._records) == start:
+                return
+            line = prepare_string_for_rendering(text, dxftype)
+            font_face = properties.font or self.pipeline.default_font_face
+            try:
+                advance = self.pipeline.text_engine.get_text_line_width(
+                    line, font_face, cap_height
+                )
+            except (RuntimeError, ValueError):
+                advance = 0.0
+            self.text_runs.append(
+                TextRun(
+                    line,
+                    transform.transform(Vec3(0, 0, 0)),
+                    transform.transform(Vec3(1, 0, 0)),
+                    transform.transform(Vec3(0, 1, 0)),
+                    cap_height,
+                    advance,
+                )
+            )
+
+        return capture
 
     def draw_entity(self, entity, properties) -> None:
         # Una entidad que lanza un error al dibujarse se trata como no soportada por datos
-        # inválidos; se deshacen los trazos que hubiera grabado para no dejarla a medias.
+        # inválidos; se deshacen los trazos (y el texto) que hubiera grabado para no dejarla a
+        # medias.
         start = len(self._records) if self._records is not None else None
+        texts = len(self.text_runs)
         reported = len(self.skipped) + sum(self.omitted.values()) + self.invisible
         try:
             super().draw_entity(entity, properties)
@@ -78,6 +137,7 @@ class _StrictFrontend(Frontend):
         except Exception as error:  # noqa: BLE001 - ezdxf puede lanzar cualquier error
             if start is not None:
                 del self._records[start:]
+            del self.text_runs[texts:]
             self.skip_entity(entity, invalid_data_reason(error))
         else:
             # ezdxf no avisa si un MULTILEADER no genera ninguna geometría: se trata como no
@@ -367,6 +427,75 @@ class ExportReport:
     # HATCH rellenados al dibujar porque su patrón agotó el tiempo o la memoria:
     # (tipo, capa, handle, patrón, escala, motivo).
     degraded: tuple[tuple[str, str, str, str, float, str], ...] = ()
+    # Líneas de texto escritas en la capa de texto invisible del PDF (vacío si no hay capa).
+    text_lines: tuple[str, ...] = ()
+
+
+def _page_point(matrix: Matrix44, point: Vec3) -> pymupdf.Point:
+    mapped = matrix.transform(point)
+    return pymupdf.Point(mapped.x, mapped.y)
+
+
+def write_text_layer(page: pymupdf.Page, runs, matrix: Matrix44) -> None:
+    """Escribe cada línea como texto invisible (``render_mode=3``) encima de sus glifos.
+
+    ``matrix`` lleva las coordenadas CAD a las de la página (puntos, origen arriba a la
+    izquierda). Se usa Helvetica con ``TextWriter``: fuente Type0, con todo Unicode (PyMuPDF
+    añade glifos de respaldo si faltan) y el guion se extrae como «-». Cada línea se estira a
+    la anchura con la que ezdxf la dibujó, es decir, con la fuente usada en el dibujo.
+    """
+    font = pymupdf.Font("helv")
+    for run in runs:
+        origin = _page_point(matrix, run.origin)
+        x_axis = _page_point(matrix, run.x_axis) - origin
+        y_axis = _page_point(matrix, run.y_axis) - origin
+        size = run.cap_height / HELVETICA_CAP_HEIGHT
+        natural = font.text_length(run.text, fontsize=size) if size > 0 else 0.0
+        if natural <= 0 or abs(x_axis) == 0 or abs(y_axis) == 0:
+            continue
+        stretch = run.advance / natural if run.advance > 0 else 1.0
+        # El texto se escribe en horizontal en el origen y se lleva a los ejes del dibujo:
+        # eje x -> stretch · x_axis; eje y (hacia abajo en la página) -> −y_axis. PyMuPDF
+        # aplica ``morph`` con el eje Y invertido, así que la matriz (a, b, c, d) se pasa como
+        # (a, −b, −c, d); sin eso, un texto a 45° saldría a −45°.
+        morph = pymupdf.Matrix(
+            stretch * x_axis.x, -stretch * x_axis.y, y_axis.x, -y_axis.y, 0, 0
+        )
+        writer = pymupdf.TextWriter(page.rect)
+        writer.append(origin, run.text, font=font, fontsize=size)
+        writer.write_text(page, render_mode=3, morph=(origin, morph))
+
+
+class _TextLayerPdfBackend(pdf_backend.PyMuPdfBackend):
+    """Backend PDF de ezdxf que añade la capa de texto invisible y buscable.
+
+    ``text_runs`` se rellena tras dibujar (las líneas que capturó el frontend).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.text_runs: list[TextRun] = []
+
+    def get_pdf_bytes(self, page, *, settings=None, render_box=None) -> bytes:
+        settings = settings if settings is not None else layout.Settings()
+        if not self.text_runs:
+            return super().get_pdf_bytes(page, settings=settings, render_box=render_box)
+        if render_box is None:
+            render_box = self.player().bbox()
+        # La misma matriz CAD -> página que calcula ``get_replay`` (que no la devuelve).
+        output_layout = layout.Layout(render_box, flip_y=self._init_flip_y)
+        final_page = output_layout.get_final_page(page, settings)
+        output_settings = copy.copy(settings)
+        output_settings.output_coordinate_space = pdf_backend.get_coordinate_output_space(
+            final_page
+        )
+        matrix = output_layout.get_placement_matrix(
+            final_page, settings=output_settings, top_origin=True
+        )
+        backend = self.get_replay(page, settings=settings, render_box=render_box)
+        write_text_layer(backend.page, self.text_runs, matrix)
+        backend.doc.subset_fonts()  # solo los glifos usados (Helvetica y los de respaldo)
+        return backend.get_pdf_bytes()
 
 
 def _draw_to_svg(
@@ -412,8 +541,9 @@ def _draw_to_pdf(
     omit_unsupported: bool = False,
     suggest_solids_footprint: bool = False,
     stats: dict | None = None,
+    text_layer: bool = False,
 ) -> tuple[bytes, tuple[str, ...], tuple[tuple[str, str, int], ...]]:
-    backend = pdf_backend.PyMuPdfBackend()
+    backend = _TextLayerPdfBackend()
     layout_properties = LayoutProperties.from_layout(document.modelspace())
     layout_properties.set_colors("#ffffff")
     frontend = _StrictFrontend(
@@ -421,6 +551,7 @@ def _draw_to_pdf(
         backend,
         config=_drawing_configuration(hatch_mode),
         omit_unsupported=omit_unsupported,
+        capture_text=text_layer,
     )
     frontend.auto_hatch_threshold = hatch_threshold if hatch_mode == "auto" else None
     if stats is not None:
@@ -433,9 +564,11 @@ def _draw_to_pdf(
     with contextlib.redirect_stdout(output):
         frontend.draw_layout(document.modelspace(), layout_properties=layout_properties)
     _raise_if_skipped(frontend, "PDF", suggest_solids_footprint)
+    backend.text_runs = frontend.text_runs
     if stats is not None:
         stats["invisible"] = frontend.invisible
         stats["degraded"] = tuple(frontend.degraded)
+        stats["text_lines"] = tuple(run.text.strip() for run in frontend.text_runs)
     return (
         backend.get_pdf_bytes(page, settings=settings),
         _frontend_messages(frontend),
@@ -526,6 +659,7 @@ def export_vector_outputs(
     suggest_solids_footprint: bool = False,
     content_size: tuple[float, float] | None = None,
     draw_svg: bool = True,
+    text_layer: bool = True,
 ) -> ExportReport:
     """Crea SVG/PDF vectoriales ajustados o con escala y página explícitas.
 
@@ -535,6 +669,9 @@ def export_vector_outputs(
     Con ``draw_svg=False`` no se dibuja ni se escribe el SVG (``svg_path`` queda en
     None); los avisos, las entidades no visibles y las omitidas salen del dibujo del
     PDF, que recorre las mismas entidades.
+
+    Con ``text_layer`` el PDF lleva, encima del texto dibujado como trazados, una capa de
+    texto invisible que se puede buscar, seleccionar y copiar. El SVG no cambia.
     """
     source_path = Path(source)
     svg_destination = Path(svg_path)
@@ -623,6 +760,7 @@ def export_vector_outputs(
             omit_unsupported,
             suggest_solids_footprint,
             stats=stats,
+            text_layer=text_layer,
         )
         if draw_svg and svg_omitted != pdf_omitted:
             raise CadProcessingError(
@@ -674,4 +812,5 @@ def export_vector_outputs(
         omitted=pdf_omitted,
         invisible=stats.get("invisible", 0),
         degraded=stats.get("degraded", ()),
+        text_lines=stats.get("text_lines", ()),
     )

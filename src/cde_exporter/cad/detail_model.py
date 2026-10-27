@@ -692,6 +692,12 @@ class ResultStatus(StrEnum):
     COMPLETE_WITH_WARNINGS = "complete_with_warnings"
 
 
+# Nombre de la comprobación de la capa de texto; el informe TXT elige su nota según esté o no.
+SEARCHABLE_TEXT_CHECK = "Texto buscable"
+# Comprobaciones que, si no pasan, avisan pero no impiden publicar.
+ADVISORY_CHECKS = frozenset({SEARCHABLE_TEXT_CHECK})
+
+
 @dataclass(frozen=True, slots=True)
 class ValidationCheck:
     name: str
