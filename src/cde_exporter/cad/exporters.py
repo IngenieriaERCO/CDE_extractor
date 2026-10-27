@@ -6,6 +6,8 @@ import contextlib
 import io
 import math
 import os
+import random
+import time
 import uuid
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -20,10 +22,22 @@ from ezdxf.addons.drawing import svg as svg_backend
 from ezdxf.addons.drawing.config import HatchPolicy
 from ezdxf.addons.drawing.properties import LayoutProperties
 from ezdxf.document import Drawing
+from ezdxf.math import Vec2, Vec3
+from ezdxf.path import nesting
+from ezdxf.render import hatching
+from ezdxf.tools.pattern import scale_pattern
 
-from cde_exporter.cad.entity_policy import GEOMETRY_FROM_DATA_TYPES, unsupported_hint
+from cde_exporter.cad.entity_policy import (
+    GEOMETRY_FROM_DATA_TYPES,
+    HATCH_MEMORY_REASON,
+    HATCH_TIMEOUT_REASON,
+    unsupported_hint,
+)
 from cde_exporter.cad.models import INVALID_DATA, CadProcessingError, invalid_data_reason
 from cde_exporter.cad.reader import ensure_layer_table_entries, read_dxf
+
+# Tiempo máximo para dibujar el patrón de un HATCH (el valor por defecto de ezdxf).
+HATCHING_TIMEOUT = 30.0
 
 
 class _StrictFrontend(Frontend):
@@ -42,6 +56,11 @@ class _StrictFrontend(Frontend):
         self.omitted: Counter[tuple[str, str]] = Counter()
         self.messages: list[str] = []
         self.auto_hatch_threshold: int | None = None
+        # HATCH cuyo patrón no se pudo dibujar (tiempo o memoria) y se rellenaron:
+        # (tipo, capa, handle, patrón, escala, motivo).
+        self.degraded: list[tuple[str, str, str, str, float, str]] = []
+        # Handle → motivo de los ya degradados en otra pasada (el PDF tras el SVG).
+        self.known_degraded: dict[str, str] = {}
         super().__init__(*args, **kwargs)
         backend = args[1] if len(args) > 1 else kwargs.get("backend")
         # Los backends SVG y PDF de ezdxf graban los trazos en ``records``.
@@ -91,21 +110,187 @@ class _StrictFrontend(Frontend):
         self.messages.append(message)
 
     def draw_hatch_entity(self, entity, properties, *, loops=None) -> None:
+        restore_hatch_pattern(entity)
         estimate = _estimate_hatch_segments(entity) if self.auto_hatch_threshold is not None else 0
-        if estimate > (self.auto_hatch_threshold or 0):
-            original = self.config
-            self.config = self.config.with_changes(hatch_policy=HatchPolicy.SHOW_SOLID)
-            try:
-                super().draw_hatch_entity(entity, properties, loops=loops)
-            finally:
-                self.config = original
-        else:
+        # ezdxf desplaza el origen de las líneas del patrón una cantidad aleatoria muy pequeña;
+        # con una semilla fija por HATCH el dibujo es siempre el mismo (y el SVG, comparable).
+        state = random.getstate()
+        random.seed(_hatch_seed(entity))
+        try:
+            handle = _original_handle(entity)
+            if estimate > (self.auto_hatch_threshold or 0):
+                self._draw_hatch_as_solid(entity, properties, loops)
+            elif handle and handle in self.known_degraded:
+                self._draw_hatch_as_solid(entity, properties, loops)
+                self._note_degraded(entity, self.known_degraded[handle])
+            else:
+                self._draw_hatch_or_degrade(entity, properties, loops)
+        finally:
+            random.setstate(state)
+
+    def _draw_hatch_as_solid(self, entity, properties, loops) -> None:
+        original = self.config
+        self.config = self.config.with_changes(hatch_policy=HatchPolicy.SHOW_SOLID)
+        try:
             super().draw_hatch_entity(entity, properties, loops=loops)
+        finally:
+            self.config = original
+
+    def _draw_hatch_or_degrade(self, entity, properties, loops) -> None:
+        """Dibuja el patrón; si agota el tiempo o la memoria, rellena solo ese HATCH.
+
+        Al agotar el tiempo, ezdxf no lanza ningún error: avisa por pantalla y deja el patrón
+        dibujado a medias. Se detecta por el tiempo transcurrido, se borran los trazos que
+        dejó y se rellena el HATCH (la misma operación que la simplificación automática).
+        """
+        start = len(self._records) if self._records is not None else None
+        began = time.perf_counter()
+        try:
+            super().draw_hatch_entity(entity, properties, loops=loops)
+        except MemoryError:
+            reason = HATCH_MEMORY_REASON
+        else:
+            limit = self.config.hatching_timeout
+            if time.perf_counter() - began <= limit:
+                return
+            reason = HATCH_TIMEOUT_REASON.format(seconds=limit)
+        if start is not None:
+            del self._records[start:]
+        self._draw_hatch_as_solid(entity, properties, loops)
+        self._note_degraded(entity, reason)
+
+    def _note_degraded(self, entity, reason: str) -> None:
+        original = getattr(entity, "source_of_copy", None) or entity
+        self.degraded.append(
+            (
+                entity.dxftype(),
+                str(original.dxf.get("layer", "0") or "0"),
+                _original_handle(entity),
+                str(original.dxf.get("pattern_name", "") or ""),
+                float(original.dxf.get("pattern_scale", 1.0)),
+                reason,
+            )
+        )
+
+
+def _original_handle(entity) -> str:
+    original = getattr(entity, "source_of_copy", None) or entity
+    return str(original.dxf.get("handle") or "")
+
+
+def _hatch_seed(entity) -> str:
+    return f"cde-hatch-{_original_handle(entity)}"
+
+
+def restore_hatch_pattern(entity) -> None:
+    """Corrige el patrón de un HATCH que ezdxf copió desde un bloque (entidad virtual).
+
+    ezdxf 1.4.4 (``DXFPolygon.transform``) calcula bien la escala y el ángulo nuevos del
+    patrón, pero los vuelve a aplicar enteros sobre unas líneas que ya los incluían: un
+    patrón de escala 0,005 dentro de un INSERT sale 200 veces más denso, y uno girado 30°
+    gira otros 30°. Aquí se rehace desde el original: escala relativa (nueva ÷ original),
+    giro relativo (nuevo − original) y el origen del patrón trasladado con el HATCH, como en
+    el CAD. Sin original (HATCH del Model Space) no se toca.
+    """
+    original = getattr(entity, "source_of_copy", None)
+    if original is None or original is entity or original.dxftype() != entity.dxftype():
+        return
+    pattern = getattr(original, "pattern", None)
+    if not pattern or not pattern.lines or entity.dxf.get("solid_fill", 0):
+        return
+    old_scale = original.dxf.get("pattern_scale", 1.0) or 1.0
+    factor = entity.dxf.get("pattern_scale", 1.0) / old_scale
+    delta = entity.dxf.get("pattern_angle", 0.0) - original.dxf.get("pattern_angle", 0.0)
+    shift = _pattern_shift(original, entity, factor, delta)
+    entity.set_pattern_definition(
+        [
+            (angle, Vec2(base_point) + shift, offset, dashes)
+            for angle, base_point, offset, dashes in scale_pattern(
+                pattern.as_list(), factor=factor, angle=delta
+            )
+        ]
+    )
+
+
+def _pattern_shift(original, entity, factor: float, delta: float) -> Vec2:
+    """Traslación del HATCH: la misma que sufre el primer vértice de su contorno."""
+    if not Vec3(original.dxf.extrusion).isclose(Vec3(entity.dxf.extrusion)):
+        return Vec2()
+    try:
+        before = hatching.hatch_boundary_paths(original, filter_text_boxes=False)
+        after = hatching.hatch_boundary_paths(entity, filter_text_boxes=False)
+    except Exception:  # noqa: BLE001 - contorno ilegible: el patrón queda sin trasladar
+        return Vec2()
+    if not before or not after:
+        return Vec2()
+    return Vec2(after[0].start) - Vec2(before[0].start).rotate_deg(delta) * factor
 
 
 def _estimate_hatch_segments(entity) -> int:
+    """Tramos que ezdxf dibujaría para el patrón del HATCH (0 si es sólido o no tiene patrón).
+
+    Usa las mismas líneas base que ezdxf (separación real, dirección y guiones) y el contorno
+    real: por cada línea del patrón, los cortes con el borde, (suma de |borde · normal|) ÷
+    (2 × separación), más los guiones que caben en la longitud total de línea dentro de la
+    región, (área ÷ separación) × guiones ÷ periodo. Si las líneas están más juntas de lo que
+    ezdxf puede dibujar, devuelve 0: ezdxf las rellena (lo declara la tabla de política).
+    """
     if entity.dxf.get("solid_fill", 0) or not entity.pattern:
         return 0
+    try:
+        return _contour_estimate(entity)
+    except hatching.DenseHatchingLinesError:
+        return 0
+    except Exception:  # noqa: BLE001 - contorno ilegible: se usa la estimación por la caja
+        return _bbox_estimate(entity)
+
+
+def _contour_estimate(entity) -> int:
+    paths = hatching.hatch_boundary_paths(entity, filter_text_boxes=True)
+    corners = [vertex for path in paths for vertex in path.control_vertices()]
+    if len(corners) < 2:
+        return 0
+    xs = [vertex.x for vertex in corners]
+    ys = [vertex.y for vertex in corners]
+    distance = max(math.hypot(max(xs) - min(xs), max(ys) - min(ys)) / 1000, 1e-9)
+    loops = {id(path): [(v.x, v.y) for v in path.flattening(distance)] for path in paths}
+
+    def area(polygon, depth: int) -> float:
+        # Estructura de ezdxf: [exterior, *huecos]; cada hueco es otro polígono.
+        exterior, *holes = polygon
+        vertices = loops[id(exterior)]
+        surface = abs(
+            sum(
+                x0 * y1 - x1 * y0
+                for (x0, y0), (x1, y1) in zip(vertices, vertices[1:] + vertices[:1], strict=True)
+            )
+            / 2
+        )
+        surface = surface if depth % 2 == 0 else -surface
+        return surface + sum(area(hole, depth + 1) for hole in holes)
+
+    region = abs(sum(area(polygon, 0) for polygon in nesting.make_polygon_structure(paths)))
+    edges = [
+        (x1 - x0, y1 - y0)
+        for vertices in loops.values()
+        for (x0, y0), (x1, y1) in zip(vertices, vertices[1:] + vertices[:1], strict=True)
+    ]
+    estimate = 0.0
+    for baseline in hatching.pattern_baselines(entity):
+        spacing = abs(baseline.normal_distance)
+        if spacing <= 1e-12:
+            continue
+        normal_x, normal_y = -baseline.direction.y, baseline.direction.x
+        crossings = sum(abs(dx * normal_x + dy * normal_y) for dx, dy in edges)
+        estimate += crossings / (2 * spacing)
+        period = sum(abs(value) for value in baseline.line_pattern)
+        if period > 0:
+            pieces = sum(1 for value in baseline.line_pattern if value >= 0)
+            estimate += region / spacing * pieces / period
+    return math.ceil(estimate)
+
+
+def _bbox_estimate(entity) -> int:
     ext = bbox.extents([entity])
     if not ext.has_data:
         return 0
@@ -179,6 +364,9 @@ class ExportReport:
     omitted: tuple[tuple[str, str, int], ...] = ()
     # Entidades que ezdxf descartó una a una por no ser visibles (capa apagada, etc.).
     invisible: int = 0
+    # HATCH rellenados al dibujar porque su patrón agotó el tiempo o la memoria:
+    # (tipo, capa, handle, patrón, escala, motivo).
+    degraded: tuple[tuple[str, str, str, str, float, str], ...] = ()
 
 
 def _draw_to_svg(
@@ -189,6 +377,7 @@ def _draw_to_svg(
     hatch_threshold: int = 50000,
     omit_unsupported: bool = False,
     suggest_solids_footprint: bool = False,
+    stats: dict | None = None,
 ) -> tuple[str, tuple[str, ...], tuple[tuple[str, str, int], ...]]:
     backend = svg_backend.SVGBackend()
     layout_properties = LayoutProperties.from_layout(document.modelspace())
@@ -196,22 +385,17 @@ def _draw_to_svg(
     frontend = _StrictFrontend(
         RenderContext(document),
         backend,
-        config=config.Configuration(
-            background_policy=config.BackgroundPolicy.WHITE,
-            hatch_policy=_hatch_policy(hatch_mode),
-        ),
+        config=_drawing_configuration(hatch_mode),
         omit_unsupported=omit_unsupported,
     )
     frontend.auto_hatch_threshold = hatch_threshold if hatch_mode == "auto" else None
     output = io.StringIO()
+    # ezdxf avisa por pantalla al agotar el tiempo de un rayado; ese HATCH ya se degradó.
     with contextlib.redirect_stdout(output):
         frontend.draw_layout(document.modelspace(), layout_properties=layout_properties)
-    if "hatching timeout" in output.getvalue().lower():
-        raise CadProcessingError(
-            "Falló la etapa de dibujo SVG: ezdxf agotó el tiempo al dibujar un rayado. "
-            "Reintenta con --hatch-mode outline."
-        )
     _raise_if_skipped(frontend, "SVG", suggest_solids_footprint)
+    if stats is not None:
+        stats["degraded"] = tuple(frontend.degraded)
     return (
         backend.get_string(page, settings=settings),
         _frontend_messages(frontend),
@@ -227,7 +411,7 @@ def _draw_to_pdf(
     hatch_threshold: int = 50000,
     omit_unsupported: bool = False,
     suggest_solids_footprint: bool = False,
-    stats: dict[str, int] | None = None,
+    stats: dict | None = None,
 ) -> tuple[bytes, tuple[str, ...], tuple[tuple[str, str, int], ...]]:
     backend = pdf_backend.PyMuPdfBackend()
     layout_properties = LayoutProperties.from_layout(document.modelspace())
@@ -235,28 +419,35 @@ def _draw_to_pdf(
     frontend = _StrictFrontend(
         RenderContext(document),
         backend,
-        config=config.Configuration(
-            background_policy=config.BackgroundPolicy.WHITE,
-            hatch_policy=_hatch_policy(hatch_mode),
-        ),
+        config=_drawing_configuration(hatch_mode),
         omit_unsupported=omit_unsupported,
     )
     frontend.auto_hatch_threshold = hatch_threshold if hatch_mode == "auto" else None
+    if stats is not None:
+        # Lo que ya se degradó al dibujar el SVG no se vuelve a intentar (otros 30 s).
+        frontend.known_degraded = {
+            handle: reason for _t, _l, handle, _p, _s, reason in stats.get("degraded", ())
+        }
     output = io.StringIO()
+    # ezdxf avisa por pantalla al agotar el tiempo de un rayado; ese HATCH ya se degradó.
     with contextlib.redirect_stdout(output):
         frontend.draw_layout(document.modelspace(), layout_properties=layout_properties)
-    if "hatching timeout" in output.getvalue().lower():
-        raise CadProcessingError(
-            "Falló la etapa de dibujo PDF: ezdxf agotó el tiempo al dibujar un rayado. "
-            "Reintenta con --hatch-mode outline."
-        )
     _raise_if_skipped(frontend, "PDF", suggest_solids_footprint)
     if stats is not None:
         stats["invisible"] = frontend.invisible
+        stats["degraded"] = tuple(frontend.degraded)
     return (
         backend.get_pdf_bytes(page, settings=settings),
         _frontend_messages(frontend),
         _omitted_rows(frontend),
+    )
+
+
+def _drawing_configuration(hatch_mode: str) -> config.Configuration:
+    return config.Configuration(
+        background_policy=config.BackgroundPolicy.WHITE,
+        hatch_policy=_hatch_policy(hatch_mode),
+        hatching_timeout=HATCHING_TIMEOUT,
     )
 
 
@@ -406,8 +597,10 @@ def export_vector_outputs(
         raise CadProcessingError(f"Modo de rayado no válido: {hatch_mode}")
     if hatch_threshold < 1:
         raise CadProcessingError("El umbral de rayados debe ser un entero positivo")
+    stats: dict = {}
     try:
         svg_content, svg_warnings, svg_omitted, svg_element_count = None, (), None, 0
+        svg_degraded: tuple = ()
         if draw_svg:
             svg_content, svg_warnings, svg_omitted = _draw_to_svg(
                 document,
@@ -417,9 +610,10 @@ def export_vector_outputs(
                 hatch_threshold,
                 omit_unsupported,
                 suggest_solids_footprint,
+                stats=stats,
             )
             svg_element_count = _validate_svg(svg_content)
-        stats: dict[str, int] = {}
+            svg_degraded = stats.get("degraded", ())
         pdf_content, pdf_warnings, pdf_omitted = _draw_to_pdf(
             document,
             page,
@@ -434,6 +628,11 @@ def export_vector_outputs(
             raise CadProcessingError(
                 "El SVG y el PDF no coinciden en las entidades omitidas "
                 f"(SVG {svg_omitted}, PDF {pdf_omitted}); no se generaron archivos."
+            )
+        if draw_svg and svg_degraded != stats.get("degraded", ()):
+            raise CadProcessingError(
+                "El SVG y el PDF no coinciden en los HATCH rellenados por tiempo o memoria; "
+                "no se generaron archivos."
             )
         if exact_page_size and page_size_mm is not None:
             with pymupdf.open(stream=pdf_content, filetype="pdf") as sized_pdf:
@@ -474,4 +673,5 @@ def export_vector_outputs(
         warnings=tuple(dict.fromkeys((*svg_warnings, *pdf_warnings))),
         omitted=pdf_omitted,
         invisible=stats.get("invisible", 0),
+        degraded=stats.get("degraded", ()),
     )

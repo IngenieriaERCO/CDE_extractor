@@ -9,11 +9,11 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - Lee cada archivo antes de editarlo. Pide confirmación antes de cambios grandes.
 
 ## Verificación (siempre antes de dar algo por terminado)
-- `python -m pytest -q --tb=short` (referencia: 343 pruebas pasando).
+- `python -m pytest -q --tb=short` (referencia: 373 pruebas pasando).
 - `ruff check src tests`.
 - NO ejecutar `ruff format` sobre archivos existentes (solo en archivos nuevos).
 - NO usar `pytest -s` (las pruebas del aviso de escala esperarían entrada).
-- Regresión gráfica: el SVG de Perfil_K0010 a 1:50 con `--hatch-mode auto --font-substitutions Pruebas/fonts/sustituciones_arial.json` debe tener hash SHA256 `BD488686F7EC29105A0911618545C012AEDB35462010B7D2B3119AAC8194B6E1` (se obtiene con `CDE_KEEP_INTERMEDIATES=1`). Cambió a propósito (antes `973120C3…7B83D`) por el arreglo de fuentes instaladas: 4 textos de Perfil_K0010 pasaron de Arial a Verdana. Nunca comparar DXF por hash (no es determinista).
+- Regresión gráfica: el SVG de Perfil_K0010 a 1:50 con `--hatch-mode auto --font-substitutions Pruebas/fonts/sustituciones_arial.json` debe tener hash SHA256 `A2560C1160FC06179FFEA3E87836D93468738259146749D57F0B1473400D3FF9` (se obtiene con `CDE_KEEP_INTERMEDIATES=1`). Cambió a propósito por el paso 4 de la Fase 3 (antes `BD488686…8194B6E1`): los HATCH ANSI35 y ANSI37 de Perfil, dentro de un INSERT, se dibujan ahora con su patrón y con la escala correcta (antes salían como relleno). El cambio anterior (antes `973120C3…7B83D`) fue por el arreglo de fuentes instaladas: 4 textos pasaron de Arial a Verdana. Nunca comparar DXF por hash (no es determinista).
 
 ## Git
 - Añadir archivos por nombre; nunca `git add .`.

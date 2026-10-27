@@ -8,6 +8,7 @@ import ezdxf
 from ezdxf.document import Drawing
 
 from cde_exporter.cad.detail_model import (
+    SOLID_INSTEAD_OF_PATTERN,
     FontUse,
     HatchDetail,
     HatchGroup,
@@ -16,6 +17,7 @@ from cde_exporter.cad.detail_model import (
     SelectedReference,
     TransformationStep,
 )
+from cde_exporter.cad.entity_policy import HATCH_DENSE_CAUSE
 from cde_exporter.cad.fidelity import FidelityReport
 
 
@@ -71,7 +73,7 @@ def font_uses(report: FidelityReport) -> tuple[FontUse, ...]:
     )
 
 
-_SOLID_INSTEAD_OF_PATTERN = "relleno sólido en lugar del patrón"
+_SOLID_INSTEAD_OF_PATTERN = SOLID_INSTEAD_OF_PATTERN
 _KEPT = "conservado"
 
 
@@ -101,9 +103,14 @@ def _hatch_groups(report: FidelityReport) -> tuple[HatchGroup, ...]:
             simplified = count
             operation = "no se dibuja"
             reason = "--hatch-mode ignore"
+        # Con normal o auto, ezdxf rellena los de líneas demasiado juntas (tabla de política).
+        dense = 0
+        if mode in {"normal", "auto"}:
+            dense = min(count - simplified, report.dense_hatches.get((kind, pattern, scale), 0))
         for number, action, text, why in (
-            (count - simplified, "conserved", _KEPT, None),
+            (count - simplified - dense, "conserved", _KEPT, None),
             (simplified, "simplified", operation, reason),
+            (dense, "simplified", _SOLID_INSTEAD_OF_PATTERN, HATCH_DENSE_CAUSE),
         ):
             if number:
                 groups.append(

@@ -36,8 +36,10 @@ from cde_exporter.cad.detail_model import (
     ExtractionWarning,
     SelectionMethod,
     Severity,
+    degraded_hatches_message,
     detail_to_dict,
     finalize_detail,
+    mark_degraded_hatches,
     mark_footprint_solids,
     mark_omitted_entities,
 )
@@ -45,6 +47,7 @@ from cde_exporter.cad.detail_text import format_detail_report
 from cde_exporter.cad.exporters import export_vector_outputs
 from cde_exporter.cad.fidelity import (
     hidden_skip_events,
+    iter_detail_entities,
     print_fidelity_summary,
     write_fidelity_report,
 )
@@ -735,6 +738,11 @@ def _run_extract_block(args, font_restorers: list) -> int:
                         ),
                     ),
                 )
+            if export_report.degraded:
+                degraded = _degraded_rows(extracted_document, export_report.degraded)
+                detail = mark_degraded_hatches(detail, degraded)
+                sys.stdout.flush()
+                print(f"Aviso: {degraded_hatches_message(degraded)}", file=sys.stderr)
             # Se decide tras dibujar, para no afirmar que una entidad se dibuja si se omitió.
             invalid_messages = _invalid_data_messages(
                 document, source_invalid, render_invalid, export_report.omitted
@@ -915,6 +923,21 @@ def _paper_factor(args, result, nominal_denominator, verification) -> float:
     if result.units_code:
         return units.conversion_factor(result.units_code, ezdxf.units.InsertUnits.Millimeters)
     return 1.0
+
+
+def _degraded_rows(
+    document, degraded: tuple[tuple[str, str, str, str, float, str], ...]
+) -> tuple[tuple[int, str | None, str, str, float, str], ...]:
+    """Añade a cada HATCH rellenado su índice en el inventario (por handle, en orden)."""
+    positions: dict[str, list[int]] = {}
+    for index, entity in enumerate(iter_detail_entities(document)):
+        if entity.dxftype() == "HATCH":
+            positions.setdefault(str(entity.dxf.get("handle") or ""), []).append(index)
+    rows = []
+    for _type, layer, handle, pattern, scale, reason in degraded:
+        free = positions.get(handle) or []
+        rows.append((free.pop(0) if free else 0, handle or None, layer, pattern, scale, reason))
+    return tuple(rows)
 
 
 def _omitted_terminal_line(omitted: tuple[tuple[str, str, int], ...]) -> str:

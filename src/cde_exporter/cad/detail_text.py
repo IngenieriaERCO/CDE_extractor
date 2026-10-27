@@ -42,6 +42,9 @@ _ADVICE = {
     "UNSUPPORTED_OMITTED": "Revise en el CAD si esa geometría es necesaria en el PDF.",
     "SOLIDS_AS_FOOTPRINT": "La huella muestra la planta del sólido, no su volumen ni su altura.",
     "GLYPHS_MISSING": "Indique con --font-substitutions una fuente que contenga esos caracteres.",
+    "HATCH_DEGRADED": (
+        "Si necesita ver el patrón, revise su escala en el CAD o use --hatch-mode outline."
+    ),
 }
 _FONT_ORIGINS = {
     "configurada": "sustitución configurada (JSON --font-substitutions)",

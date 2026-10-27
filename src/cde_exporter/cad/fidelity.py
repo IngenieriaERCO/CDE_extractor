@@ -15,6 +15,7 @@ from ezdxf.addons.drawing.properties import Properties
 from ezdxf.document import Drawing
 from ezdxf.fonts import fonts
 from ezdxf.protocols import SupportsVirtualEntities, virtual_entities
+from ezdxf.render import hatching
 from ezdxf.tools.text import fast_plain_mtext
 
 from cde_exporter.cad.detail_model import EntityStatus
@@ -64,6 +65,8 @@ class FidelityReport:
     missing_glyphs: dict[tuple[str, str], int] = field(default_factory=dict)
     # Entidades contabilizadas que no se dibujan por no ser visibles en el CAD.
     hidden_total: int = 0
+    # HATCH con líneas de patrón demasiado juntas para ezdxf: (tipo, patrón, escala) → cantidad.
+    dense_hatches: dict[tuple[str, str, str], int] = field(default_factory=dict)
 
     @property
     def entity_total(self) -> int:
@@ -196,9 +199,11 @@ def entity_facts(
         invalid_error = invalid_data_reason(error)
     hatch_kind = None
     estimate = 0
+    dense = False
     if kind == "HATCH":
         hatch_kind = _hatch_type(entity)
         estimate = _estimate_hatch_segments(entity) if hatch_mode == "auto" else 0
+        dense = _has_dense_pattern(entity)
     # Con datos inválidos tampoco se leen sus fuentes.
     font = (
         _style_and_font(entity, document)
@@ -213,8 +218,23 @@ def entity_facts(
         invalid_error=invalid_error,
         hatch_kind=hatch_kind,
         hatch_estimate=estimate,
+        hatch_dense=dense,
         font=font,
     )
+
+
+def _has_dense_pattern(entity) -> bool:
+    """True si ezdxf no puede dibujar el patrón porque sus líneas están demasiado juntas."""
+    if entity.dxf.get("solid_fill", 0) or not entity.pattern or not entity.pattern.lines:
+        return False
+    try:
+        for _baseline in hatching.pattern_baselines(entity):
+            pass
+    except hatching.DenseHatchingLinesError:
+        return True
+    except Exception:  # noqa: BLE001 - patrón ilegible: lo decide el dibujo
+        return False
+    return False
 
 
 def _style_and_font(entity, document: Drawing) -> tuple[str, str, str, bool]:
@@ -369,6 +389,8 @@ def inspect_fidelity(
     context = PolicyContext(hatch_mode, hatch_threshold)
 
     hidden_total = 0
+    simplified = 0
+    dense: Counter[tuple[str, str, str]] = Counter()
     for item in iter_detail_entities_with_visibility(document):
         entity = item.entity
         facts = entity_facts(
@@ -397,14 +419,12 @@ def inspect_fidelity(
             hatches[(facts.hatch_kind, pattern, scale)] += 1
             if facts.hatch_estimate > hatch_threshold:
                 simplified_rows.append((layer, pattern, scale, facts.hatch_estimate))
+            if facts.hatch_dense:
+                dense[(facts.hatch_kind, pattern, scale)] += 1
+            # Los simplificados salen de las mismas decisiones que el inventario.
+            if decision.status is EntityStatus.SIMPLIFIED:
+                simplified += 1
 
-    hatch_total = sum(hatches.values())
-    if hatch_mode in {"normal", "auto"}:
-        simplified = 0
-    elif hatch_mode == "solid":
-        simplified = sum(count for (kind, _, _), count in hatches.items() if kind != "sólido")
-    else:
-        simplified = hatch_total
     return FidelityReport(
         entity_counts=dict(sorted(entities.items())),
         unsupported_counts=dict(sorted(unsupported.items())),
@@ -412,12 +432,13 @@ def inspect_fidelity(
         hatches=dict(sorted(hatches.items())),
         hatch_mode=hatch_mode,
         lineweight_policy=config.Configuration().lineweight_policy.name,
-        simplified_hatches=len(simplified_rows) if hatch_mode == "auto" else simplified,
+        simplified_hatches=simplified,
         hatch_simplifications=tuple(simplified_rows),
         hatch_threshold=hatch_threshold,
         font_origins={key: item[2] for key, item in active_substitutions().items()},
         missing_glyphs=dict(sorted(glyphs.missing.items())),
         hidden_total=hidden_total,
+        dense_hatches=dict(sorted(dense.items())),
     )
 
 

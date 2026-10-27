@@ -37,6 +37,17 @@ NO_GEOMETRY = "sin geometría dibujable"
 HIDDEN_OWN = "No visible en el CAD: capa apagada o congelada, o entidad marcada como invisible."
 HIDDEN_BY_ANCESTOR = "No visible en el CAD: está dentro de un INSERT marcado como invisible."
 
+# ezdxf no dibuja líneas de patrón más juntas que 0,0001 unidades: rellena el HATCH.
+HATCH_DENSE_REASON = (
+    "HATCH con líneas de patrón más juntas de lo que ezdxf puede dibujar (0,0001 unidades): "
+    "se dibuja como relleno sólido"
+)
+HATCH_DENSE_CAUSE = "líneas del patrón más juntas que 0,0001 unidades"
+
+# Motivos por los que un HATCH se rellena al dibujarlo (no se sabe antes de intentarlo).
+HATCH_TIMEOUT_REASON = "tiempo agotado al dibujar el patrón ({seconds:g} s)"
+HATCH_MEMORY_REASON = "memoria insuficiente al dibujar el patrón"
+
 HINT_OMIT_UNSUPPORTED = (
     ". Puede usar --omit-unsupported en cad extract-block para continuar sin ellas."
 )
@@ -77,6 +88,7 @@ class EntityFacts:
     invalid_error: str | None = None  # "datos inválidos: ..." si ezdxf no puede leerla
     hatch_kind: str | None = None  # "sólido", "patrón" o "degradado"
     hatch_estimate: int = 0  # tramos estimados (solo en modo auto)
+    hatch_dense: bool = False  # líneas del patrón demasiado juntas para ezdxf
     # (estilo, fuente pedida, fuente resuelta, encontrada) de los textos
     font: tuple[str, str, str, bool] | None = None
 
@@ -150,6 +162,8 @@ def decide(facts: EntityFacts, context: PolicyContext | None = None) -> Decision
         )
         if reason:
             return Decision(EntityStatus.SIMPLIFIED, reason)
+        if facts.hatch_dense:
+            return Decision(EntityStatus.SIMPLIFIED, HATCH_DENSE_REASON)
     if kind in TEXT_TYPES and facts.font is not None and not facts.font[3]:
         _style, source_font, resolved_font, _found = facts.font
         return Decision(

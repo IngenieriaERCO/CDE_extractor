@@ -347,17 +347,181 @@ def _move_unsupported(
     inventory: tuple[EntityCount, ...], moved: dict[tuple[str, str], int], status: EntityStatus
 ) -> list[EntityCount]:
     """Pasa ``moved[(tipo, capa)]`` entidades de las filas no soportadas a ``status``."""
-    result = []
+    return _move_rows(inventory, moved, EntityStatus.UNSUPPORTED, status)
+
+
+def _move_rows(
+    inventory: tuple[EntityCount, ...],
+    moved: dict[tuple[str, str], int],
+    source: EntityStatus,
+    status: EntityStatus,
+) -> list[EntityCount]:
+    """Pasa ``moved[(tipo, capa)]`` entidades de las filas ``source`` a ``status``."""
+    totals: dict[tuple[str, str, EntityStatus], int] = {}
     for row in inventory:
-        count = moved.get((row.entity_type, row.layer), 0)
-        if row.status is not EntityStatus.UNSUPPORTED or not count:
-            result.append(row)
-            continue
+        key = (row.entity_type, row.layer)
+        count = moved.get(key, 0) if row.status is source else 0
         if row.count > count:
-            result.append(dataclasses.replace(row, count=row.count - count))
-        result.append(dataclasses.replace(row, status=status, count=count))
+            totals[(*key, row.status)] = totals.get((*key, row.status), 0) + row.count - count
+        if count:
+            totals[(*key, status)] = totals.get((*key, status), 0) + count
+    result = [
+        EntityCount(entity_type, layer, row_status, count)
+        for (entity_type, layer, row_status), count in totals.items()
+    ]
     result.sort(key=lambda item: (item.entity_type, item.layer, item.status.value))
     return result
+
+
+SOLID_INSTEAD_OF_PATTERN = "relleno sólido en lugar del patrón"
+_DEGRADED_GROUP_LIMIT = 10
+
+
+def mark_degraded_hatches(
+    detail: ExtractedDetail, degraded: tuple[tuple[int, str | None, str, str, float, str], ...]
+) -> ExtractedDetail:
+    """Marca como ``simplified`` los HATCH conservados que se rellenaron al dibujarlos.
+
+    ``degraded`` contiene (índice en el inventario, handle, capa, patrón, escala, motivo) de
+    cada HATCH cuyo patrón agotó el tiempo o la memoria. Se actualizan el inventario, las
+    disposiciones, el resumen de HATCH y se añade el aviso ``HATCH_DEGRADED``.
+    """
+    if not isinstance(detail, ExtractedDetail):
+        raise TypeError("detail debe ser un ExtractedDetail")
+    if detail.result is not None:
+        raise ValueError("El detalle ya fue finalizado")
+    if not degraded:
+        return detail
+    moved: dict[tuple[str, str], int] = {}
+    for _index, _handle, layer, _pattern, _scale, _reason in degraded:
+        moved[("HATCH", layer)] = moved.get(("HATCH", layer), 0) + 1
+    available = {
+        (row.entity_type, row.layer): row.count
+        for row in detail.inventory
+        if row.status is EntityStatus.CONSERVED
+    }
+    warnings = []
+    for key, count in sorted(moved.items()):
+        if available.get(key, 0) < count:
+            warnings.append(
+                ExtractionWarning(
+                    "FIDELITY_RECONCILIATION",
+                    Severity.WARNING,
+                    f"No coincide la conciliación de HATCH rellenados (capa {key[1]}: "
+                    f"renderizador {count}, modelo {available.get(key, 0)} conservados).",
+                )
+            )
+            moved[key] = available.get(key, 0)
+    dispositions = list(detail.dispositions)
+    taken: dict[tuple[str, str], int] = {}
+    for index, handle, layer, _pattern, _scale, reason in degraded:
+        key = ("HATCH", layer)
+        if taken.get(key, 0) >= moved.get(key, 0):
+            continue
+        taken[key] = taken.get(key, 0) + 1
+        dispositions.append(
+            EntityDisposition(
+                index,
+                handle,
+                "HATCH",
+                layer,
+                EntityStatus.SIMPLIFIED,
+                f"HATCH rellenado al dibujarlo: {reason}.",
+            )
+        )
+    dispositions.sort(key=lambda item: item.index)
+    warnings.insert(
+        0, ExtractionWarning("HATCH_DEGRADED", Severity.WARNING, degraded_hatches_message(degraded))
+    )
+    return dataclasses.replace(
+        detail,
+        inventory=tuple(
+            _move_rows(detail.inventory, moved, EntityStatus.CONSERVED, EntityStatus.SIMPLIFIED)
+        ),
+        dispositions=tuple(dispositions),
+        hatches=_degrade_hatch_summary(detail.hatches, degraded),
+        warnings=(*detail.warnings, *warnings),
+    )
+
+
+def _degrade_hatch_summary(
+    summary: HatchSummary | None, degraded: tuple[tuple[int, str | None, str, str, float, str], ...]
+) -> HatchSummary | None:
+    if summary is None:
+        return None
+    groups = list(summary.groups)
+    details = list(summary.details)
+    simplified = summary.simplified
+    for _index, _handle, layer, pattern, scale, reason in degraded:
+        kept = next(
+            (
+                position
+                for position, group in enumerate(groups)
+                if group.action == "conserved"
+                and group.pattern == pattern
+                and group.scale is not None
+                and math.isclose(group.scale, scale)
+            ),
+            None,
+        )
+        if kept is None:
+            continue
+        group = groups[kept]
+        if group.count > 1:
+            groups[kept] = dataclasses.replace(group, count=group.count - 1)
+        else:
+            groups.pop(kept)
+        same = next(
+            (
+                position
+                for position, other in enumerate(groups)
+                if other.action == "simplified"
+                and other.pattern == pattern
+                and other.kind == group.kind
+                and other.reason == reason
+                and other.scale is not None
+                and math.isclose(other.scale, scale)
+            ),
+            None,
+        )
+        if same is None:
+            groups.append(
+                HatchGroup(
+                    group.kind, pattern, scale, 1, "simplified", SOLID_INSTEAD_OF_PATTERN, reason
+                )
+            )
+        else:
+            groups[same] = dataclasses.replace(groups[same], count=groups[same].count + 1)
+        details.append(
+            HatchDetail(layer, pattern, scale, "simplified", f"{reason}.", SOLID_INSTEAD_OF_PATTERN)
+        )
+        simplified += 1
+    return dataclasses.replace(
+        summary,
+        simplified=min(simplified, summary.total),
+        groups=tuple(groups),
+        details=tuple(details),
+    )
+
+
+def degraded_hatches_message(
+    degraded: tuple[tuple[int, str | None, str, str, float, str], ...],
+) -> str:
+    """Aviso de los HATCH rellenados al dibujarlos, con concordancia de número."""
+    total = len(degraded)
+    items = [
+        f"capa {layer}, patrón {pattern}, escala {scale:g} ({reason})"
+        for _index, _handle, layer, pattern, scale, reason in degraded[:_DEGRADED_GROUP_LIMIT]
+    ]
+    hidden = total - _DEGRADED_GROUP_LIMIT
+    if hidden > 0:
+        items.append(f"… y {hidden} más")
+    head = (
+        "Se rellenó 1 HATCH cuyo patrón no se pudo dibujar"
+        if total == 1
+        else f"Se rellenaron {total} HATCH cuyo patrón no se pudo dibujar"
+    )
+    return f"{head}: {'; '.join(items)}."
 
 
 FOOTPRINT_REASON = "3DSOLID dibujado como huella 2D"

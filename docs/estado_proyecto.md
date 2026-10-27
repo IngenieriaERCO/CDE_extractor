@@ -1,6 +1,6 @@
 # Estado del proyecto — Exportador Vectorial
 
-Último hito: ajuste de la Fase 3 — rendimiento y fidelidad de estilos en la extracción (consulta git log para el hash). 343 pruebas pasando, ruff limpio.
+Último hito: ajuste de la Fase 3 — rendimiento y fidelidad de estilos en la extracción (consulta git log para el hash). 373 pruebas pasando, ruff limpio.
 
 ## Plan en 4 fases
 1. Selección de bloque + escala — hecha.
@@ -37,12 +37,37 @@ Hecho:
   - MULTILEADER: se conservan si ezdxf genera geometría con sus propios datos (no dependen del gráfico proxy). Antes salían siempre como "no soportados": en Plano_completo, 5 MULTILEADER con proxy se dibujaban y figuraban como no soportados. Si no generan geometría son "no soportados" y el exportador los detiene o los omite con `--omit-unsupported`, como el resto (ezdxf los descartaba en silencio).
   - Estado nuevo "no visibles" en la sección E (solo se imprime si hay alguna): capa apagada o congelada, entidad invisible, 3DFACE con todos los bordes invisibles, o contenido de un INSERT invisible. Se calcula con el mismo `RenderContext` que el exportador (un INSERT solo depende de su indicador `invisible`; en la capa "0" de un bloque se hereda la capa del INSERT). Una entidad no visible no cuenta como fuente sustituta, HATCH ni no soportada (un 3DSOLID oculto ya no detiene la extracción). La conciliación con lo que descarta el exportador sigue en tiempo de ejecución (`FIDELITY_RECONCILIATION`). Valor nuevo `not_visible` en `EntityStatus` (`model_version` sigue en "2").
 - Error CAD sin traceback: cualquier excepción inesperada termina con "Error CAD inesperado (Tipo): mensaje. No se generaron archivos.", código 1 y sin archivos. Con la variable `CDE_DEBUG=1` se muestra el traceback completo.
+- HATCH problemáticos (paso 4):
+  - Estimación de tramos con el contorno real (`_estimate_hatch_segments`, exporters.py): por cada línea del patrón, cortes con el borde más guiones dentro del área (con huecos e islas). Se acerca a lo que dibuja ezdxf (ANSI35 de Perfil: 3 969 estimados, 3 867 reales; antes 522 385 con la caja). Si el contorno no se puede leer, se usa la estimación por la caja.
+  - Corrección del patrón de los HATCH dentro de un INSERT (`restore_hatch_pattern`): ver «Fallo de ezdxf» más abajo. En Perfil, el ANSI35 (3 867 tramos) y el ANSI37 (46) de la capa MATERIALES pasan de relleno a su patrón; en Plano_completo cambian los 29 rayados de patrón (ANSI31, GRAVEL y FP_1); VIA_2MA no tiene rayados de patrón. Verificado dibujo a dibujo: solo cambian esos HATCH.
+  - Semilla fija por HATCH: ezdxf desplaza el origen de las líneas del patrón con `random.random()`; con la semilla, el dibujo y el hash del SVG son reproducibles.
+  - Un HATCH cuyo patrón agota el tiempo (30 s, el de ezdxf) o la memoria ya no aborta la extracción: se borran los trazos que dejó a medias y se rellena solo ese HATCH. El PDF reutiliza lo aprendido en el SVG (no espera otros 30 s) y ambos deben coincidir. En el TXT pasa a "simplificadas" con el motivo, y hay aviso `HATCH_DEGRADED` en la terminal y en "A tener en cuenta".
+  - Líneas de patrón más juntas que 0,0001 unidades (ezdxf las rellena en silencio): la tabla de política las declara "simplificadas" con su motivo. El recuento de HATCH simplificados del informe de fidelidad sale de las mismas decisiones que el inventario.
+  - Límites: la corrección del patrón supone INSERT con escala uniforme y sin simetría; la comprobación de líneas demasiado juntas se hace sobre la definición del HATCH.
+
+Fallo de ezdxf 1.4.4 (documentado; todavía sin avisar a ezdxf): `DXFPolygon.transform` (ezdxf/entities/polygon.py, líneas 402-410) calcula bien la escala y el ángulo nuevos del patrón, pero los aplica enteros (`self.pattern.scale(factor, angle)`) sobre unas líneas que ya los incluían, en lugar de aplicar solo el cambio. Todo HATCH de patrón con escala ≠ 1 o ángulo ≠ 0 que se dibuja dentro de un INSERT sale con la escala aplicada dos veces y girado dos veces. Reproducción mínima (solo datos sintéticos):
+
+```python
+import ezdxf
+
+doc = ezdxf.new()
+block = doc.blocks.new("B")
+hatch = block.add_hatch()
+hatch.set_pattern_fill("ANSI31", scale=0.5, angle=30)
+hatch.paths.add_polyline_path([(0, 0), (10, 0), (10, 10), (0, 10)], is_closed=True)
+insert = doc.modelspace().add_blockref("B", (100, 0))  # solo traslación
+virtual = next(e for e in insert.virtual_entities() if e.dxftype() == "HATCH")
+print(hatch.pattern.lines[0])    # [75.0, (0.0, 0.0), (-1.5334072493, 0.4108752341), []]
+print(virtual.pattern.lines[0])  # [105.0, (0.0, 0.0), (-0.7667036246, -0.2054376171), []]
+# Esperado: el mismo ángulo (75°) y el mismo desplazamiento; ezdxf gira otros 30° y escala ×0,5.
+```
 
 Opcional (medido; hoy no compensa):
 - Paso 2, parche a pymupdf: `Shape.finish` copia todo el contenido de la página en cada trazo (coste cuadrático). Ahorraría ~25 s en Plano_completo, pero en un detalle como Perfil_K0010 el PDF cuesta 1,1 s de 18,5 s, y el parche depende de una parte interna de pymupdf. Hacerlo solo si los planos grandes pasan a ser habituales; también se puede avisar del defecto a PyMuPDF.
 - Paso 5, evitar relecturas de los DXF temporales: ~10 s en Plano_completo y 0,1 s en Perfil_K0010; el tiempo que queda es sobre todo leer el DXF de origen, que ya ocurre una sola vez.
 
 Pendiente:
+- Avisar a ezdxf del fallo de `DXFPolygon.transform` (reproducción arriba). Cuando lo corrijan, quitar `restore_hatch_pattern`; la prueba `test_ezdxf_still_scales_and_rotates_the_pattern_twice` avisará.
 - Texto seleccionable y buscable en el PDF (hoy 0 caracteres extraíbles): propuesta de capa de texto invisible pendiente de decisión.
 - HATCH "degradado" de Civil 3D: los rellenos `SOLID` y `SOLID,_O` (19 de los 21 HATCH de Perfil_K0010) salen etiquetados como "degradado" en la tabla de HATCH del TXT, porque `has_gradient_data` de ezdxf es verdadero. Conviene revisar si de verdad son degradados o rellenos sólidos con datos de degradado.
 - Heurística de unidades con falsos positivos (INSERT con escala 0.001 y coordenadas georreferenciadas de millones).
