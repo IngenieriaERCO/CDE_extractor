@@ -1,4 +1,3 @@
-import json
 import os
 import subprocess
 import sys
@@ -102,7 +101,7 @@ def test_option_omits_counts_and_reports_in_txt_and_terminal(tmp_path: Path, cap
 
     assert _run(_source(tmp_path / "origen.dxf"), out, "--omit-unsupported") == 0
 
-    assert _names(out) == ["detalle.pdf", "detalle.txt"]
+    assert _names(out) == ["detalle.manifest.json", "detalle.pdf", "detalle.txt"]
     report = (out / "detalle.txt").read_text(encoding="utf-8")
     assert "3DSOLID | SOLIDOS | omitidas | 2" in report
     assert "3DSOLID | SOLIDOS | no soportadas" not in report
@@ -197,22 +196,12 @@ def test_other_omissions_still_stop_with_the_option(tmp_path: Path, capsys) -> N
     assert _names(out) == []
 
 
-def test_detail_json_marks_dispositions_as_omitted(tmp_path: Path) -> None:
+def test_detail_model_marks_dispositions_as_omitted(tmp_path: Path, model_details) -> None:
     out = tmp_path / "salida"
-    manifest = tmp_path / "detalle.json"
 
-    assert (
-        _run(
-            _source(tmp_path / "origen.dxf"),
-            out,
-            "--omit-unsupported",
-            "--detail-json",
-            str(manifest),
-        )
-        == 0
-    )
+    assert _run(_source(tmp_path / "origen.dxf"), out, "--omit-unsupported") == 0
 
-    data = json.loads(manifest.read_text(encoding="utf-8"))
+    data = model_details[0]
     assert data["model_version"] == "2"
     solids = [item for item in data["dispositions"] if item["entity_type"] == "3DSOLID"]
     assert [item["status"] for item in solids] == ["omitted", "omitted"]

@@ -9,6 +9,7 @@ Solo usa la biblioteca estándar, como ``detail_model``. El formato está docume
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 from collections import Counter
@@ -17,9 +18,9 @@ from importlib import metadata
 from pathlib import Path
 
 from cde_exporter.cad.detail_model import (
-    ADVISORY_CHECKS,
     EntityStatus,
     ExtractedDetail,
+    check_blocks,
     detail_to_dict,
 )
 from cde_exporter.cad.notices import (
@@ -31,6 +32,8 @@ from cde_exporter.cad.notices import (
 
 DOCUMENT_TYPE = "cde-detail-manifest"
 SCHEMA_VERSION = "1.0"
+# El manifiesto se publica junto al PDF como <prefijo>.manifest.json, el último de los tres.
+MANIFEST_SUFFIX = ".manifest.json"
 _MM_PER_POINT = 25.4 / 72
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -299,7 +302,7 @@ def build_manifest(
                 {
                     "name": check.name,
                     "passed": check.passed,
-                    "blocking": check.name not in ADVISORY_CHECKS,
+                    "blocking": check_blocks(check.name),
                     "detail": check.detail,
                 }
                 for check in detail.result.validations
@@ -569,3 +572,49 @@ def validate_manifest(data: object) -> tuple[str, ...]:
     ):
         errors.append("manifiesto.validation.status: 'complete' con avisos warning o critical")
     return tuple(errors)
+
+
+def manifest_path_for(path: str | Path) -> Path:
+    """Manifiesto que corresponde a un PDF (o el propio manifiesto, si ya lo es)."""
+    path = Path(path)
+    if path.name.endswith(MANIFEST_SUFFIX):
+        return path
+    return path.with_name(f"{path.stem}{MANIFEST_SUFFIX}")
+
+
+def verify_package(path: str | Path) -> tuple[str, ...]:
+    """Problemas del paquete publicado de un detalle; vacío si está completo y es coherente.
+
+    ``path`` es el PDF o su manifiesto. El manifiesto se publica el último: un PDF sin
+    manifiesto es un paquete incompleto (p. ej. un corte a mitad de la publicación). Si hay
+    manifiesto, debe cumplir su esquema y el PDF que nombra debe existir junto a él con el
+    mismo SHA-256 y los mismos bytes; si se reemplazó el PDF pero no el manifiesto, el hash
+    no coincide.
+    """
+    manifest_file = manifest_path_for(path)
+    if not manifest_file.is_file():
+        return (f"Paquete incompleto: falta el manifiesto {manifest_file.name}.",)
+    try:
+        data = json.loads(manifest_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        return (f"No se pudo leer el manifiesto {manifest_file.name}: {error}",)
+    problems = list(validate_manifest(data))
+    if problems:
+        return tuple(problems)
+    pdf_name = data["pdf"]["file_name"]
+    pdf_file = manifest_file.with_name(pdf_name)
+    if Path(path).suffix.lower() == ".pdf" and Path(path).name != pdf_name:
+        problems.append(f"El manifiesto describe {pdf_name}, no {Path(path).name}.")
+    if not pdf_file.is_file():
+        return (*problems, f"Paquete incompleto: falta el PDF {pdf_name}.")
+    digest, size = _file_digest(pdf_file)
+    if digest != data["pdf"]["sha256"]:
+        problems.append(
+            f"El SHA-256 de {pdf_name} no coincide con el del manifiesto: el PDF no es el que "
+            "describe."
+        )
+    if size != data["pdf"]["bytes"]:
+        problems.append(
+            f"{pdf_name} mide {size} bytes; el manifiesto dice {data['pdf']['bytes']}."
+        )
+    return tuple(problems)

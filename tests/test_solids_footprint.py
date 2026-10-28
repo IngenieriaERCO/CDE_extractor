@@ -1,5 +1,4 @@
 import hashlib
-import json
 import math
 from pathlib import Path
 
@@ -134,7 +133,7 @@ def test_footprint_marks_solids_as_transformed(tmp_path: Path, capsys) -> None:
 
     assert _run(source, out, "--scale", "1:50", "--solids", "footprint") == 0
 
-    assert _names(out) == ["detalle.pdf", "detalle.txt"]
+    assert _names(out) == ["detalle.manifest.json", "detalle.pdf", "detalle.txt"]
     report = (out / "detalle.txt").read_text(encoding="utf-8")
     assert "3DSOLID | SOLIDOS | transformadas | 3" in report
     assert f"3DSOLID | SOLIDOS | transformadas | {FOOTPRINT_REASON} | 3" in report
@@ -220,15 +219,14 @@ def test_rotation_nonuniform_scale_and_mirror_match_exact_projection(
     assert _drawn_footprints(out / "detalle.dxf") == [exact]
 
 
-def test_page_section_c_and_json_use_render_bounds(tmp_path: Path) -> None:
+def test_page_section_c_and_model_use_render_bounds(tmp_path: Path, model_details) -> None:
     out = tmp_path / "salida"
-    manifest = tmp_path / "detalle.json"
     source = _source(tmp_path / "origen.dxf")
-    arguments = ("--scale", "1:50", "--solids", "footprint", "--detail-json", str(manifest))
+    arguments = ("--scale", "1:50", "--solids", "footprint")
 
     assert _run(source, out, *arguments) == 0
 
-    data = json.loads(manifest.read_text(encoding="utf-8"))
+    data = model_details[0]
     assert data["bounds"]["min_xyz"][:2] == pytest.approx([0, -1])
     assert data["bounds"]["max_xyz"][:2] == pytest.approx([12, 1])
     assert data["content_size_mm"] == pytest.approx([12 * 0.02, 2 * 0.02])

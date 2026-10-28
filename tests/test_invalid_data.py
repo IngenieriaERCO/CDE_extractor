@@ -97,7 +97,7 @@ def test_repaired_entity_is_excluded_from_measurement_and_drawn(tmp_path: Path, 
 
     assert main(_arguments(source, out)) == 0
 
-    assert _names(out) == ["detalle.pdf", "detalle.txt"]
+    assert _names(out) == ["detalle.manifest.json", "detalle.pdf", "detalle.txt"]
     expected = (
         f"Se excluyó de la medición 1 entidad con datos inválidos: LEADER {handle} "
         "(capa C-ROAD-INTS-TEXT, bloque PRUEBA_2_1). Se dibuja con el estilo de texto "
@@ -144,7 +144,7 @@ def test_invalid_entity_is_omitted_with_option_and_inventory_agrees(tmp_path: Pa
 
     assert main(_arguments(source, out, "--omit-unsupported")) == 0
 
-    assert _names(out) == ["detalle.pdf", "detalle.txt"]
+    assert _names(out) == ["detalle.manifest.json", "detalle.pdf", "detalle.txt"]
     report = (out / "detalle.txt").read_text(encoding="utf-8")
     assert "LEADER | C-ROAD-INTS-TEXT | omitidas | 1" in report
     assert "Omitida por --omit-unsupported: datos inválidos: DXFAttributeError" in _flat(report)

@@ -1,4 +1,3 @@
-import json
 from datetime import datetime
 from pathlib import Path
 
@@ -30,16 +29,26 @@ def synthetic_drawing(tmp_path: Path):
     return create
 
 
+# Modelos capturados en la prueba en curso (fixture ``model_details`` de conftest.py).
+_details: list[dict] = []
+
+
+@pytest.fixture(autouse=True)
+def _use_model_details(model_details):
+    global _details
+    _details = model_details
+
+
 def _extract(path: Path, output: Path, *options: str) -> list[dict]:
+    """Extrae y devuelve el modelo de cada referencia (antes, el JSON de --detail-json)."""
     prefix = output.with_suffix("")
-    manifest = output
+    details = _details
+    start = len(details)
     assert main([
         "cad", "extract-block", str(path), "--block-name", "Detalle",
         *options, "--output-prefix", str(prefix), "--format", "svg",
-        "--detail-json", str(manifest),
     ]) == 0
-    manifests = sorted(manifest.parent.glob(f"{manifest.stem}*.json"))
-    return [json.loads(item.read_text(encoding="utf-8")) for item in manifests]
+    return details[start:]
 
 
 def test_profile_with_nominal_scale_fills_sections_a_b_and_c(synthetic_drawing, tmp_path):

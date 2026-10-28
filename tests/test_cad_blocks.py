@@ -185,7 +185,7 @@ def test_occurrence_two_and_out_of_range(tmp_path: Path, capsys) -> None:
     assert "La ocurrencia 4 no existe" in capsys.readouterr().err
 
 
-def test_cli_extract_block_publishes_only_pdf_and_txt(tmp_path: Path, monkeypatch) -> None:
+def test_cli_extract_block_publishes_only_pdf_txt_and_manifest(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("CDE_KEEP_INTERMEDIATES", raising=False)
     source = create_blocks(tmp_path / "source.dxf")
     prefix = tmp_path / "result" / "detail"
@@ -206,7 +206,7 @@ def test_cli_extract_block_publishes_only_pdf_and_txt(tmp_path: Path, monkeypatc
     )
     assert result == 0
     published = sorted(item.name for item in prefix.parent.iterdir())
-    assert published == ["detail.pdf", "detail.txt"]
+    assert published == ["detail.manifest.json", "detail.pdf", "detail.txt"]
 
 
 @pytest.mark.parametrize("value, expected", [("1:20", 20), ("1:50", 50), ("1:100", 100)])

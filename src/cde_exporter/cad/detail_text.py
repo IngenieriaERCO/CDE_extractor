@@ -12,6 +12,7 @@ from cde_exporter.cad.detail_model import (
     ResultStatus,
     SelectionMethod,
 )
+from cde_exporter.cad.manifest import MANIFEST_SUFFIX
 from cde_exporter.cad.notices import FONT_ORIGINS, collect_notices
 
 _WIDTH = 100
@@ -323,6 +324,9 @@ def _format_result(detail: ExtractedDetail) -> list[str]:
         return lines
     status = "COMPLETA" if result.status is ResultStatus.COMPLETE else "COMPLETA CON ADVERTENCIAS"
     lines += _line("PDF", result.pdf_name or "no disponible")
+    if result.pdf_name:
+        stem = result.pdf_name.removesuffix(".pdf")
+        lines += _line("Manifiesto", f"{stem}{MANIFEST_SUFFIX}")
     lines += _line("Estado final", status)
     for check in result.validations:
         if check.passed:

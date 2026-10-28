@@ -21,6 +21,7 @@ from cde_exporter.cad import (
 from cde_exporter.cad.block_commands import run_blocks, run_extract_block
 from cde_exporter.cad.fidelity import print_fidelity_summary, write_fidelity_report
 from cde_exporter.cad.font_config import configure_fonts
+from cde_exporter.cad.manifest import manifest_path_for, verify_package
 from cde_exporter.config import get_settings
 from cde_exporter.converters.pdf_to_svg import PDFConversionError, convert_page_to_svg
 from cde_exporter.validators.pdf_validator import validate_pdf
@@ -85,9 +86,6 @@ def build_parser() -> argparse.ArgumentParser:
     block_extract_command.add_argument("--scale-factor", type=float)
     block_extract_command.add_argument("--scale", help="Escala nominal, por ejemplo 1:50")
     block_extract_command.add_argument(
-        "--detail-json", help="Guarda el modelo de dominio del detalle en JSON"
-    )
-    block_extract_command.add_argument(
         "--units", choices=("mm", "cm", "m", "in", "ft"),
         help="Declara o corrige las unidades del dibujo",
     )
@@ -116,6 +114,12 @@ def build_parser() -> argparse.ArgumentParser:
     block_extract_command.add_argument(
         "--no-text-layer", action="store_true", help=_NO_TEXT_LAYER_HELP
     )
+
+    verify_command = cad_subcommands.add_parser(
+        "verify-package",
+        help="Comprueba que el paquete de un detalle (PDF + manifiesto) está completo y coherente",
+    )
+    verify_command.add_argument("path", help="Ruta del PDF o de su .manifest.json")
 
     inspect_command = cad_subcommands.add_parser(
         "inspect", help="Muestra unidades, capas, entidades y extensiones de un DXF"
@@ -300,6 +304,15 @@ def _run_cad(args: argparse.Namespace) -> int:
             restore_fonts = configure_fonts(
                 args.font_substitutions, args.font_folder, args.drawing, args.font_fallback
             )
+        if args.cad_command == "verify-package":
+            problems = verify_package(args.path)
+            if problems:
+                print("Paquete NO válido:", file=sys.stderr)
+                for problem in problems:
+                    print(f"  - {problem}", file=sys.stderr)
+                return 1
+            print(f"Paquete completo y coherente: {manifest_path_for(args.path)}")
+            return 0
         if args.cad_command == "inspect":
             result = inspect_dxf(args.drawing)
             print(f"DXF: {result.path}")

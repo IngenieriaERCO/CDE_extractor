@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 import ezdxf
@@ -192,7 +191,9 @@ def test_dependency_order_is_stable_by_kind_and_reference(tmp_path: Path) -> Non
     )
 
 
-def test_modelspace_image_outside_selected_block_is_excluded(tmp_path: Path) -> None:
+def test_modelspace_image_outside_selected_block_is_excluded(
+    tmp_path: Path, model_details
+) -> None:
     document, detail = _document_with_detail()
     image_inside = tmp_path / "imagen-dentro-del-bloque.png"
     image_outside = tmp_path / "imagen-suelta-en-modelspace.png"
@@ -208,15 +209,13 @@ def test_modelspace_image_outside_selected_block_is_excluded(tmp_path: Path) -> 
     source = tmp_path / "origen-con-imagen-suelta.dxf"
     document.saveas(source)
     prefix = tmp_path / "detalle-extraido"
-    manifest = tmp_path / "detalle.json"
 
     assert main([
         "cad", "extract-block", str(source), "--block-name", "Detalle",
         "--occurrence", "1", "--output-prefix", str(prefix), "--format", "svg",
-        "--detail-json", str(manifest),
     ]) == 0
 
-    dependencies = json.loads(manifest.read_text(encoding="utf-8"))["dependencies"]
+    dependencies = model_details[0]["dependencies"]
     references = {dependency["reference"] for dependency in dependencies}
     assert str(image_inside) in references
     assert str(image_outside) not in references

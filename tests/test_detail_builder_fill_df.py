@@ -1,19 +1,29 @@
-import json
 import re
 from pathlib import Path
 
 import ezdxf
+import pytest
 
 from cde_exporter.cli import main
 
+# Modelos capturados en la prueba en curso (fixture ``model_details`` de conftest.py).
+_details: list[dict] = []
+
+
+@pytest.fixture(autouse=True)
+def _use_model_details(model_details):
+    global _details
+    _details = model_details
+
 
 def _extract(path: Path, output: Path) -> dict:
+    """Extrae y devuelve el modelo del detalle (antes, el JSON de --detail-json)."""
     assert main([
         "cad", "extract-block", str(path), "--block-name", "Detalle",
         "--output-prefix", str(output.parent / ("salida-" + output.stem)), "--format", "svg",
-        "--detail-json", str(output), "--hatch-mode", "solid",
+        "--hatch-mode", "solid",
     ]) == 0
-    return json.loads(output.read_text(encoding="utf-8"))
+    return _details[-1]
 
 
 def test_detail_json_fills_extra_fields_from_existing_flow(tmp_path: Path, capsys) -> None:

@@ -2,25 +2,31 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pymupdf
 
 from cde_exporter.cad.detail_model import (
-    ADVISORY_CHECKS,
     DRAWING_SCALE_CHECK,
+    MANIFEST_CHECK,
+    PAGE_SIZE_CHECK,
+    PDF_READABLE_CHECK,
     SEARCHABLE_TEXT_CHECK,
+    SINGLE_PAGE_CHECK,
     ExtractionResult,
     ExtractionWarning,
     ResultStatus,
     Severity,
     ValidationCheck,
+    check_blocks,
 )
+from cde_exporter.cad.manifest import verify_package
 from cde_exporter.validators.pdf_validator import validate_pdf
 
-_READABLE = "PDF legible"
-_SINGLE_PAGE = "Una sola página"
-_PAGE_SIZE = "Tamaño de página coincide con la escala"
+_READABLE = PDF_READABLE_CHECK
+_SINGLE_PAGE = SINGLE_PAGE_CHECK
+_PAGE_SIZE = PAGE_SIZE_CHECK
 _MM_PER_POINT = 25.4 / 72
 # Mayor diferencia admitida, en mm de papel, entre la longitud medida del dibujo y la que
 # corresponde a su escala (en cada eje, sobre todo el dibujo).
@@ -91,6 +97,40 @@ def pdf_page_facts(path: str | Path) -> tuple[int, tuple[float, float]]:
     with pymupdf.open(path) as document:
         rect = document[0].rect
         return document.page_count, (rect.width * _MM_PER_POINT, rect.height * _MM_PER_POINT)
+
+
+def check_manifest_coherence(manifest_file: str | Path, pdf_file: str | Path) -> ValidationCheck:
+    """Comprueba el manifiesto escrito frente al PDF, antes de publicar.
+
+    Hash, bytes y nombre (``manifest.verify_package``) y, leyendo el PDF, número de páginas y
+    tamaño de página. Bloquea: si no pasa, no se publica nada.
+    """
+    problems = list(verify_package(manifest_file))
+    if not problems:
+        data = json.loads(Path(manifest_file).read_text(encoding="utf-8"))
+        if Path(pdf_file).name != data["pdf"]["file_name"]:
+            problems.append(
+                f"El manifiesto nombra {data['pdf']['file_name']}, no {Path(pdf_file).name}."
+            )
+        page_count, page_size = pdf_page_facts(pdf_file)
+        if page_count != data["pdf"]["page_count"]:
+            stated = data["pdf"]["page_count"]
+            problems.append(f"El PDF tiene {page_count} páginas; el manifiesto dice {stated}.")
+        if any(
+            abs(measured - stated) > 1e-6
+            for measured, stated in zip(page_size, data["pdf"]["page_size_mm"], strict=True)
+        ):
+            problems.append(
+                f"La página mide {page_size[0]:.6f} × {page_size[1]:.6f} mm; el manifiesto dice "
+                f"{data['pdf']['page_size_mm'][0]:.6f} × {data['pdf']['page_size_mm'][1]:.6f} mm."
+            )
+    if problems:
+        return ValidationCheck(MANIFEST_CHECK, False, " ".join(problems))
+    return ValidationCheck(
+        MANIFEST_CHECK,
+        True,
+        "El manifiesto coincide con el PDF (SHA-256, bytes, páginas, tamaño de página y nombre).",
+    )
 
 
 def check_searchable_text(path: str | Path, lines: tuple[str, ...]) -> ValidationCheck:
@@ -274,7 +314,7 @@ def build_extraction_result(
     severidad warning o critical de ``notices.collect_notices``).
     """
     failed = tuple(check for check in checks if not check.passed)
-    blocking = tuple(check for check in failed if check.name not in ADVISORY_CHECKS)
+    blocking = tuple(check for check in failed if check_blocks(check.name))
     if blocking:
         raise PdfValidationError(blocking)
     status = (

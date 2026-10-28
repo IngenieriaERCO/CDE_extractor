@@ -180,7 +180,7 @@ def test_without_svg_the_pdf_provides_the_same_warnings_and_txt(
     assert run(without_svg) == 0
 
     names = sorted(item.name for item in without_svg.iterdir())
-    assert names == ["detalle.pdf", "detalle.txt"]
+    assert names == ["detalle.manifest.json", "detalle.pdf", "detalle.txt"]
     expected = _report_without_date(with_svg / "detalle.txt")
     actual = _report_without_date(without_svg / "detalle.txt")
     assert actual == expected

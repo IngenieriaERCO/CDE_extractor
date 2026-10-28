@@ -31,14 +31,14 @@ def _fail_export(*args, **kwargs):
     raise CadProcessingError("fallo simulado de la exportación")
 
 
-def test_successful_extraction_leaves_only_pdf_and_txt(tmp_path, monkeypatch):
+def test_successful_extraction_leaves_only_pdf_txt_and_manifest(tmp_path, monkeypatch):
     monkeypatch.delenv("CDE_KEEP_INTERMEDIATES", raising=False)
     source = _source(tmp_path / "origen.dxf")
     out = tmp_path / "salida"
 
     assert main(_arguments(source, out / "detalle")) == 0
 
-    assert _names(out) == ["detalle.pdf", "detalle.txt"]
+    assert _names(out) == ["detalle.manifest.json", "detalle.pdf", "detalle.txt"]
     report = (out / "detalle.txt").read_text(encoding="utf-8")
     assert "INFORME DE EXTRACCIÓN Y FIDELIDAD" in report
     assert "Escala nominal: 1:50" in report
@@ -53,7 +53,13 @@ def test_development_option_keeps_dxf_and_svg(tmp_path, monkeypatch):
 
     assert main(_arguments(source, out / "detalle")) == 0
 
-    assert _names(out) == ["detalle.dxf", "detalle.pdf", "detalle.svg", "detalle.txt"]
+    assert _names(out) == [
+        "detalle.dxf",
+        "detalle.manifest.json",
+        "detalle.pdf",
+        "detalle.svg",
+        "detalle.txt",
+    ]
 
 
 def test_failed_export_leaves_no_files(tmp_path, monkeypatch):
@@ -91,14 +97,15 @@ def test_failed_extraction_with_overwrite_keeps_previous_files(tmp_path, monkeyp
     source = _source(tmp_path / "origen.dxf")
     out = tmp_path / "salida"
     out.mkdir()
-    (out / "detalle.pdf").write_text("ANTERIOR", encoding="utf-8")
-    (out / "detalle.txt").write_text("ANTERIOR", encoding="utf-8")
+    for name in ("detalle.pdf", "detalle.txt", "detalle.manifest.json"):
+        (out / name).write_text("ANTERIOR", encoding="utf-8")
 
     assert main(_arguments(source, out / "detalle", "--overwrite")) == 1
 
-    assert _names(out) == ["detalle.pdf", "detalle.txt"]
-    assert (out / "detalle.pdf").read_text(encoding="utf-8") == "ANTERIOR"
-    assert (out / "detalle.txt").read_text(encoding="utf-8") == "ANTERIOR"
+    # El paquete anterior queda entero: PDF, TXT y manifiesto.
+    assert _names(out) == ["detalle.manifest.json", "detalle.pdf", "detalle.txt"]
+    for name in ("detalle.pdf", "detalle.txt", "detalle.manifest.json"):
+        assert (out / name).read_text(encoding="utf-8") == "ANTERIOR"
 
 
 def test_existing_output_without_overwrite_is_not_touched(tmp_path):
@@ -113,7 +120,7 @@ def test_existing_output_without_overwrite_is_not_touched(tmp_path):
     assert (out / "detalle.pdf").read_text(encoding="utf-8") == "ANTERIOR"
 
 
-def test_overwrite_replaces_both_files(tmp_path):
+def test_overwrite_replaces_the_whole_package(tmp_path):
     source = _source(tmp_path / "origen.dxf")
     out = tmp_path / "salida"
     out.mkdir()
@@ -122,7 +129,7 @@ def test_overwrite_replaces_both_files(tmp_path):
 
     assert main(_arguments(source, out / "detalle", "--overwrite")) == 0
 
-    assert _names(out) == ["detalle.pdf", "detalle.txt"]
+    assert _names(out) == ["detalle.manifest.json", "detalle.pdf", "detalle.txt"]
     assert (out / "detalle.txt").read_text(encoding="utf-8") != "ANTERIOR"
 
 

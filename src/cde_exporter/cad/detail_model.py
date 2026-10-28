@@ -692,12 +692,34 @@ class ResultStatus(StrEnum):
     COMPLETE_WITH_WARNINGS = "complete_with_warnings"
 
 
-# Nombre de la comprobación de la capa de texto; el informe TXT elige su nota según esté o no.
+# Nombres de las comprobaciones del PDF (``pdf_checks``).
+PDF_READABLE_CHECK = "PDF legible"
+SINGLE_PAGE_CHECK = "Una sola página"
+PAGE_SIZE_CHECK = "Tamaño de página coincide con la escala"
+# Capa de texto buscable; el informe TXT elige su nota según esté o no.
 SEARCHABLE_TEXT_CHECK = "Texto buscable"
 # Escala real del dibujo medida en el PDF; la escala física solo es "garantizada" si pasa.
 DRAWING_SCALE_CHECK = "Escala del dibujo"
-# Comprobaciones que, si no pasan, avisan pero no impiden publicar; el resto bloquea.
+# Manifiesto escrito frente al PDF (hash, bytes, páginas, tamaño y nombre), antes de publicar.
+MANIFEST_CHECK = "Manifiesto coherente con el PDF"
+# Toda comprobación está en una de las dos listas. Si una que bloquea no pasa, no se publica
+# nada (código 1); si una que solo avisa no pasa, se publica con advertencia.
+BLOCKING_CHECKS = frozenset(
+    {PDF_READABLE_CHECK, SINGLE_PAGE_CHECK, PAGE_SIZE_CHECK, MANIFEST_CHECK}
+)
 ADVISORY_CHECKS = frozenset({SEARCHABLE_TEXT_CHECK, DRAWING_SCALE_CHECK})
+
+
+def check_blocks(name: str) -> bool:
+    """True si la comprobación ``name`` impide publicar cuando no pasa.
+
+    Una comprobación sin clasificar es un error del programa: no se decide por omisión.
+    """
+    if name in BLOCKING_CHECKS:
+        return True
+    if name in ADVISORY_CHECKS:
+        return False
+    raise ValueError(f"Comprobación sin clasificar (ni bloquea ni avisa): {name!r}")
 
 
 @dataclass(frozen=True, slots=True)

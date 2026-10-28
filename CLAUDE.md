@@ -9,7 +9,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - Lee cada archivo antes de editarlo. Pide confirmación antes de cambios grandes.
 
 ## Verificación (siempre antes de dar algo por terminado)
-- `python -m pytest -q --tb=short` (referencia: 407 pruebas pasando).
+- `python -m pytest -q --tb=short` (referencia: 415 pruebas pasando).
 - `ruff check src tests`.
 - NO ejecutar `ruff format` sobre archivos existentes (solo en archivos nuevos).
 - NO usar `pytest -s` (las pruebas del aviso de escala esperarían entrada).
@@ -25,9 +25,9 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 
 ## Reglas del programa
 - Única entrada: DXF; se lee el Model Space.
-- Salidas publicadas: solo PDF + TXT (informe con secciones A–G generado desde el modelo interno). Si la extracción falla, no queda ningún archivo.
+- Salidas publicadas: PDF + TXT (informe con secciones A–G generado desde el modelo interno) + manifiesto `<prefijo>.manifest.json`, publicados en ese orden (el manifiesto el último: un PDF sin manifiesto es un paquete incompleto; `cad verify-package` lo comprueba). Si la extracción falla, no queda ningún archivo. Con `--all`, todo o nada: se preparan todas las referencias antes de publicar ninguna. `--detail-json` ya no existe (las pruebas usan el fixture `model_details` de `tests/conftest.py`).
 - Nunca modificar el DXF de origen.
-- Todo se trabaja en un directorio temporal dentro de la carpeta de salida y se publica de forma atómica (`_publish_files`).
+- Todo se trabaja en carpetas temporales dentro de la carpeta de salida (una por referencia, que se borran al terminar la orden) y se publica de forma atómica (`_publish_files`).
 - La escala se pide al usuario tras identificar el bloque (`--scale 1:N` o pregunta interactiva). Sin terminal y sin `--scale`: aviso.
 - Factor de salida = mm por unidad CAD × escala del INSERT ÷ N. No afirmar escala física si las unidades no están verificadas.
 - La escala del dibujo se mide en el propio PDF (comprobación "Escala del dibujo" de `pdf_checks`: puntos de los trazos frente a la caja que grabó ezdxf; tolerancia 0,01 mm por eje). Es una advertencia, no bloquea; la escala física solo es "garantizada" si las unidades están verificadas y esa comprobación pasa. La página PDF se crea con su tamaño exacto en puntos (`_PdfBackend`; ezdxf la truncaba a puntos enteros).
@@ -44,8 +44,9 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - Los sólidos 3D (3DSOLID) se dibujan como huella en planta con `--solids footprint` o se omiten con `--omit-unsupported`; sin ninguna de las dos opciones, la extracción se detiene.
 
 ## Avisos y manifiesto (Fase 4)
-- Lista única de avisos: `notices.collect_notices(detail)` genera todos los avisos (código, severidad `info`/`warning`/`critical`, categoría y consejo). La usan el TXT ("A tener en cuenta") y el manifiesto; el estado final es "con advertencias" si hay algún aviso `warning` o `critical`. Todo código de aviso nuevo necesita su categoría en `notices.WARNING_CODES` (una prueba lo exige). La sustitución de fuente es `FONT_SUBSTITUTED` (info); `GLYPHS_MISSING` es warning.
-- Manifiesto v1 (`manifest.py`, documentado en `docs/manifiesto.md`): `build_manifest` y `validate_manifest` (esquema propio, sin jsonschema). Se construye y se valida en cada extracción, pero aún NO se publica como archivo (paso 6). Guarda nombres de archivo, nunca rutas, y la matriz CAD → página real (`ExportReport.cad_to_page_pt`).
+- Lista única de avisos: `notices.collect_notices(detail)` genera todos los avisos (código, severidad `info`/`warning`/`critical`, categoría y consejo). La usan el TXT ("A tener en cuenta") y el manifiesto; el estado final es "con advertencias" si hay algún aviso `warning`. Los avisos `critical` (`notices.BLOCKING_SEVERITIES`: XREF o bloque sin resolver) bloquean: sin archivos, código 1 y un mensaje que dice qué falta; se comprueban antes de dibujar y antes de publicar. Todo código de aviso nuevo necesita su categoría en `notices.WARNING_CODES` (una prueba lo exige). La sustitución de fuente es `FONT_SUBSTITUTED` (info); `GLYPHS_MISSING` es warning.
+- Manifiesto v1 (`manifest.py`, documentado en `docs/manifiesto.md`): `build_manifest` y `validate_manifest` (esquema propio, sin jsonschema). Se valida contra su esquema, se escribe y se comprueba contra el PDF (`pdf_checks.check_manifest_coherence`: hash, bytes, páginas, tamaño y nombre) antes de publicar. Guarda nombres de archivo, nunca rutas, y la matriz CAD → página real (`ExportReport.cad_to_page_pt`).
+- Comprobaciones: toda comprobación está en `detail_model.BLOCKING_CHECKS` (si falla, no se publica nada) o en `ADVISORY_CHECKS` (solo avisa); `check_blocks` falla con una sin clasificar.
 - La página PDF se crea con su tamaño exacto y el dibujo centrado en ella: ezdxf la trunca a puntos enteros y además la redondea a 0,1 mm (`Page.width_in_mm` redondea al leerse); `_PdfBackend` compensa las dos cosas.
 
 ## Arquitectura (src/cde_exporter/cad)

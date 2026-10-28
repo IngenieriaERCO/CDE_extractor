@@ -100,44 +100,46 @@ def _source(path: Path, count: int = 1) -> Path:
     return path
 
 
-def test_detail_json_is_utf8_valid_json_and_has_model_version(tmp_path: Path) -> None:
+def test_detail_model_has_model_version_and_manifest_is_utf8_json(
+    tmp_path: Path, model_details
+) -> None:
     source = _source(tmp_path / "source.dxf")
     prefix = tmp_path / "out"
-    manifest = tmp_path / "detail.json"
     assert main([
         "cad", "extract-block", str(source), "--block-name", "Detalle", "--occurrence", "1",
         "--scale", "1:50", "--output-prefix", str(prefix), "--format", "svg",
-        "--detail-json", str(manifest),
     ]) == 0
-    data = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest = json.loads((tmp_path / "out.manifest.json").read_text(encoding="utf-8"))
+    assert manifest["model_version"] == "2"
+    data = model_details[0]
     assert data["model_version"] == "2"
     assert data["scale"]["nominal_denominator"] == 50.0
     assert data["source"]["block_name"] == "Detalle"
 
 
-def test_without_detail_json_creates_no_extra_file(tmp_path: Path) -> None:
+def test_detail_json_option_no_longer_exists(tmp_path: Path, capsys) -> None:
     source = _source(tmp_path / "source.dxf")
-    prefix = tmp_path / "out"
-    assert main([
-        "cad", "extract-block", str(source), "--block-name", "Detalle", "--occurrence", "1",
-        "--output-prefix", str(prefix), "--format", "svg",
-    ]) == 0
-    assert not (tmp_path / "out.json").exists()
+    with pytest.raises(SystemExit):
+        main([
+            "cad", "extract-block", str(source), "--block-name", "Detalle",
+            "--output-prefix", str(tmp_path / "out"), "--detail-json", str(tmp_path / "d.json"),
+        ])
+    assert "--detail-json" in capsys.readouterr().err
+    assert not list(tmp_path.glob("out*"))
 
 
-def test_detail_json_adds_occurrence_suffix_for_all(tmp_path: Path) -> None:
+def test_all_publishes_one_manifest_per_occurrence(tmp_path: Path, model_details) -> None:
     source = _source(tmp_path / "source.dxf", count=2)
     prefix = tmp_path / "all-out"
-    manifest = tmp_path / "manifest.json"
     assert main([
         "cad", "extract-block", str(source), "--block-name", "Detalle", "--all",
-        "--output-prefix", str(prefix), "--format", "svg", "--detail-json", str(manifest),
+        "--output-prefix", str(prefix), "--format", "svg",
     ]) == 0
-    first = json.loads((tmp_path / "manifest_001.json").read_text(encoding="utf-8"))
-    second = json.loads((tmp_path / "manifest_002.json").read_text(encoding="utf-8"))
-    assert first["reference"]["occurrence"] == 1
-    assert second["reference"]["occurrence"] == 2
-    assert first["reference"]["total_occurrences"] == 2
-    assert second["reference"]["total_occurrences"] == 2
-    assert first["model_version"] == "2"
-    assert not manifest.exists()
+    first = json.loads((tmp_path / "all-out_001.manifest.json").read_text(encoding="utf-8"))
+    second = json.loads((tmp_path / "all-out_002.manifest.json").read_text(encoding="utf-8"))
+    assert first["source"]["reference"]["occurrence"] == 1
+    assert second["source"]["reference"]["occurrence"] == 2
+    assert first["source"]["reference"]["total_occurrences"] == 2
+    assert second["source"]["reference"]["total_occurrences"] == 2
+    assert first["pdf"]["file_name"] == "all-out_001.pdf"
+    assert [item["reference"]["occurrence"] for item in model_details] == [1, 2]

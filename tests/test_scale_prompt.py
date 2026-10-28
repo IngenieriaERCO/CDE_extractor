@@ -48,7 +48,7 @@ def test_prompt_sets_scale_and_is_recorded(tmp_path, monkeypatch):
 
     assert len(prompts) == 1
     assert "1:N" in prompts[0]
-    assert _names(out) == ["detalle.pdf", "detalle.txt"]
+    assert _names(out) == ["detalle.manifest.json", "detalle.pdf", "detalle.txt"]
     report = (out / "detalle.txt").read_text(encoding="utf-8")
     assert "Escala nominal: 1:50" in report
 
@@ -131,7 +131,8 @@ def test_all_references_share_one_question(tmp_path, monkeypatch, capsys):
     assert len(prompts) == 1
     assert "se aplicará a las 2 referencias" in capsys.readouterr().out
     assert _names(out) == [
-        "detalle_001.pdf", "detalle_001.txt", "detalle_002.pdf", "detalle_002.txt",
+        "detalle_001.manifest.json", "detalle_001.pdf", "detalle_001.txt",
+        "detalle_002.manifest.json", "detalle_002.pdf", "detalle_002.txt",
     ]
 
 
@@ -144,6 +145,6 @@ def test_without_terminal_keeps_previous_behavior_with_warning(tmp_path, monkeyp
     assert main(_arguments(source, out / "detalle")) == 0
 
     assert "no se indicó --scale" in capsys.readouterr().err
-    assert _names(out) == ["detalle.pdf", "detalle.txt"]
+    assert _names(out) == ["detalle.manifest.json", "detalle.pdf", "detalle.txt"]
     report = (out / "detalle.txt").read_text(encoding="utf-8")
     assert "Escala nominal: no aplica" in report

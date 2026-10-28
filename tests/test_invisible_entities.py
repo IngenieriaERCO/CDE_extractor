@@ -105,7 +105,11 @@ def test_extract_block_reports_invisible_entities_in_txt(tmp_path: Path, monkeyp
         == 0
     )
 
-    assert sorted(item.name for item in out.iterdir()) == ["detalle.pdf", "detalle.txt"]
+    assert sorted(item.name for item in out.iterdir()) == [
+        "detalle.manifest.json",
+        "detalle.pdf",
+        "detalle.txt",
+    ]
     report = (out / "detalle.txt").read_text(encoding="utf-8")
     notes = report.split("A tener en cuenta", 1)[1]
     assert "Se ignoró 1 entidad no visible" in " ".join(notes.split())

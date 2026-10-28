@@ -2,17 +2,18 @@
 
 Este documento es para quien programe el **componedor de PDF** (la plancha A1). El manifiesto es el contrato técnico de cada detalle extraído: con él se puede identificar, validar y colocar el PDF sin volver a leer el DXF de origen.
 
-> **Estado (Fase 4, paso 3):** el manifiesto se construye y se valida en cada extracción, pero todavía **no se publica** como archivo. En el paso 6 pasará a publicarse como `<prefijo>.json`, junto al PDF y al TXT, y será el último de los tres en escribirse: si el manifiesto existe, el paquete está completo.
+Cada extracción publica tres archivos con el mismo prefijo: `<prefijo>.pdf`, `<prefijo>.txt` y `<prefijo>.manifest.json`, en ese orden. El manifiesto se publica **el último**: un PDF sin su manifiesto es un paquete **incompleto** (por ejemplo, un corte a mitad de la publicación) y no debe usarse. Con `--all`, los nombres llevan el número de referencia (`<prefijo>_001.pdf`, `<prefijo>_001.manifest.json`…), y se publica todo o nada.
 
-El código está en `src/cde_exporter/cad/manifest.py` (`build_manifest` y `validate_manifest`). Hay un ejemplo real de Perfil_K0010 en `data/output/auditoria_fase4/manifiesto/perfil_k0010.manifest.json` (fuera de Git: son datos de ERCO).
+El código está en `src/cde_exporter/cad/manifest.py` (`build_manifest`, `validate_manifest` y `verify_package`). Hay un ejemplo real de Perfil_K0010 en `data/output/auditoria_fase4/manifiesto/perfil_k0010.manifest.json` (fuera de Git: son datos de ERCO).
 
 ## Cómo usarlo desde el componedor
 
-1. Lee el JSON (UTF-8) y comprueba `document_type == "cde-detail-manifest"` y que la versión mayor de `schema_version` sea `1`.
-2. Comprueba `validation.status`. Solo existen paquetes completos (`complete` o `complete_with_warnings`): si una comprobación que bloquea falla, no se publica nada.
-3. Calcula el SHA-256 del PDF y compáralo con `pdf.sha256`. Si no coincide, el PDF no es el que describe el manifiesto: no lo uses.
-4. Si necesitas escala física, exige `scale.physical_scale_guaranteed == true`. Si es `false`, `scale.physical_scale_reason` dice por qué.
-5. Para colocar el detalle, usa `pdf.page_size_mm` y `pdf.drawing.page_bounds_mm`. Para relacionar coordenadas del CAD con el PDF, usa la matriz `pdf.drawing.cad_to_page.matrix`.
+1. Busca el manifiesto junto al PDF (`<prefijo>.manifest.json`). Si no está, el paquete está incompleto: no uses el PDF.
+2. Lee el JSON (UTF-8) y comprueba `document_type == "cde-detail-manifest"` y que la versión mayor de `schema_version` sea `1`.
+3. Comprueba `validation.status`. Solo se publican paquetes completos (`complete` o `complete_with_warnings`): si una comprobación que bloquea falla, o hay un aviso crítico, no se publica nada.
+4. Calcula el SHA-256 del PDF y compáralo con `pdf.sha256`. Si no coincide, el PDF no es el que describe el manifiesto (p. ej. se reemplazó sin su manifiesto): no lo uses.
+5. Si necesitas escala física, exige `scale.physical_scale_guaranteed == true`. Si es `false`, `scale.physical_scale_reason` dice por qué.
+6. Para colocar el detalle, usa `pdf.page_size_mm` y `pdf.drawing.page_bounds_mm`. Para relacionar coordenadas del CAD con el PDF, usa la matriz `pdf.drawing.cad_to_page.matrix`.
 
 Ejemplo en Python, solo con la biblioteca estándar:
 
@@ -128,7 +129,7 @@ Es la misma lista que muestra el TXT en «A tener en cuenta», generada en un so
 Severidades:
 - `info`: informa (fuente sustituida, capa de texto). No cambia el estado.
 - `warning`: el estado pasa a `complete_with_warnings`.
-- `critical`: hoy solo las dependencias sin resolver (XREF o bloque). En el paso 5 pasarán a impedir la publicación.
+- `critical`: dependencias sin resolver (XREF o bloque). **Impiden publicar**: la extracción termina con código 1, sin archivos y con un mensaje que dice qué falta. Por eso un manifiesto publicado nunca tiene avisos críticos.
 
 Códigos:
 
@@ -164,7 +165,17 @@ Las opciones con las que se ejecutó la extracción: `hatch_mode`, `hatch_thresh
 - que `notices.counts` cuadre con los avisos;
 - que un estado `complete` no tenga avisos warning o critical.
 
-El exportador valida cada manifiesto antes de terminar; si no fuera válido, sería un fallo del programa y no se publicaría nada.
+El exportador valida cada manifiesto contra su esquema, lo escribe y lo comprueba contra el PDF (hash, bytes, páginas, tamaño de página y nombre) antes de publicar; si algo no cuadra, no se publica nada.
+
+## Comprobar un paquete publicado
+
+`verify_package(ruta)` (con la ruta del PDF o del manifiesto) devuelve los problemas del paquete, o una tupla vacía si está completo y es coherente: el manifiesto existe, cumple el esquema y el PDF que nombra existe junto a él con el mismo SHA-256 y los mismos bytes. Desde la terminal:
+
+```powershell
+.venv\Scripts\cde-exporter cad verify-package data\output\detalle.pdf
+```
+
+Termina con código 0 («Paquete completo y coherente») o con código 1 y la lista de problemas (p. ej. «Paquete incompleto: falta el manifiesto detalle.manifest.json.»).
 
 ## Ejemplo (extracto de Perfil_K0010 a 1:50)
 

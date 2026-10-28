@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import os
@@ -38,7 +39,6 @@ from cde_exporter.cad.detail_model import (
     SelectionMethod,
     Severity,
     degraded_hatches_message,
-    detail_to_dict,
     finalize_detail,
     mark_degraded_hatches,
     mark_footprint_solids,
@@ -53,13 +53,25 @@ from cde_exporter.cad.fidelity import (
     write_fidelity_report,
 )
 from cde_exporter.cad.font_config import configure_fonts
-from cde_exporter.cad.manifest import PdfFacts, RunOptions, build_manifest, validate_manifest
+from cde_exporter.cad.manifest import (
+    MANIFEST_SUFFIX,
+    PdfFacts,
+    RunOptions,
+    build_manifest,
+    validate_manifest,
+)
 from cde_exporter.cad.models import CadProcessingError
-from cde_exporter.cad.notices import NoticeSeverity, collect_notices
+from cde_exporter.cad.notices import (
+    NoticeSeverity,
+    blocking_message,
+    blocking_notices,
+    collect_notices,
+)
 from cde_exporter.cad.pdf_checks import (
     PdfValidationError,
     advisory_warnings,
     build_extraction_result,
+    check_manifest_coherence,
     pdf_page_facts,
     validate_output_pdf,
 )
@@ -331,17 +343,6 @@ def _validate_nominal_page_sizes(
             )
 
 
-def _detail_json_output(path: str | None, occurrence: int, multiple: bool) -> Path | None:
-    if path is None:
-        return None
-    destination = Path(path)
-    if multiple:
-        destination = destination.with_name(
-            f"{destination.stem}_{occurrence:03d}{destination.suffix}"
-        )
-    return destination
-
-
 def _effective_bounds_xyz(document):
     """Caja efectiva (mínimo y máximo, con Z) del Model Space del DXF extraído.
 
@@ -403,14 +404,43 @@ def _publish_files(pairs: list[tuple[Path, Path]], overwrite: bool) -> None:
 
 def run_extract_block(args) -> int:
     font_restorers: list = []
+    staging: list[Path] = []
     try:
-        return _run_extract_block(args, font_restorers)
+        return _run_extract_block(args, font_restorers, staging)
     finally:
         for restore in font_restorers:
             restore()
+        for folder in staging:
+            shutil.rmtree(folder, ignore_errors=True)
 
 
-def _run_extract_block(args, font_restorers: list) -> int:
+@contextlib.contextmanager
+def _staging_folder(parent: Path, staging: list[Path]):
+    """Carpeta de trabajo de una referencia, dentro de la carpeta de salida.
+
+    No se borra al salir del bloque, sino al terminar la orden (``run_extract_block``): con
+    --all, los archivos de todas las referencias esperan ahí hasta publicarse juntos.
+    """
+    folder = Path(tempfile.mkdtemp(dir=parent))
+    staging.append(folder)
+    yield str(folder)
+
+
+def _outputs(prefix: Path, ref, all_references: bool, keep: bool) -> dict[str, Path]:
+    """Archivos que publica una referencia: PDF, TXT, manifiesto y, en desarrollo, DXF y SVG."""
+    order_prefix = prefix.with_name(f"{prefix.name}_{ref.order:03d}") if all_references else prefix
+    outputs = {
+        "pdf": order_prefix.with_suffix(".pdf"),
+        "txt": order_prefix.with_suffix(".txt"),
+        "manifest": order_prefix.with_name(f"{order_prefix.name}{MANIFEST_SUFFIX}"),
+    }
+    if keep:
+        outputs["dxf"] = order_prefix.with_suffix(".dxf")
+        outputs["svg"] = order_prefix.with_suffix(".svg")
+    return outputs
+
+
+def _run_extract_block(args, font_restorers: list, staging: list[Path]) -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
@@ -476,38 +506,37 @@ def _run_extract_block(args, font_restorers: list) -> int:
             nominal_denominator,
         )
     keep = _keep_intermediates()
+    # Con --all, todo o nada: se comprueban los destinos de todas las referencias antes de
+    # preparar ninguna, y se publica cuando todas están preparadas.
     for ref in selected:
-        order_prefix = prefix.with_name(f"{prefix.name}_{ref.order:03d}") if args.all else prefix
-        pdf_destination = order_prefix.with_suffix(".pdf")
-        txt_destination = order_prefix.with_suffix(".txt")
-        dxf_output = order_prefix.with_suffix(".dxf")
-        svg_output = order_prefix.with_suffix(".svg")
-        detail_json_output = _detail_json_output(
-            args.detail_json, ref.order, args.all or len(selected) > 1
-        )
-        outputs = [pdf_destination, txt_destination]
-        if keep:
-            outputs += [dxf_output, svg_output]
-        if detail_json_output is not None:
-            outputs.append(detail_json_output)
-        for output in outputs:
+        for output in _outputs(prefix, ref, args.all, keep).values():
             if output.resolve() == source.resolve():
                 raise CadProcessingError("La salida no puede sobrescribir el DXF original")
             if output.exists() and not args.overwrite:
                 raise CadProcessingError(
                     f"El archivo de salida ya existe: {output}. Usa --overwrite para reemplazarlo."
                 )
+    staged_pairs: list[tuple[Path, Path]] = []
+    staged_manifests: list[tuple[Path, Path]] = []
+    after_publish: list[tuple[str, bool]] = []
+    for ref in selected:
+        order_prefix = prefix.with_name(f"{prefix.name}_{ref.order:03d}") if args.all else prefix
+        destinations = _outputs(prefix, ref, args.all, keep)
+        pdf_destination = destinations["pdf"]
+        txt_destination = destinations["txt"]
+        manifest_destination = destinations["manifest"]
+        dxf_output = order_prefix.with_suffix(".dxf")
+        svg_output = order_prefix.with_suffix(".svg")
         prefix.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(
-            dir=prefix.parent, ignore_cleanup_errors=True
-        ) as temp_name:
+        # La carpeta de trabajo dura hasta el final de la orden (se borra en run_extract_block).
+        with _staging_folder(prefix.parent, staging) as temp_name:
             work = Path(temp_name)
             temp_dxf = work / f"{order_prefix.name}.dxf"
             temp_fidelity = work / "fidelidad.txt"
             temp_svg = work / f"{order_prefix.name}.svg"
             temp_pdf = work / f"{order_prefix.name}.pdf"
             temp_report = work / f"{order_prefix.name}.txt"
-            temp_json = work / "detalle.json"
+            temp_manifest = work / manifest_destination.name
             result = extract_block_reference(
                 source,
                 args.block_name,
@@ -680,6 +709,9 @@ def _run_extract_block(args, font_restorers: list) -> int:
                     footprints.failure_reasons,
                     footprints.max_error_mm,
                 )
+            # Un aviso crítico (p. ej. XREF sin resolver) se conoce antes de dibujar: se detiene
+            # aquí para no gastar el tiempo del dibujo.
+            _raise_if_blocking(detail)
             sys.stdout.flush()  # para que los avisos de stderr salgan en orden
             if result.unbounded:
                 print(
@@ -784,6 +816,7 @@ def _run_extract_block(args, font_restorers: list) -> int:
                 for warning in check_warnings:
                     print(f"Aviso: {warning.message}", file=sys.stderr)
             detail = _confirm_physical_scale(detail, checks)
+            _raise_if_blocking(detail)  # también los que hubieran aparecido al dibujar
             try:
                 # El estado sale de la lista única de avisos: "con advertencias" si hay alguno
                 # warning o critical (las notas informativas no cuentan).
@@ -804,23 +837,24 @@ def _run_extract_block(args, font_restorers: list) -> int:
                 ) from error
             detail = finalize_detail(detail, extraction_result)
             temp_report.write_text(format_detail_report(detail), encoding="utf-8", newline="\n")
-            # Manifiesto v1: se construye y se valida en cada extracción; se publicará como
-            # tercer archivo en el paso 6 de la Fase 4.
-            _checked_manifest(source, temp_pdf, detail, export_report, args)
+            # Manifiesto v1: validado contra su esquema, escrito y comprobado contra el PDF.
+            manifest = _checked_manifest(source, temp_pdf, detail, export_report, args)
+            temp_manifest.write_text(
+                json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            coherence = check_manifest_coherence(temp_manifest, temp_pdf)
+            if not coherence.passed:
+                raise CadProcessingError(
+                    f"{coherence.name}: {coherence.detail} No se generaron archivos."
+                )
             pairs = [(temp_pdf, pdf_destination), (temp_report, txt_destination)]
             if keep:
                 pairs += [(render_dxf, dxf_output), (temp_svg, svg_output)]
-            if detail_json_output is not None:
-                try:
-                    with temp_json.open("w", encoding="utf-8", newline="\n") as stream:
-                        json.dump(detail_to_dict(detail), stream, indent=2, ensure_ascii=False)
-                        stream.write("\n")
-                except (OSError, TypeError, ValueError) as error:
-                    raise CadProcessingError(
-                        f"No se pudo escribir el JSON del detalle '{detail_json_output}': {error}"
-                    ) from error
-                pairs.append((temp_json, detail_json_output))
-            _publish_files(pairs, args.overwrite)
+            # Todo o nada: se publica cuando todas las referencias están preparadas.
+            staged_pairs += pairs
+            staged_manifests.append((temp_manifest, manifest_destination))
         if args.scale_factor is None and nominal_denominator is None and scale is not None:
             mm_per_unit = (
                 1.0
@@ -834,13 +868,12 @@ def _run_extract_block(args, font_restorers: list) -> int:
             f"{_format_insert(ref.insert)} | entidades de definición: "
             f"{result.definition_entity_count}"
         )
-        print(f"Creado: {pdf_destination}")
-        print(f"Creado: {txt_destination}")
+        # Lo que se dice tras publicar: (texto, ¿por stderr?).
+        created = [pdf_destination, txt_destination]
         if keep:
-            print(f"Creado: {dxf_output}")
-            print(f"Creado: {svg_output}")
-        if detail_json_output is not None:
-            print(f"JSON del detalle creado: {detail_json_output}")
+            created += [dxf_output, svg_output]
+        after_publish += [(f"Creado: {path}", False) for path in created]
+        after_publish.append((f"Creado: {manifest_destination}", False))
         if footprints is not None and (footprints.converted or footprints.failures):
             drawn = sum(
                 1
@@ -849,16 +882,28 @@ def _run_extract_block(args, font_restorers: list) -> int:
             )
             distinct = len(footprints.converted)
             distinct_text = "sólido distinto" if distinct == 1 else "sólidos distintos"
-            print(
-                f"Huellas: {drawn} 3DSOLID {'dibujado' if drawn == 1 else 'dibujados'} como "
-                f"huella 2D ({distinct} {distinct_text})."
+            after_publish.append(
+                (
+                    f"Huellas: {drawn} 3DSOLID {'dibujado' if drawn == 1 else 'dibujados'} como "
+                    f"huella 2D ({distinct} {distinct_text}).",
+                    False,
+                )
             )
             if footprints.failures:
-                print(f"Aviso: 3DSOLID sin huella: {_failure_text(footprints)}.")
+                after_publish.append(
+                    (f"Aviso: 3DSOLID sin huella: {_failure_text(footprints)}.", False)
+                )
         if export_report.omitted:
+            after_publish.append((_omitted_terminal_line(export_report.omitted), True))
+    # Orden de publicación: PDF y TXT (y los intermedios de desarrollo) de todas las
+    # referencias y, al final, los manifiestos. Un PDF sin su manifiesto es un paquete
+    # incompleto (``manifest.verify_package``).
+    _publish_files([*staged_pairs, *staged_manifests], args.overwrite)
+    for text, to_stderr in after_publish:
+        if to_stderr:
             # stdout puede tener búfer (p. ej. redirigido); se vacía para que el aviso salga último.
             sys.stdout.flush()
-            print(_omitted_terminal_line(export_report.omitted), file=sys.stderr)
+        print(text, file=sys.stderr if to_stderr else sys.stdout)
     return 0
 
 
@@ -935,6 +980,13 @@ def _invalid_data_messages(
             f"… y {hidden} {'entidad' if hidden == 1 else 'entidades'} más con datos inválidos."
         ]
     return messages
+
+
+def _raise_if_blocking(detail) -> None:
+    """Sin archivos y código 1 si hay algún aviso crítico (``notices.BLOCKING_SEVERITIES``)."""
+    notices = blocking_notices(detail)
+    if notices:
+        raise CadProcessingError(blocking_message(notices))
 
 
 def _run_options(args) -> RunOptions:

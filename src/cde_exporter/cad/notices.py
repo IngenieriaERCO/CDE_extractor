@@ -19,8 +19,12 @@ from cde_exporter.cad.detail_model import (
 
 class NoticeSeverity(StrEnum):
     INFO = "info"  # informa; no cambia el estado final
-    WARNING = "warning"  # el estado final pasa a "completa con advertencias"
-    CRITICAL = "critical"
+    WARNING = "warning"  # se publica; el estado final pasa a "completa con advertencias"
+    CRITICAL = "critical"  # bloquea: no se publica nada (código 1)
+
+
+# Severidades que impiden publicar; el resto solo informa o avisa.
+BLOCKING_SEVERITIES = frozenset({NoticeSeverity.CRITICAL})
 
 
 class NoticeCategory(StrEnum):
@@ -62,10 +66,18 @@ WARNING_CODES: dict[str, tuple[NoticeCategory, str | None]] = {
         NoticeCategory.HATCH,
         "Si necesita ver el patrón, revise su escala en el CAD o use --hatch-mode outline.",
     ),
-    "DEPENDENCY_UNRESOLVED_XREF": (NoticeCategory.DEPENDENCIES, None),
+    "DEPENDENCY_UNRESOLVED_XREF": (
+        NoticeCategory.DEPENDENCIES,
+        "Inserte la referencia externa en el dibujo (BIND en AutoCAD) o deje el archivo "
+        "referenciado junto al DXF, y vuelva a exportar el DXF.",
+    ),
     "DEPENDENCY_UNRESOLVED_IMAGE": (NoticeCategory.DEPENDENCIES, None),
     "DEPENDENCY_UNRESOLVED_UNDERLAY": (NoticeCategory.DEPENDENCIES, None),
-    "DEPENDENCY_UNRESOLVED_BLOCK": (NoticeCategory.DEPENDENCIES, None),
+    "DEPENDENCY_UNRESOLVED_BLOCK": (
+        NoticeCategory.DEPENDENCIES,
+        "El dibujo usa un bloque cuya definición no está en el DXF; revíselo en el CAD "
+        "(p. ej. con AUDIT) y vuelva a exportar el DXF.",
+    ),
     "TEXT_NOT_SEARCHABLE": (NoticeCategory.TEXT, None),
     "DRAWING_SCALE_MISMATCH": (NoticeCategory.SCALE, None),
     "ENTITIES_WITHOUT_BOUNDS": (
@@ -181,3 +193,23 @@ def collect_notices(detail: ExtractedDetail) -> tuple[Notice, ...]:
             )
         )
     return tuple(notices)
+
+
+def blocking_notices(detail: ExtractedDetail) -> tuple[Notice, ...]:
+    """Avisos que impiden publicar (severidad en ``BLOCKING_SEVERITIES``)."""
+    return tuple(
+        notice for notice in collect_notices(detail) if notice.severity in BLOCKING_SEVERITIES
+    )
+
+
+def blocking_message(notices: tuple[Notice, ...]) -> str:
+    """Mensaje para la terminal: qué falta y qué hacer, sin publicar ningún archivo."""
+    count = len(notices)
+    head = (
+        "La extracción se detuvo por 1 aviso crítico"
+        if count == 1
+        else f"La extracción se detuvo por {count} avisos críticos"
+    )
+    return f"{head}: " + " ".join(f"{notice.text}" for notice in notices) + (
+        " No se generaron archivos."
+    )
