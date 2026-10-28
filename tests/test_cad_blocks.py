@@ -456,7 +456,9 @@ def test_without_nominal_scale_keeps_legacy_page_size(tmp_path: Path) -> None:
         "cad", "extract-block", str(source), "--block-name", "Detalle", "--occurrence", "1",
         "--output-prefix", str(prefix),
     ]) == 0
-    assert _pdf_size_mm(prefix.with_suffix(".pdf")) == pytest.approx((1009.65, 509.76), abs=0.1)
+    # 1000 × 500 mm más 5 mm de margen por lado; antes ezdxf la truncaba a puntos enteros
+    # (1009,65 × 509,76 mm).
+    assert _pdf_size_mm(prefix.with_suffix(".pdf")) == pytest.approx((1010.0, 510.0), abs=0.01)
     report = prefix.with_suffix(".txt").read_text(encoding="utf-8")
     assert "Escala nominal: no aplica" in report
 

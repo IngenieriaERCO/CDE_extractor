@@ -67,15 +67,21 @@ def test_failed_export_leaves_no_files(tmp_path, monkeypatch):
     assert _names(out) == []
 
 
-def test_failed_pdf_validation_publishes_nothing(tmp_path, monkeypatch):
+def test_failed_pdf_validation_publishes_nothing(tmp_path, monkeypatch, capsys):
     failed = ValidationCheck("Una sola página", False, "Se encontraron dos páginas.")
+    # Acepta cualquier argumento: la prueba debe fallar por la validación, no por la firma.
     monkeypatch.setattr(
-        block_commands, "validate_output_pdf", lambda path, expected: (failed,)
+        block_commands, "validate_output_pdf", lambda *args, **kwargs: (failed,)
     )
     source = _source(tmp_path / "origen.dxf")
     out = tmp_path / "salida"
 
     assert main(_arguments(source, out / "detalle")) == 1
+
+    error = capsys.readouterr().err
+    assert "La validación del PDF falló" in error
+    assert "Una sola página: Se encontraron dos páginas." in error
+    assert "inesperado" not in error
 
     assert _names(out) == []
 

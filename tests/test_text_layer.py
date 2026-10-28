@@ -15,9 +15,9 @@ from cde_exporter.cad.detail_model import SEARCHABLE_TEXT_CHECK, ResultStatus, V
 from cde_exporter.cad.exporters import HELVETICA_CAP_HEIGHT, TextRun, write_text_layer
 from cde_exporter.cad.pdf_checks import (
     PdfValidationError,
+    advisory_warnings,
     build_extraction_result,
     check_searchable_text,
-    searchable_text_warnings,
 )
 from cde_exporter.cli import main
 
@@ -279,7 +279,7 @@ def test_searchable_text_check_never_blocks_publication() -> None:
     result = build_extraction_result("detalle.pdf", (readable, missing), (), ())
 
     assert result.status is ResultStatus.COMPLETE_WITH_WARNINGS
-    assert [warning.code for warning in searchable_text_warnings((readable, missing))] == [
+    assert [warning.code for warning in advisory_warnings((readable, missing))] == [
         "TEXT_NOT_SEARCHABLE"
     ]
     with pytest.raises(PdfValidationError) as error:

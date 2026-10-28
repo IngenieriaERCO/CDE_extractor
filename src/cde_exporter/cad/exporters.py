@@ -42,6 +42,7 @@ from cde_exporter.cad.reader import ensure_layer_table_entries, read_dxf
 HATCHING_TIMEOUT = 30.0
 # Altura de las mayúsculas de Helvetica, en fracción del tamaño de letra.
 HELVETICA_CAP_HEIGHT = 0.718
+_POINTS_PER_MM = 72 / 25.4
 
 
 @dataclass(frozen=True, slots=True)
@@ -429,6 +430,8 @@ class ExportReport:
     degraded: tuple[tuple[str, str, str, str, float, str], ...] = ()
     # Líneas de texto escritas en la capa de texto invisible del PDF (vacío si no hay capa).
     text_lines: tuple[str, ...] = ()
+    # Ancho y alto (unidades CAD) de lo dibujado en el PDF, para medir su escala real.
+    drawn_size: tuple[float, float] | None = None
 
 
 def _page_point(matrix: Matrix44, point: Vec3) -> pymupdf.Point:
@@ -466,35 +469,73 @@ def write_text_layer(page: pymupdf.Page, runs, matrix: Matrix44) -> None:
         writer.write_text(page, render_mode=3, morph=(origin, morph))
 
 
-class _TextLayerPdfBackend(pdf_backend.PyMuPdfBackend):
-    """Backend PDF de ezdxf que añade la capa de texto invisible y buscable.
+class _ExactPageRenderBackend(pdf_backend.PyMuPdfRenderBackend):
+    """Página PDF con el tamaño exacto en puntos (ezdxf la crea truncada a puntos enteros)."""
 
-    ``text_runs`` se rellena tras dibujar (las líneas que capturó el frontend).
+    def __init__(self, page: layout.Page, settings: layout.Settings) -> None:
+        super().__init__(page, settings)
+        self.page_width_in_pt = page.width_in_mm * _POINTS_PER_MM
+        self.page_height_in_pt = page.height_in_mm * _POINTS_PER_MM
+        self.page.set_mediabox(pymupdf.Rect(0, 0, self.page_width_in_pt, self.page_height_in_pt))
+        # La forma compartida guarda la altura de la página al crearse: se crea de nuevo.
+        self.content_shape = self.page.new_shape()
+
+
+class _PdfBackend(pdf_backend.PyMuPdfBackend):
+    """Backend PDF de ezdxf a escala exacta y con la capa de texto invisible y buscable.
+
+    ezdxf 1.4.4 (``get_coordinate_output_space``) toma como espacio de salida el lado
+    mayor de la página truncado a puntos enteros y dibuja cada unidad de ese espacio como
+    1 pt: el dibujo sale encogido en int(lado) ÷ lado (−1,22 % en una página de 20 mm).
+    Aquí el espacio de salida es el lado exacto en puntos y la página tiene su tamaño
+    exacto, así que 1 unidad = 1 pt.
+
+    ``text_runs`` se rellena tras dibujar (las líneas que capturó el frontend). Tras
+    ``get_pdf_bytes``, ``placement_matrix`` es la matriz CAD -> página (puntos, origen
+    arriba a la izquierda) y ``drawn_size`` el ancho y alto de lo dibujado en unidades CAD.
     """
 
     def __init__(self) -> None:
         super().__init__()
         self.text_runs: list[TextRun] = []
+        self.placement_matrix: Matrix44 | None = None
+        self.drawn_size: tuple[float, float] | None = None
+
+    def get_replay(self, page, *, settings=None, render_box=None):
+        # Igual que ``PyMuPdfBackend.get_replay`` de ezdxf 1.4.4, salvo el espacio de salida
+        # y la página exactos.
+        settings = settings if settings is not None else layout.Settings()
+        player = self.player()  # cambia las grabaciones originales, como en ezdxf
+        if render_box is None:
+            render_box = player.bbox()
+        if render_box.has_data:
+            self.drawn_size = (float(render_box.size.x), float(render_box.size.y))
+        output_layout = layout.Layout(render_box, flip_y=self._init_flip_y)
+        page = output_layout.get_final_page(page, settings)
+        settings = copy.copy(settings)
+        settings.output_coordinate_space = (
+            max(page.width_in_mm, page.height_in_mm) * _POINTS_PER_MM
+        )
+        self.placement_matrix = output_layout.get_placement_matrix(
+            page, settings=settings, top_origin=True
+        )
+        player.transform(self.placement_matrix)
+        if settings.crop_at_margins:
+            top_left, bottom_right = page.get_margin_rect(top_origin=True)
+            output_scale = settings.page_output_scale_factor(page)
+            player.crop_rect(
+                top_left * output_scale, bottom_right * output_scale, 0.1 * _POINTS_PER_MM
+            )
+        self._init_flip_y = False
+        backend = _ExactPageRenderBackend(page, settings)
+        player.replay(backend)
+        return backend
 
     def get_pdf_bytes(self, page, *, settings=None, render_box=None) -> bytes:
-        settings = settings if settings is not None else layout.Settings()
-        if not self.text_runs:
-            return super().get_pdf_bytes(page, settings=settings, render_box=render_box)
-        if render_box is None:
-            render_box = self.player().bbox()
-        # La misma matriz CAD -> página que calcula ``get_replay`` (que no la devuelve).
-        output_layout = layout.Layout(render_box, flip_y=self._init_flip_y)
-        final_page = output_layout.get_final_page(page, settings)
-        output_settings = copy.copy(settings)
-        output_settings.output_coordinate_space = pdf_backend.get_coordinate_output_space(
-            final_page
-        )
-        matrix = output_layout.get_placement_matrix(
-            final_page, settings=output_settings, top_origin=True
-        )
         backend = self.get_replay(page, settings=settings, render_box=render_box)
-        write_text_layer(backend.page, self.text_runs, matrix)
-        backend.doc.subset_fonts()  # solo los glifos usados (Helvetica y los de respaldo)
+        if self.text_runs:
+            write_text_layer(backend.page, self.text_runs, self.placement_matrix)
+            backend.doc.subset_fonts()  # solo los glifos usados (Helvetica y los de respaldo)
         return backend.get_pdf_bytes()
 
 
@@ -543,7 +584,7 @@ def _draw_to_pdf(
     stats: dict | None = None,
     text_layer: bool = False,
 ) -> tuple[bytes, tuple[str, ...], tuple[tuple[str, str, int], ...]]:
-    backend = _TextLayerPdfBackend()
+    backend = _PdfBackend()
     layout_properties = LayoutProperties.from_layout(document.modelspace())
     layout_properties.set_colors("#ffffff")
     frontend = _StrictFrontend(
@@ -565,12 +606,14 @@ def _draw_to_pdf(
         frontend.draw_layout(document.modelspace(), layout_properties=layout_properties)
     _raise_if_skipped(frontend, "PDF", suggest_solids_footprint)
     backend.text_runs = frontend.text_runs
+    pdf_content = backend.get_pdf_bytes(page, settings=settings)
     if stats is not None:
         stats["invisible"] = frontend.invisible
         stats["degraded"] = tuple(frontend.degraded)
         stats["text_lines"] = tuple(run.text.strip() for run in frontend.text_runs)
+        stats["drawn_size"] = backend.drawn_size
     return (
-        backend.get_pdf_bytes(page, settings=settings),
+        pdf_content,
         _frontend_messages(frontend),
         _omitted_rows(frontend),
     )
@@ -813,4 +856,5 @@ def export_vector_outputs(
         invisible=stats.get("invisible", 0),
         degraded=stats.get("degraded", ()),
         text_lines=stats.get("text_lines", ()),
+        drawn_size=stats.get("drawn_size"),
     )

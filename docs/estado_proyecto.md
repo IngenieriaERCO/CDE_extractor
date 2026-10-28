@@ -1,12 +1,12 @@
 # Estado del proyecto — Exportador Vectorial
 
-Último hito: cierre de la Fase 3 — texto buscable en el PDF (consulta git log para el hash). 383 pruebas pasando, ruff limpio.
+Último hito: Fase 4, pasos 0 y 2 — escala exacta del dibujo y comprobación "Escala del dibujo" (consulta git log para el hash). 386 pruebas pasando, ruff limpio.
 
 ## Plan en 4 fases
 1. Selección de bloque + escala — hecha.
 2. Modelo interno del detalle (v2) + informe TXT A–G + contrato de salida PDF+TXT — hecha.
 3. Motor de representación vectorial (política de fuentes, rayados, entidades) — hecha (quedan pendientes menores, abajo).
-4. Manifiesto JSON + validación — pendiente.
+4. Manifiesto JSON + validación — en curso (pasos 0 y 2 hechos).
 Después: componedor de PDF (plancha A1) y guía de usuario en el README.
 
 ## Pendientes menores
@@ -94,7 +94,31 @@ Pendiente:
 - Solicitudes de fuente: `_requests` (font_config.py) toma como nombre de fuente el primer texto del XDATA `ACAD`, que en los overrides de estilo de cota es `DSTYLE` (el nombre del grupo, no una fuente). Se vio al medir con el DXF de render de Plano_completo ("DSTYLE → arial.ttf", 11 textos); no se comprobó si ocurre en el flujo real, revisar.
 
 ## Fase 4
-- Condensar advertencias de handles duplicados; rutas con `/` en el JSON.
+Decisiones (2026-10-27):
+- El JSON pasa a ser el tercer archivo publicado: PDF + TXT + JSON (manifiesto `<prefijo>.json`), publicado el último. Se retira `--detail-json`. El manifiesto guarda el nombre del DXF y su hash, no la ruta absoluta.
+- Fallos críticos: sin archivos y código 1, como hoy. Los avisos `CRITICAL` (XREF o bloque sin resolver) pasan a bloquear (hoy dan "completa con advertencias"). En el código se distinguen las comprobaciones que bloquean de las que solo avisan (`ADVISORY_CHECKS` en `detail_model.py`).
+- Con `--all`: todo o nada (hoy cada referencia se publica al acabar su vuelta).
+- Manifiesto con `schema_version` propio e identificador de tipo de documento; `model_version` se conserva como dato de trazabilidad. Incluye el hash SHA-256 del PDF, la relación CAD → página (la matriz que guarda `_PdfBackend.placement_matrix`), las versiones de ezdxf y PyMuPDF, y un campo explícito de escala física garantizada (sí/no) que el componedor pueda comprobar.
+
+Hecho:
+- Paso 0: `test_failed_pdf_validation_publishes_nothing` (test_output_contract.py) pasaba por un `TypeError` (su `lambda` tenía dos argumentos y el flujo pasa más desde la Fase 3), no por la validación fallida. Ahora acepta cualquier argumento y comprueba que el error es "La validación del PDF falló"; verificado que la versión antigua falla con las aserciones nuevas.
+- Paso 2, escala exacta: ezdxf 1.4.4 (`get_coordinate_output_space`) toma el lado mayor de la página truncado a puntos enteros y dibuja cada unidad como 1 pt, así que el dibujo salía encogido en int(lado) ÷ lado. `_PdfBackend` (exporters.py) usa el lado exacto y `_ExactPageRenderBackend` crea la página con su tamaño exacto (también el fondo blanco, que antes dejaba una franja sin cubrir y desplazaba el dibujo al ampliar la página con `set_mediabox`). Medido:
+  - Línea de 10 m a 1:1000 (página de 20 mm): 9,878 → 10,000 mm (de −1,222 % a 0,000 %).
+  - Perfil_K0010 a 1:50: −0,0158 mm → −0,000003 mm; el dibujo queda centrado en vertical (márgenes 5,907/5,586 → 5,746/5,743 mm). Comparado a 300 ppp: tras alinear 2 px (0,17 mm) en vertical, solo difiere el 0,080 % de los píxeles (suavizado); mismo texto y mismos 281 trazos.
+  - VIA_2MA y Plano_completo a 1:1000: diferencia < 0,0001 mm.
+  - El SVG no cambia (hash de referencia igual). Sin escala nominal, la página pasa de 1009,65 × 509,76 a 1010 × 510 mm en el caso de prueba (la prueba se actualizó).
+- Paso 2, comprobación "Escala del dibujo" (`pdf_checks.check_drawing_scale`): mide en el PDF el ancho y alto de todos los puntos de los trazos (sin el fondo) y los compara con la caja que grabó ezdxf (mismos puntos, en unidades CAD) por la escala. Tolerancia `DRAWING_SCALE_TOLERANCE_MM` = 0,01 mm por eje sobre todo el dibujo: el ruido medido es < 0,0001 mm y detecta el error antiguo más pequeño (0,016 mm de Perfil). Es una advertencia (`ADVISORY_CHECKS`): si no pasa, "[AVISO]" en el TXT, aviso `DRAWING_SCALE_MISMATCH` en "A tener en cuenta" y en la terminal, y la escala física pasa a "NO GARANTIZADA" con su motivo (`_confirm_physical_scale` en block_commands.py). La función `advisory_warnings` sustituye a `searchable_text_warnings`. Coste: ~1 s en VIA_2MA.
+  - Límite: si el punto extremo de todo el dibujo fuera un punto de control de una curva cuadrática (glifos TrueType), la medida saldría algo menor y daría un aviso falso; no ocurre en los tres planos de prueba.
+
+Pendiente (plan aprobado):
+- Paso 3: esquema del manifiesto v1 (módulo `manifest.py`, solo biblioteca estándar) y documento `docs/manifiesto.md` para el componedor; versiones de ezdxf y PyMuPDF y opciones usadas (modo de rayado, umbral, sólidos, omisión, capa de texto, sustituciones de fuente).
+- Paso 4: lista única de avisos (código, severidad y categoría) que usen el TXT y el manifiesto; hoy varias notas de "A tener en cuenta" solo existen en el TXT.
+- Paso 5: los avisos `CRITICAL` bloquean.
+- Paso 6: publicación PDF → TXT → JSON (el manifiesto el último) con comprobación de coherencia manifiesto–PDF (hash, páginas, tamaño, nombre); `--all` todo o nada; retirar `--detail-json`; rutas con `/`.
+- Paso 7: pruebas y documentación (contrato de salida de CLAUDE.md: PDF + TXT + JSON).
+- Nota: el PDF no es determinista (el `/ID` del trailer es aleatorio): el hash identifica el archivo publicado, pero la regresión gráfica sigue siendo con el SVG.
+- Nota: en horizontal, Perfil queda descentrado 0,01 mm (10,441/10,421 mm), ya antes del arreglo; la relación CAD → página del manifiesto debe salir de la matriz real, no del supuesto centrado.
+- Condensar advertencias de handles duplicados.
 
 ## Otros
 - Hablar con Alan: ¿limpiar historial de Git (SVG/TXT de salidas ya commiteados)? Investigar handles duplicados del DXF.

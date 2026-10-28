@@ -694,8 +694,10 @@ class ResultStatus(StrEnum):
 
 # Nombre de la comprobación de la capa de texto; el informe TXT elige su nota según esté o no.
 SEARCHABLE_TEXT_CHECK = "Texto buscable"
-# Comprobaciones que, si no pasan, avisan pero no impiden publicar.
-ADVISORY_CHECKS = frozenset({SEARCHABLE_TEXT_CHECK})
+# Escala real del dibujo medida en el PDF; la escala física solo es "garantizada" si pasa.
+DRAWING_SCALE_CHECK = "Escala del dibujo"
+# Comprobaciones que, si no pasan, avisan pero no impiden publicar; el resto bloquea.
+ADVISORY_CHECKS = frozenset({SEARCHABLE_TEXT_CHECK, DRAWING_SCALE_CHECK})
 
 
 @dataclass(frozen=True, slots=True)

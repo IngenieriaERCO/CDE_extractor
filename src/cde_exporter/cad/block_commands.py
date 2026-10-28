@@ -31,6 +31,7 @@ from cde_exporter.cad.detail_extras import (
     transformation_steps,
 )
 from cde_exporter.cad.detail_model import (
+    DRAWING_SCALE_CHECK,
     FOOTPRINT_REASON,
     EntityStatus,
     ExtractionWarning,
@@ -55,8 +56,8 @@ from cde_exporter.cad.font_config import configure_fonts
 from cde_exporter.cad.models import CadProcessingError
 from cde_exporter.cad.pdf_checks import (
     PdfValidationError,
+    advisory_warnings,
     build_extraction_result,
-    searchable_text_warnings,
     validate_output_pdf,
 )
 from cde_exporter.cad.reader import InvalidEntity, entity_bounds, read_dxf, safe_extents
@@ -763,16 +764,23 @@ def _run_extract_block(args, font_restorers: list) -> int:
                 sys.stdout.flush()
                 for message in invalid_messages:
                     print(f"Aviso: {message}", file=sys.stderr)
-            checks = validate_output_pdf(
-                temp_pdf, geometry_page_size, export_report.text_lines
+            drawing_scale = (
+                (scale, export_report.drawn_size, nominal_denominator)
+                if nominal_denominator is not None and export_report.drawn_size is not None
+                else None
             )
-            # Texto que no se encuentra al buscarlo: se publica igual, con advertencia.
-            text_warnings = searchable_text_warnings(checks)
-            if text_warnings:
-                detail = dataclasses.replace(detail, warnings=(*detail.warnings, *text_warnings))
+            checks = validate_output_pdf(
+                temp_pdf, geometry_page_size, export_report.text_lines, drawing_scale
+            )
+            # Comprobaciones de aviso que no pasan (texto no buscable, escala medida distinta):
+            # se publica igual, con advertencia.
+            check_warnings = advisory_warnings(checks)
+            if check_warnings:
+                detail = dataclasses.replace(detail, warnings=(*detail.warnings, *check_warnings))
                 sys.stdout.flush()
-                for warning in text_warnings:
+                for warning in check_warnings:
                     print(f"Aviso: {warning.message}", file=sys.stderr)
+            detail = _confirm_physical_scale(detail, checks)
             try:
                 extraction_result = build_extraction_result(
                     pdf_destination.name,
@@ -915,6 +923,23 @@ def _invalid_data_messages(
             f"… y {hidden} {'entidad' if hidden == 1 else 'entidades'} más con datos inválidos."
         ]
     return messages
+
+
+def _confirm_physical_scale(detail, checks):
+    """La escala física solo queda "garantizada" si la escala medida en el PDF coincide."""
+    if detail.physical_scale_guaranteed is not True:
+        return detail
+    check = next((item for item in checks if item.name == DRAWING_SCALE_CHECK), None)
+    if check is not None and check.passed:
+        return detail
+    note = (
+        "no se pudo medir la escala del dibujo en el PDF"
+        if check is None
+        else "la escala medida en el PDF no coincide con la nominal (ver «Escala del dibujo»)"
+    )
+    return dataclasses.replace(
+        detail, physical_scale_guaranteed=False, physical_scale_note=note
+    )
 
 
 def _failure_text(footprints: FootprintResult) -> str:

@@ -9,7 +9,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - Lee cada archivo antes de editarlo. Pide confirmación antes de cambios grandes.
 
 ## Verificación (siempre antes de dar algo por terminado)
-- `python -m pytest -q --tb=short` (referencia: 383 pruebas pasando).
+- `python -m pytest -q --tb=short` (referencia: 386 pruebas pasando).
 - `ruff check src tests`.
 - NO ejecutar `ruff format` sobre archivos existentes (solo en archivos nuevos).
 - NO usar `pytest -s` (las pruebas del aviso de escala esperarían entrada).
@@ -30,6 +30,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - Todo se trabaja en un directorio temporal dentro de la carpeta de salida y se publica de forma atómica (`_publish_files`).
 - La escala se pide al usuario tras identificar el bloque (`--scale 1:N` o pregunta interactiva). Sin terminal y sin `--scale`: aviso.
 - Factor de salida = mm por unidad CAD × escala del INSERT ÷ N. No afirmar escala física si las unidades no están verificadas.
+- La escala del dibujo se mide en el propio PDF (comprobación "Escala del dibujo" de `pdf_checks`: puntos de los trazos frente a la caja que grabó ezdxf; tolerancia 0,01 mm por eje). Es una advertencia, no bloquea; la escala física solo es "garantizada" si las unidades están verificadas y esa comprobación pasa. La página PDF se crea con su tamaño exacto en puntos (`_PdfBackend`; ezdxf la truncaba a puntos enteros).
 - `detail_model.py` solo usa la biblioteca estándar (sin ezdxf).
 - Variable de desarrollo `CDE_KEEP_INTERMEDIATES=1` conserva `.dxf` y `.svg` (con `--solids footprint`, el `.dxf` es la copia de render).
 - Los errores inesperados se muestran sin traceback ("Error CAD inesperado …"); `CDE_DEBUG=1` muestra el traceback completo.

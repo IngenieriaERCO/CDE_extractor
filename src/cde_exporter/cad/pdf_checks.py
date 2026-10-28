@@ -8,6 +8,7 @@ import pymupdf
 
 from cde_exporter.cad.detail_model import (
     ADVISORY_CHECKS,
+    DRAWING_SCALE_CHECK,
     SEARCHABLE_TEXT_CHECK,
     ExtractionResult,
     ExtractionWarning,
@@ -21,6 +22,9 @@ _READABLE = "PDF legible"
 _SINGLE_PAGE = "Una sola página"
 _PAGE_SIZE = "Tamaño de página coincide con la escala"
 _MM_PER_POINT = 25.4 / 72
+# Mayor diferencia admitida, en mm de papel, entre la longitud medida del dibujo y la que
+# corresponde a su escala (en cada eje, sobre todo el dibujo).
+DRAWING_SCALE_TOLERANCE_MM = 0.01
 
 
 class PdfValidationError(Exception):
@@ -109,14 +113,103 @@ def check_searchable_text(path: str | Path, lines: tuple[str, ...]) -> Validatio
     return ValidationCheck(SEARCHABLE_TEXT_CHECK, False, detail)
 
 
-def searchable_text_warnings(
-    checks: tuple[ValidationCheck, ...],
-) -> tuple[ExtractionWarning, ...]:
-    """Aviso ``TEXT_NOT_SEARCHABLE`` por cada comprobación de texto buscable que no pasó."""
+def _drawn_extent_pt(page: pymupdf.Page) -> tuple[float, float] | None:
+    """Ancho y alto (pt) de lo dibujado: todos los puntos de los trazos, sin el fondo.
+
+    Se cuentan también los puntos de control de las curvas, como hace ezdxf al medir lo
+    que graba; el fondo es el rectángulo relleno del tamaño de la página.
+    """
+    xs: list[float] = []
+    ys: list[float] = []
+    page_rect = page.rect
+    for drawing in page.get_drawings():
+        is_page_sized = all(
+            abs(side - page_side) < 0.5
+            for side, page_side in zip(drawing["rect"], page_rect, strict=True)
+        )
+        if drawing.get("fill") is not None and is_page_sized:
+            continue
+        for item in drawing["items"]:
+            for value in item[1:]:
+                if isinstance(value, pymupdf.Point):
+                    points = (value,)
+                elif isinstance(value, pymupdf.Rect):
+                    points = (value.tl, value.br)
+                elif isinstance(value, pymupdf.Quad):
+                    points = (value.ul, value.ur, value.ll, value.lr)
+                else:
+                    continue
+                xs += [point.x for point in points]
+                ys += [point.y for point in points]
+    if not xs:
+        return None
+    return max(xs) - min(xs), max(ys) - min(ys)
+
+
+def check_drawing_scale(
+    path: str | Path,
+    expected_mm_per_unit: float,
+    drawn_size: tuple[float, float],
+    denominator: float | None = None,
+) -> ValidationCheck:
+    """Mide en el PDF la escala real del dibujo y la compara con la esperada.
+
+    ``drawn_size`` es el ancho y alto de lo dibujado en unidades CAD (la caja que mide
+    ezdxf con los mismos puntos). En cada eje, la diferencia entre lo medido y lo esperado
+    sobre todo el dibujo no puede superar ``DRAWING_SCALE_TOLERANCE_MM``.
+    """
+    with pymupdf.open(path) as document:
+        extent = _drawn_extent_pt(document[0])
+    if extent is None:
+        return ValidationCheck(
+            DRAWING_SCALE_CHECK, False, "No se pudo medir: el PDF no tiene trazos."
+        )
+    errors: list[float] = []
+    measured: list[str] = []
+    for axis, size_pt, cad_size in zip(("X", "Y"), extent, drawn_size, strict=True):
+        if cad_size <= 0:
+            continue
+        measured_mm = size_pt * _MM_PER_POINT
+        expected_mm = cad_size * expected_mm_per_unit
+        errors.append(measured_mm - expected_mm)
+        factor = measured_mm / cad_size
+        if denominator is not None:
+            measured.append(f"1:{denominator * expected_mm_per_unit / factor:.4f} ({axis})")
+        else:
+            measured.append(f"{factor:.6g} mm por unidad CAD ({axis})")
+    if not errors:
+        return ValidationCheck(
+            DRAWING_SCALE_CHECK, False, "No se pudo medir: el dibujo no tiene ancho ni alto."
+        )
+    expected = (
+        f"1:{denominator:g}"
+        if denominator is not None
+        else f"{expected_mm_per_unit:.6g} mm por unidad CAD"
+    )
+    worst = max(errors, key=abs)
+    passed = abs(worst) <= DRAWING_SCALE_TOLERANCE_MM
+    longest_mm = max(drawn_size) * expected_mm_per_unit
+    detail = (
+        f"Escala medida en el PDF: {' y '.join(measured)}; esperada {expected}. Mayor "
+        f"diferencia de longitud: {worst:+.4f} mm sobre {longest_mm:.3f} mm de dibujo "
+        f"(tolerancia: {DRAWING_SCALE_TOLERANCE_MM:.3f} mm)."
+    )
+    return ValidationCheck(DRAWING_SCALE_CHECK, passed, detail)
+
+
+# Aviso que genera cada comprobación de aviso (``ADVISORY_CHECKS``) cuando no pasa.
+_ADVISORY_WARNINGS = {
+    SEARCHABLE_TEXT_CHECK: "TEXT_NOT_SEARCHABLE",
+    DRAWING_SCALE_CHECK: "DRAWING_SCALE_MISMATCH",
+}
+
+
+def advisory_warnings(checks: tuple[ValidationCheck, ...]) -> tuple[ExtractionWarning, ...]:
+    """Un aviso por cada comprobación que solo avisa y no pasó (no impide publicar)."""
     return tuple(
-        ExtractionWarning("TEXT_NOT_SEARCHABLE", Severity.WARNING, check.detail or "")
+        ExtractionWarning(_ADVISORY_WARNINGS[check.name], Severity.WARNING, check.detail or "")
         for check in checks
-        if check.name == SEARCHABLE_TEXT_CHECK and not check.passed
+        if check.name in _ADVISORY_WARNINGS and not check.passed
     )
 
 
@@ -124,8 +217,14 @@ def validate_output_pdf(
     path: str | Path,
     expected_page_mm: tuple[float, float] | None,
     searchable_lines: tuple[str, ...] = (),
+    drawing_scale: tuple[float, tuple[float, float], float | None] | None = None,
 ) -> tuple[ValidationCheck, ...]:
-    """Valida el PDF; con ``searchable_lines`` (capa de texto activa) comprueba la búsqueda."""
+    """Valida el PDF.
+
+    Con ``searchable_lines`` (capa de texto activa) comprueba la búsqueda; con
+    ``drawing_scale`` (mm por unidad CAD esperados, tamaño dibujado en unidades CAD y
+    denominador nominal) mide la escala real del dibujo.
+    """
     readable = check_pdf_readable(path)
     checks = [readable]
     if not readable.passed:
@@ -149,6 +248,8 @@ def validate_output_pdf(
     checks.append(check_single_page(path))
     if expected_page_mm is not None:
         checks.append(check_page_size(path, expected_page_mm))
+    if drawing_scale is not None:
+        checks.append(check_drawing_scale(path, *drawing_scale))
     if searchable_lines:
         checks.append(check_searchable_text(path, searchable_lines))
     return tuple(checks)
