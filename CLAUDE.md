@@ -9,7 +9,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - Lee cada archivo antes de editarlo. Pide confirmación antes de cambios grandes.
 
 ## Verificación (siempre antes de dar algo por terminado)
-- `python -m pytest -q --tb=short` (referencia: 386 pruebas pasando).
+- `python -m pytest -q --tb=short` (referencia: 407 pruebas pasando).
 - `ruff check src tests`.
 - NO ejecutar `ruff format` sobre archivos existentes (solo en archivos nuevos).
 - NO usar `pytest -s` (las pruebas del aviso de escala esperarían entrada).
@@ -43,8 +43,13 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - Los objetos de Civil 3D requieren `EXPORTTOAUTOCAD` antes de guardar el DXF.
 - Los sólidos 3D (3DSOLID) se dibujan como huella en planta con `--solids footprint` o se omiten con `--omit-unsupported`; sin ninguna de las dos opciones, la extracción se detiene.
 
+## Avisos y manifiesto (Fase 4)
+- Lista única de avisos: `notices.collect_notices(detail)` genera todos los avisos (código, severidad `info`/`warning`/`critical`, categoría y consejo). La usan el TXT ("A tener en cuenta") y el manifiesto; el estado final es "con advertencias" si hay algún aviso `warning` o `critical`. Todo código de aviso nuevo necesita su categoría en `notices.WARNING_CODES` (una prueba lo exige). La sustitución de fuente es `FONT_SUBSTITUTED` (info); `GLYPHS_MISSING` es warning.
+- Manifiesto v1 (`manifest.py`, documentado en `docs/manifiesto.md`): `build_manifest` y `validate_manifest` (esquema propio, sin jsonschema). Se construye y se valida en cada extracción, pero aún NO se publica como archivo (paso 6). Guarda nombres de archivo, nunca rutas, y la matriz CAD → página real (`ExportReport.cad_to_page_pt`).
+- La página PDF se crea con su tamaño exacto y el dibujo centrado en ella: ezdxf la trunca a puntos enteros y además la redondea a 0,1 mm (`Page.width_in_mm` redondea al leerse); `_PdfBackend` compensa las dos cosas.
+
 ## Arquitectura (src/cde_exporter/cad)
-`detail_model.py` (modelo v2), `entity_policy.py` (tabla de política por tipo de entidad y `decide`; solo biblioteca estándar, como `detail_model.py`), `detail_builder.py`, `detail_extras.py`, `detail_text.py` (TXT), `pdf_checks.py`, `block_commands.py` (flujo), `scale.py`, `fidelity.py`, `exporters.py`, `solids.py` (huella de 3DSOLID), `block_catalog.py`, `block_extractor.py`.
+`detail_model.py` (modelo v2), `entity_policy.py` (tabla de política por tipo de entidad y `decide`; solo biblioteca estándar, como `detail_model.py`), `detail_builder.py`, `detail_extras.py`, `detail_text.py` (TXT), `pdf_checks.py`, `block_commands.py` (flujo), `scale.py`, `fidelity.py`, `exporters.py`, `solids.py` (huella de 3DSOLID), `block_catalog.py`, `block_extractor.py`, `notices.py` (lista única de avisos), `manifest.py` (manifiesto v1). `notices.py` y `manifest.py` solo usan la biblioteca estándar.
 
 ## Estado y pendientes
 Ver `docs/estado_proyecto.md`.

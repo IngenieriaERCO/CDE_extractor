@@ -7,12 +7,12 @@ from pathlib import PureWindowsPath
 
 from cde_exporter.cad.detail_model import (
     ADVISORY_CHECKS,
-    SEARCHABLE_TEXT_CHECK,
     EntityStatus,
     ExtractedDetail,
     ResultStatus,
     SelectionMethod,
 )
+from cde_exporter.cad.notices import FONT_ORIGINS, collect_notices
 
 _WIDTH = 100
 _STATUS_NAMES = {
@@ -36,42 +36,6 @@ _UNIT_NAMES = {
     "in": "pulgadas",
     "ft": "pies",
 }
-_UNITS_ADVICE = "Confirme las unidades del dibujo y, si las conoce, indíquelas con --units."
-_ADVICE = {
-    "ENTITIES_WITHOUT_BOUNDS": "Revise que no falte contenido en los bordes del PDF.",
-    "UNITS_UNVERIFIED": _UNITS_ADVICE,
-    "UNITS_SUSPECT": _UNITS_ADVICE,
-    "UNSUPPORTED_OMITTED": "Revise en el CAD si esa geometría es necesaria en el PDF.",
-    "SOLIDS_AS_FOOTPRINT": "La huella muestra la planta del sólido, no su volumen ni su altura.",
-    "GLYPHS_MISSING": "Indique con --font-substitutions una fuente que contenga esos caracteres.",
-    "HATCH_DEGRADED": (
-        "Si necesita ver el patrón, revise su escala en el CAD o use --hatch-mode outline."
-    ),
-}
-_FONT_ORIGINS = {
-    "configurada": "sustitución configurada (JSON --font-substitutions)",
-    "respaldo automático": "sustitución automática (fuente de respaldo)",
-}
-
-
-def _text_as_paths_note(count: int, searchable: bool) -> str:
-    entities = "1 entidad de texto" if count == 1 else f"{count} entidades de texto"
-    if searchable:
-        return (
-            f"El texto del PDF ({entities}: TEXT, MTEXT, ATTRIB y DIMENSION) está dibujado como "
-            "trazados vectoriales y lleva encima una capa de texto invisible: se ve igual que en "
-            "el CAD y se puede buscar, seleccionar y copiar. Al copiar, los saltos de línea "
-            "siguen los cortes de línea del dibujo (no los párrafos del CAD), y la caja de "
-            "búsqueda sigue la anchura de la fuente usada en el dibujo, que puede ser una "
-            "sustituta."
-        )
-    return (
-        f"El texto del PDF ({entities}: TEXT, MTEXT, ATTRIB y DIMENSION) está dibujado como "
-        "trazados vectoriales: se ve igual que en el CAD, pero no se puede seleccionar, copiar "
-        "ni buscar."
-    )
-
-
 def _number(value: float | int) -> str:
     return f"{value:.3f}"
 
@@ -269,7 +233,7 @@ def _format_fidelity(detail: ExtractedDetail) -> list[str]:
     substituted = [font for font in detail.fonts if not font.found]
     if substituted:
         for font in sorted(substituted, key=lambda item: (item.requested, item.resolved)):
-            origin = _FONT_ORIGINS.get(font.origin or "")
+            origin = FONT_ORIGINS.get(font.origin or "")
             lines += _line(
                 "Fuente sustituida",
                 f"{font.requested} → {font.resolved}; usos {font.uses}; no se encontró"
@@ -367,18 +331,8 @@ def _format_result(detail: ExtractedDetail) -> list[str]:
             marker = "[AVISO]" if check.name in ADVISORY_CHECKS else "[FALLÓ]"
         lines += _line("", f"{marker} {check.name}: {check.detail or 'no disponible'}")
     lines += ["A tener en cuenta"]
-    notes = []
-    for warning in detail.warnings:
-        advice = _ADVICE.get(warning.code)
-        notes.append(f"{warning.message} {advice}" if advice else warning.message)
-    if detail.physical_scale_guaranteed is False and detail.physical_scale_note:
-        notes.append(f"Escala física no garantizada: {detail.physical_scale_note}")
-    text_entities = sum(font.uses for font in detail.fonts)
-    if text_entities:
-        searchable = any(check.name == SEARCHABLE_TEXT_CHECK for check in result.validations)
-        notes.append(_text_as_paths_note(text_entities, searchable))
-    for item in result.warnings_after_export:
-        notes.append(f"Aviso del renderizador (ezdxf): {item}")
+    # La misma lista de avisos que el manifiesto (notices.collect_notices).
+    notes = [notice.text for notice in collect_notices(detail)]
     if notes:
         for note in notes:
             lines += _line("", f"- {note}", indent="  ")

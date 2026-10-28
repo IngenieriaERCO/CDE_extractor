@@ -53,11 +53,14 @@ from cde_exporter.cad.fidelity import (
     write_fidelity_report,
 )
 from cde_exporter.cad.font_config import configure_fonts
+from cde_exporter.cad.manifest import PdfFacts, RunOptions, build_manifest, validate_manifest
 from cde_exporter.cad.models import CadProcessingError
+from cde_exporter.cad.notices import NoticeSeverity, collect_notices
 from cde_exporter.cad.pdf_checks import (
     PdfValidationError,
     advisory_warnings,
     build_extraction_result,
+    pdf_page_facts,
     validate_output_pdf,
 )
 from cde_exporter.cad.reader import InvalidEntity, entity_bounds, read_dxf, safe_extents
@@ -782,10 +785,16 @@ def _run_extract_block(args, font_restorers: list) -> int:
                     print(f"Aviso: {warning.message}", file=sys.stderr)
             detail = _confirm_physical_scale(detail, checks)
             try:
+                # El estado sale de la lista única de avisos: "con advertencias" si hay alguno
+                # warning o critical (las notas informativas no cuentan).
                 extraction_result = build_extraction_result(
                     pdf_destination.name,
                     checks,
-                    detail.warnings,
+                    tuple(
+                        notice
+                        for notice in collect_notices(detail)
+                        if notice.severity is not NoticeSeverity.INFO
+                    ),
                     export_report.warnings,
                 )
             except PdfValidationError as error:
@@ -795,6 +804,9 @@ def _run_extract_block(args, font_restorers: list) -> int:
                 ) from error
             detail = finalize_detail(detail, extraction_result)
             temp_report.write_text(format_detail_report(detail), encoding="utf-8", newline="\n")
+            # Manifiesto v1: se construye y se valida en cada extracción; se publicará como
+            # tercer archivo en el paso 6 de la Fase 4.
+            _checked_manifest(source, temp_pdf, detail, export_report, args)
             pairs = [(temp_pdf, pdf_destination), (temp_report, txt_destination)]
             if keep:
                 pairs += [(render_dxf, dxf_output), (temp_svg, svg_output)]
@@ -923,6 +935,41 @@ def _invalid_data_messages(
             f"… y {hidden} {'entidad' if hidden == 1 else 'entidades'} más con datos inválidos."
         ]
     return messages
+
+
+def _run_options(args) -> RunOptions:
+    return RunOptions(
+        hatch_mode=args.hatch_mode,
+        hatch_threshold=args.hatch_threshold,
+        solids=args.solids,
+        omit_unsupported=bool(args.omit_unsupported),
+        text_layer=not args.no_text_layer,
+        font_substitutions=args.font_substitutions,
+        font_folder=args.font_folder,
+        font_fallback=args.font_fallback,
+        margin_mm=args.margin_mm,
+    )
+
+
+def _checked_manifest(source: Path, pdf: Path, detail, export_report, args) -> dict:
+    """Manifiesto del detalle finalizado; si no cumple su esquema, no se publica nada."""
+    page_count, page_size = pdf_page_facts(pdf)
+    manifest = build_manifest(
+        detail,
+        source_dxf=source,
+        pdf_file=pdf,
+        pdf=PdfFacts(
+            page_count, page_size, export_report.drawn_bounds, export_report.cad_to_page_pt
+        ),
+        options=_run_options(args),
+    )
+    problems = validate_manifest(manifest)
+    if problems:
+        raise CadProcessingError(
+            "El manifiesto generado no cumple su esquema (fallo del programa): "
+            + "; ".join(problems[:5])
+        )
+    return manifest
 
 
 def _confirm_physical_scale(detail, checks):

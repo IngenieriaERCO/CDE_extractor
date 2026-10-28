@@ -1,12 +1,12 @@
 # Estado del proyecto — Exportador Vectorial
 
-Último hito: Fase 4, pasos 0 y 2 — escala exacta del dibujo y comprobación "Escala del dibujo" (consulta git log para el hash). 386 pruebas pasando, ruff limpio.
+Último hito: Fase 4, pasos 3 y 4 — manifiesto v1 (aún sin publicar) y lista única de avisos (consulta git log para el hash). 407 pruebas pasando, ruff limpio.
 
 ## Plan en 4 fases
 1. Selección de bloque + escala — hecha.
 2. Modelo interno del detalle (v2) + informe TXT A–G + contrato de salida PDF+TXT — hecha.
 3. Motor de representación vectorial (política de fuentes, rayados, entidades) — hecha (quedan pendientes menores, abajo).
-4. Manifiesto JSON + validación — en curso (pasos 0 y 2 hechos).
+4. Manifiesto JSON + validación — en curso (pasos 0, 2, 3 y 4 hechos; quedan 5, 6 y 7).
 Después: componedor de PDF (plancha A1) y guía de usuario en el README.
 
 ## Pendientes menores
@@ -110,14 +110,17 @@ Hecho:
 - Paso 2, comprobación "Escala del dibujo" (`pdf_checks.check_drawing_scale`): mide en el PDF el ancho y alto de todos los puntos de los trazos (sin el fondo) y los compara con la caja que grabó ezdxf (mismos puntos, en unidades CAD) por la escala. Tolerancia `DRAWING_SCALE_TOLERANCE_MM` = 0,01 mm por eje sobre todo el dibujo: el ruido medido es < 0,0001 mm y detecta el error antiguo más pequeño (0,016 mm de Perfil). Es una advertencia (`ADVISORY_CHECKS`): si no pasa, "[AVISO]" en el TXT, aviso `DRAWING_SCALE_MISMATCH` en "A tener en cuenta" y en la terminal, y la escala física pasa a "NO GARANTIZADA" con su motivo (`_confirm_physical_scale` en block_commands.py). La función `advisory_warnings` sustituye a `searchable_text_warnings`. Coste: ~1 s en VIA_2MA.
   - Límite: si el punto extremo de todo el dibujo fuera un punto de control de una curva cuadrática (glifos TrueType), la medida saldría algo menor y daría un aviso falso; no ocurre en los tres planos de prueba.
 
+- Paso 4, lista única de avisos (`notices.py`, solo biblioteca estándar): `collect_notices(detail)` genera todos los avisos con código, severidad (`info`, `warning`, `critical`), categoría (`fonts`, `hatch`, `dependencies`, `units`, `text`, `renderer`, `scale` y `entities`, esta última para geometría sin caja, omitida, con datos inválidos o huellas) y consejo. La usan el TXT ("A tener en cuenta") y el manifiesto. Las sustituciones de fuente son el aviso `FONT_SUBSTITUTED` con severidad `info` (el estilo `Standard` usa `txt`, que casi siempre se sustituye; si contara, casi toda extracción saldría "con advertencias"); si a la sustituta le faltan caracteres, `GLYPHS_MISSING` es `warning`. El estado final sale de la misma lista: "con advertencias" si hay algún aviso `warning` o `critical`; el estado no cambia respecto a antes. En el TXT, cada fuente sustituida sale ahora también en "A tener en cuenta". Una prueba exige que todo código de aviso del código fuente tenga categoría.
+- Paso 3, manifiesto v1 (`manifest.py`, solo biblioteca estándar; documento `docs/manifiesto.md` para el componedor): `document_type` "cde-detail-manifest", `schema_version` "1.0" y `model_version` como trazabilidad; DXF y PDF por nombre (nunca ruta), SHA-256 y bytes; bloque, handle y ocurrencia; unidades y escala con `physical_scale_guaranteed` (booleano, nunca null) y su motivo; PDF con páginas, tamaño medido, caja de lo dibujado en CAD y en página y la matriz CAD → página real (mm, origen arriba a la izquierda, Y hacia abajo; coordenadas CAD = Model Space de origen); conteos por tipo y por capa, no conservadas con motivo y HATCH; fuentes y dependencias; avisos por categoría con recuentos por severidad; comprobaciones con `blocking`; versiones (exportador, ezdxf, PyMuPDF) y opciones usadas. `validate_manifest` comprueba un esquema propio (todas las claves, ninguna de más) y la coherencia (versión mayor, páginas, SHA-256, nombres sin ruta, recuentos, estado). Se construye y se valida en cada extracción (Perfil: 0,1–0,3 s, incluido el hash del DXF de 58 MB); si no fuera válido no se publica nada. Todavía no se escribe como archivo. Ejemplo real de Perfil_K0010 en `data/output/auditoria_fase4/manifiesto/perfil_k0010.manifest.json` (12,4 KB; 6 avisos: 4 info y 2 warning; escala física garantizada).
+- Dos correcciones encontradas al contrastar la matriz con el PDF:
+  - Precisión: la matriz se sacaba restando puntos transformados; con coordenadas georreferenciadas (~4,9 millones de m, traslación de ~10⁸ mm) la escala salía 20,0000000096 y un punto se desplazaba 0,047 mm. Ahora `affine_2d` lee los coeficientes: matriz y PDF coinciden en 0,000005 mm.
+  - Centrado: ezdxf redondea la página final a 0,1 mm (`Page.width_in_mm` redondea al leerse) y centra el dibujo en esa página; al ajustarla después al tamaño pedido, el dibujo quedaba desplazado (0,02 mm en X y 0,003 mm en Y; era la asimetría 10,441/10,421 mm vista en el paso 2). `_PdfBackend` traslada el dibujo al centro de la página exacta: Perfil queda a 10,4310/10,4310 y 5,7444/5,7444 mm. El SVG no cambia.
+
 Pendiente (plan aprobado):
-- Paso 3: esquema del manifiesto v1 (módulo `manifest.py`, solo biblioteca estándar) y documento `docs/manifiesto.md` para el componedor; versiones de ezdxf y PyMuPDF y opciones usadas (modo de rayado, umbral, sólidos, omisión, capa de texto, sustituciones de fuente).
-- Paso 4: lista única de avisos (código, severidad y categoría) que usen el TXT y el manifiesto; hoy varias notas de "A tener en cuenta" solo existen en el TXT.
-- Paso 5: los avisos `CRITICAL` bloquean.
-- Paso 6: publicación PDF → TXT → JSON (el manifiesto el último) con comprobación de coherencia manifiesto–PDF (hash, páginas, tamaño, nombre); `--all` todo o nada; retirar `--detail-json`; rutas con `/`.
-- Paso 7: pruebas y documentación (contrato de salida de CLAUDE.md: PDF + TXT + JSON).
+- Paso 5: los avisos `CRITICAL` (XREF o bloque sin resolver) bloquean: sin archivos y código 1.
+- Paso 6: publicar el manifiesto como tercer archivo (`<prefijo>.json`), en orden PDF → TXT → JSON (el manifiesto el último), con comprobación de coherencia manifiesto–PDF antes de publicar (hash, páginas, tamaño, nombre); `--all` todo o nada; retirar `--detail-json`; rutas con `/` también en el TXT.
+- Paso 7: pruebas y documentación (contrato de salida de CLAUDE.md: PDF + TXT + JSON; informe y guía de uso).
 - Nota: el PDF no es determinista (el `/ID` del trailer es aleatorio): el hash identifica el archivo publicado, pero la regresión gráfica sigue siendo con el SVG.
-- Nota: en horizontal, Perfil queda descentrado 0,01 mm (10,441/10,421 mm), ya antes del arreglo; la relación CAD → página del manifiesto debe salir de la matriz real, no del supuesto centrado.
 - Condensar advertencias de handles duplicados.
 
 ## Otros

@@ -86,6 +86,13 @@ def check_page_size(
     return ValidationCheck(_PAGE_SIZE, passed, detail)
 
 
+def pdf_page_facts(path: str | Path) -> tuple[int, tuple[float, float]]:
+    """Número de páginas y tamaño medido (mm) de la primera página del PDF."""
+    with pymupdf.open(path) as document:
+        rect = document[0].rect
+        return document.page_count, (rect.width * _MM_PER_POINT, rect.height * _MM_PER_POINT)
+
+
 def check_searchable_text(path: str | Path, lines: tuple[str, ...]) -> ValidationCheck:
     """Cuenta cuántas líneas de la capa de texto se encuentran al buscarlas en el PDF.
 
@@ -258,9 +265,14 @@ def validate_output_pdf(
 def build_extraction_result(
     pdf_name: str,
     checks: tuple[ValidationCheck, ...],
-    detail_warnings: tuple[ExtractionWarning, ...],
+    detail_warnings: tuple[object, ...],
     export_warnings: tuple[str, ...],
 ) -> ExtractionResult:
+    """Resultado de la extracción; falla si alguna comprobación que bloquea no pasó.
+
+    ``detail_warnings`` son los avisos que cuentan para el estado (en el flujo, los de
+    severidad warning o critical de ``notices.collect_notices``).
+    """
     failed = tuple(check for check in checks if not check.passed)
     blocking = tuple(check for check in failed if check.name not in ADVISORY_CHECKS)
     if blocking:

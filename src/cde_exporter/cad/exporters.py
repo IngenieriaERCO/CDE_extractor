@@ -432,6 +432,29 @@ class ExportReport:
     text_lines: tuple[str, ...] = ()
     # Ancho y alto (unidades CAD) de lo dibujado en el PDF, para medir su escala real.
     drawn_size: tuple[float, float] | None = None
+    # Caja de lo dibujado en coordenadas CAD: ((x mín., y mín.), (x máx., y máx.)).
+    drawn_bounds: tuple[tuple[float, float], tuple[float, float]] | None = None
+    # Relación CAD -> página del PDF en puntos, origen arriba a la izquierda e Y hacia abajo:
+    # (a, b, c, d, e, f) con X = a·x + c·y + e e Y = b·x + d·y + f.
+    cad_to_page_pt: tuple[float, float, float, float, float, float] | None = None
+
+
+def affine_2d(matrix: Matrix44) -> tuple[float, float, float, float, float, float]:
+    """(a, b, c, d, e, f) de la parte plana de ``matrix``: X = a·x + c·y + e, Y = b·x + d·y + f.
+
+    Se leen los coeficientes (ezdxf usa vectores fila: X = x·m00 + y·m10 + m30). Restar
+    puntos transformados perdería cifras con coordenadas georreferenciadas: con una
+    traslación de ~10⁸ mm, la escala saldría 20,0000000096 en vez de 20 y desplazaría
+    0,05 mm un punto a 4,9 millones de unidades.
+    """
+    return (
+        float(matrix[0, 0]),
+        float(matrix[0, 1]),
+        float(matrix[1, 0]),
+        float(matrix[1, 1]),
+        float(matrix[3, 0]),
+        float(matrix[3, 1]),
+    )
 
 
 def _page_point(matrix: Matrix44, point: Vec3) -> pymupdf.Point:
@@ -472,10 +495,12 @@ def write_text_layer(page: pymupdf.Page, runs, matrix: Matrix44) -> None:
 class _ExactPageRenderBackend(pdf_backend.PyMuPdfRenderBackend):
     """Página PDF con el tamaño exacto en puntos (ezdxf la crea truncada a puntos enteros)."""
 
-    def __init__(self, page: layout.Page, settings: layout.Settings) -> None:
+    def __init__(
+        self, page: layout.Page, settings: layout.Settings, size_mm: tuple[float, float]
+    ) -> None:
         super().__init__(page, settings)
-        self.page_width_in_pt = page.width_in_mm * _POINTS_PER_MM
-        self.page_height_in_pt = page.height_in_mm * _POINTS_PER_MM
+        self.page_width_in_pt = size_mm[0] * _POINTS_PER_MM
+        self.page_height_in_pt = size_mm[1] * _POINTS_PER_MM
         self.page.set_mediabox(pymupdf.Rect(0, 0, self.page_width_in_pt, self.page_height_in_pt))
         # La forma compartida guarda la altura de la página al crearse: se crea de nuevo.
         self.content_shape = self.page.new_shape()
@@ -492,7 +517,8 @@ class _PdfBackend(pdf_backend.PyMuPdfBackend):
 
     ``text_runs`` se rellena tras dibujar (las líneas que capturó el frontend). Tras
     ``get_pdf_bytes``, ``placement_matrix`` es la matriz CAD -> página (puntos, origen
-    arriba a la izquierda) y ``drawn_size`` el ancho y alto de lo dibujado en unidades CAD.
+    arriba a la izquierda), ``drawn_size`` el ancho y alto de lo dibujado en unidades CAD y
+    ``drawn_bounds`` su caja en coordenadas CAD.
     """
 
     def __init__(self) -> None:
@@ -500,6 +526,7 @@ class _PdfBackend(pdf_backend.PyMuPdfBackend):
         self.text_runs: list[TextRun] = []
         self.placement_matrix: Matrix44 | None = None
         self.drawn_size: tuple[float, float] | None = None
+        self.drawn_bounds: tuple[tuple[float, float], tuple[float, float]] | None = None
 
     def get_replay(self, page, *, settings=None, render_box=None):
         # Igual que ``PyMuPdfBackend.get_replay`` de ezdxf 1.4.4, salvo el espacio de salida
@@ -510,15 +537,41 @@ class _PdfBackend(pdf_backend.PyMuPdfBackend):
             render_box = player.bbox()
         if render_box.has_data:
             self.drawn_size = (float(render_box.size.x), float(render_box.size.y))
+            self.drawn_bounds = (
+                (float(render_box.extmin.x), float(render_box.extmin.y)),
+                (float(render_box.extmax.x), float(render_box.extmax.y)),
+            )
         output_layout = layout.Layout(render_box, flip_y=self._init_flip_y)
+        requested = page
+        # ezdxf redondea la página final a 0,1 mm (``Page.width_in_mm`` redondea al leerse):
+        # 417,0 × 119,4 en vez de 416,980 × 119,403 mm.
         page = output_layout.get_final_page(page, settings)
+        size_mm = (page.width_in_mm, page.height_in_mm)
+        if requested.width > 0 and requested.height > 0 and not (
+            requested.max_width or requested.max_height
+        ):
+            size_mm = (
+                requested.width * requested.to_mm_factor,
+                requested.height * requested.to_mm_factor,
+            )
         settings = copy.copy(settings)
+        # Lado mayor en puntos de la página que usa ezdxf: 1 unidad de salida = 1 pt.
         settings.output_coordinate_space = (
             max(page.width_in_mm, page.height_in_mm) * _POINTS_PER_MM
         )
         self.placement_matrix = output_layout.get_placement_matrix(
             page, settings=settings, top_origin=True
         )
+        if layout.is_center_aligned(settings.page_alignment):
+            # ezdxf centra el dibujo en la página redondeada; se lleva al centro de la exacta.
+            self.placement_matrix = Matrix44.chain(
+                self.placement_matrix,
+                Matrix44.translate(
+                    (size_mm[0] - page.width_in_mm) / 2 * _POINTS_PER_MM,
+                    (size_mm[1] - page.height_in_mm) / 2 * _POINTS_PER_MM,
+                    0,
+                ),
+            )
         player.transform(self.placement_matrix)
         if settings.crop_at_margins:
             top_left, bottom_right = page.get_margin_rect(top_origin=True)
@@ -527,7 +580,7 @@ class _PdfBackend(pdf_backend.PyMuPdfBackend):
                 top_left * output_scale, bottom_right * output_scale, 0.1 * _POINTS_PER_MM
             )
         self._init_flip_y = False
-        backend = _ExactPageRenderBackend(page, settings)
+        backend = _ExactPageRenderBackend(page, settings, size_mm)
         player.replay(backend)
         return backend
 
@@ -612,6 +665,9 @@ def _draw_to_pdf(
         stats["degraded"] = tuple(frontend.degraded)
         stats["text_lines"] = tuple(run.text.strip() for run in frontend.text_runs)
         stats["drawn_size"] = backend.drawn_size
+        stats["drawn_bounds"] = backend.drawn_bounds
+        if backend.placement_matrix is not None:
+            stats["cad_to_page_pt"] = affine_2d(backend.placement_matrix)
     return (
         pdf_content,
         _frontend_messages(frontend),
@@ -857,4 +913,6 @@ def export_vector_outputs(
         degraded=stats.get("degraded", ()),
         text_lines=stats.get("text_lines", ()),
         drawn_size=stats.get("drawn_size"),
+        drawn_bounds=stats.get("drawn_bounds"),
+        cad_to_page_pt=stats.get("cad_to_page_pt"),
     )
