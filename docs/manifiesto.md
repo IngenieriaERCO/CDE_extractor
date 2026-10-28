@@ -4,7 +4,7 @@ Este documento es para quien programe el **componedor de PDF** (la plancha A1). 
 
 Cada extracción publica tres archivos con el mismo prefijo: `<prefijo>.pdf`, `<prefijo>.txt` y `<prefijo>.manifest.json`, en ese orden. El manifiesto se publica **el último**: un PDF sin su manifiesto es un paquete **incompleto** (por ejemplo, un corte a mitad de la publicación) y no debe usarse. Con `--all`, los nombres llevan el número de referencia (`<prefijo>_001.pdf`, `<prefijo>_001.manifest.json`…), y se publica todo o nada.
 
-El código está en `src/cde_exporter/cad/manifest.py` (`build_manifest`, `validate_manifest` y `verify_package`). Hay un ejemplo real de Perfil_K0010 en `data/output/auditoria_fase4/manifiesto/perfil_k0010.manifest.json` (fuera de Git: son datos de ERCO).
+El código está en `src/cde_exporter/cad/manifest.py` (`build_manifest`, `validate_manifest` y `verify_package`). Hay un ejemplo real de Perfil_K0010 en `data/output/referencia/manifiesto_ejemplo/perfil_k0010.manifest.json` (fuera de Git: son datos de ERCO).
 
 ## Cómo usarlo desde el componedor
 

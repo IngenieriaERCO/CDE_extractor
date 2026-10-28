@@ -13,7 +13,11 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - `ruff check src tests`.
 - NO ejecutar `ruff format` sobre archivos existentes (solo en archivos nuevos).
 - NO usar `pytest -s` (las pruebas del aviso de escala esperarían entrada).
-- Regresión gráfica: el SVG de Perfil_K0010 a 1:50 con `--hatch-mode auto --font-substitutions Pruebas/fonts/sustituciones_arial.json` debe tener hash SHA256 `A2560C1160FC06179FFEA3E87836D93468738259146749D57F0B1473400D3FF9` (se obtiene con `CDE_KEEP_INTERMEDIATES=1`). Cambió a propósito por el paso 4 de la Fase 3 (antes `BD488686…8194B6E1`): los HATCH ANSI35 y ANSI37 de Perfil, dentro de un INSERT, se dibujan ahora con su patrón y con la escala correcta (antes salían como relleno). El cambio anterior (antes `973120C3…7B83D`) fue por el arreglo de fuentes instaladas: 4 textos pasaron de Arial a Verdana. Nunca comparar DXF por hash (no es determinista).
+- Regresión gráfica: el SVG de Perfil_K0010 (`data/input/referencia/prueba_erco_perfil.dxf`) a 1:50 con `--hatch-mode auto --font-substitutions Pruebas/fonts/sustituciones_arial.json` debe tener hash SHA256 `A2560C1160FC06179FFEA3E87836D93468738259146749D57F0B1473400D3FF9` (se obtiene con `CDE_KEEP_INTERMEDIATES=1`). Cambió a propósito por el paso 4 de la Fase 3 (antes `BD488686…8194B6E1`): los HATCH ANSI35 y ANSI37 de Perfil, dentro de un INSERT, se dibujan ahora con su patrón y con la escala correcta (antes salían como relleno). El cambio anterior (antes `973120C3…7B83D`) fue por el arreglo de fuentes instaladas: 4 textos pasaron de Arial a Verdana. Nunca comparar DXF por hash (no es determinista).
+- Juego mínimo de referencia (ignorado por Git, como todo `data/`; cada carpeta tiene su `LEEME.txt`):
+  - `data/input/referencia/`: los DXF de origen `prueba_erco_perfil.dxf` (regresión gráfica), `VIA_2MA.dxf` y `Plano_completo.dxf`.
+  - `data/output/referencia/`: paquetes de Perfil_K0010, VIA_MA y Plano_completo en el formato actual, la regresión de Perfil con su SVG (hash de arriba), el manifiesto de ejemplo con su script y los scripts `prototipo_texto.py` y `medir.py`.
+- NO borrar nunca: las carpetas `data/input/referencia/` y `data/output/referencia/` completas, `data/input/.gitkeep`, `data/output/.gitkeep` y `Pruebas/fonts/`. Lo demás de `data/input` y `data/output` se puede borrar (son pruebas sueltas que se regeneran).
 
 ## Git
 - Añadir archivos por nombre; nunca `git add .`.

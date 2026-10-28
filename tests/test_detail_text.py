@@ -88,7 +88,7 @@ def _profile_detail() -> ExtractedDetail:
         ),
     )
     return _detail(
-        source=DetailSource("data/input/prueba_erco_perfil.dxf", "Perfil_K0010"),
+        source=DetailSource("data/input/referencia/prueba_erco_perfil.dxf", "Perfil_K0010"),
         reference=SelectedReference(1, "9AE419", "_000_Rótulo__General", (0, 0, 0), 0, (1, 1, 1)),
         units=UnitInfo(6, "m", "declaradas en el DXF y coherentes", 1000.0, ()),
         scale=ScaleInfo(50, 20, (1, 1, 1)),
