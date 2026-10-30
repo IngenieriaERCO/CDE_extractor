@@ -4,6 +4,11 @@ import hashlib
 from pathlib import Path
 
 import ezdxf
+import pytest
+from ezdxf import bbox, xref
+from ezdxf.entities.mleader import MultiLeader
+from ezdxf.math import Vec2
+from ezdxf.render.mleader import ConnectionSide
 
 from cde_exporter.cad.block_extractor import extract_block_reference
 from cde_exporter.cli import main
@@ -111,3 +116,54 @@ def test_txt_reports_the_original_standard_font(tmp_path: Path, monkeypatch) -> 
     assert "txt →" not in report
     assert "Fuente sustituida: txt" not in report
     assert "simplex.shx" in report
+
+
+def _multileader_source(path: Path) -> Path:
+    """MULTILEADER con estilo de texto propio y entidades antes, para que los handles crucen."""
+    document = ezdxf.new("R2018")
+    document.styles.add("MiEstilo", font="arial.ttf")
+    block = document.blocks.new("Detalle")
+    for index in range(30):
+        block.add_line((index, 0), (index, 1))
+    builder = block.add_multileader_mtext("Standard")
+    builder.set_content("Nota", style="MiEstilo")
+    builder.add_leader_line(ConnectionSide.left, [(0, 0), (3, 3)])
+    builder.build(insert=Vec2(10, 10))
+    document.modelspace().add_blockref("Detalle", (0, 0))
+    document.saveas(path)
+    return path
+
+
+def _text_style_of_multileader(document) -> object:
+    multileader = document.blocks.get("Detalle").query("MULTILEADER")[0]
+    return document.entitydb.get(multileader.context.mtext.style_handle)
+
+
+def test_multileader_text_style_survives_extraction(tmp_path: Path) -> None:
+    original = MultiLeader.map_resources
+    extracted = _extract(tmp_path, _multileader_source(tmp_path / "origen.dxf"))
+
+    style = _text_style_of_multileader(extracted)
+    assert style is not None and style.dxftype() == "STYLE"
+    assert style.dxf.name == "MiEstilo"
+    for insert in extracted.modelspace().query("INSERT"):
+        assert bbox.extents(insert.virtual_entities()).has_data
+    multileader = extracted.blocks.get("Detalle").query("MULTILEADER")[0]
+    assert [entity.dxftype() for entity in multileader.virtual_entities()]
+    assert MultiLeader.map_resources is original  # el método de ezdxf queda como estaba
+
+
+def test_ezdxf_still_maps_multileader_resources_twice(tmp_path: Path) -> None:
+    """Vigilancia: si ezdxf corrige la doble traducción, el arreglo de la extracción sobra."""
+    source = ezdxf.readfile(_multileader_source(tmp_path / "origen.dxf"))
+    target = ezdxf.new("R2018")
+    loader = xref.Loader(source, target)
+    loader.load_block_layout(source.blocks.get("Detalle"))
+    loader.execute()
+
+    style = _text_style_of_multileader(target)
+    if style is not None and style.dxftype() == "STYLE" and style.dxf.name == "MiEstilo":
+        pytest.fail(
+            "ezdxf ya traduce una sola vez los handles del MULTILEADER: "
+            "valore retirar _multileader_mapping_once de block_extractor."
+        )

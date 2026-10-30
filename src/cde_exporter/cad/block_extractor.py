@@ -5,12 +5,15 @@ from __future__ import annotations
 import difflib
 import os
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 import ezdxf
 from ezdxf import xref
 from ezdxf.document import Drawing
+from ezdxf.entities.mleader import MultiLeader
 
 from cde_exporter.cad.models import CadProcessingError
 from cde_exporter.cad.reader import entity_bounds, read_dxf
@@ -109,6 +112,32 @@ def _restore_default_resources(source: Drawing, target: Drawing) -> None:
             target.header[name] = source.header[name]
 
 
+@contextmanager
+def _multileader_mapping_once() -> Iterator[None]:
+    """Durante la copia, traduce los handles de cada MULTILEADER copiado una sola vez.
+
+    ezdxf 1.4.4 traduce dos veces las entidades de un bloque copiado (desde el
+    BLOCK_RECORD y desde ``map_entity_resources``). Casi todas copian del original y no
+    les afecta, pero el MULTILEADER traduce su contexto, flechas y atributos sobre la
+    propia copia: la segunda vez toma un handle ya traducido como si fuera del origen y
+    el estilo del texto acaba apuntando a otra entidad (p. ej. un 3DSOLID).
+    """
+    original = MultiLeader.map_resources
+    mapped: set[int] = set()
+
+    def map_once(self, clone, mapping) -> None:
+        if id(clone) in mapped:
+            return
+        mapped.add(id(clone))
+        original(self, clone, mapping)
+
+    MultiLeader.map_resources = map_once
+    try:
+        yield
+    finally:
+        MultiLeader.map_resources = original
+
+
 def extract_block_reference(
     source: str | Path,
     block_name: str,
@@ -150,7 +179,8 @@ def extract_block_reference(
     loader = xref.Loader(document, target)
     loader.load_modelspace(filter_fn=lambda candidate: candidate is entity)
     loader.load_block_layout(document.blocks[block_name])
-    loader.execute()
+    with _multileader_mapping_once():
+        loader.execute()
     _restore_default_resources(document, target)
     target.header["$INSUNITS"] = int(document.header.get("$INSUNITS", 0) or 0)
     destination.parent.mkdir(parents=True, exist_ok=True)

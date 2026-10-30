@@ -1,6 +1,6 @@
 # Estado del proyecto — Exportador Vectorial
 
-Último hito: Fase 4, pasos 5, 6 y 7 — avisos críticos que bloquean, manifiesto publicado como tercer archivo y `--all` todo o nada (consulta git log para el hash). 415 pruebas pasando, ruff limpio.
+Último hito: Fase 4, pasos 5, 6 y 7 — avisos críticos que bloquean, manifiesto publicado como tercer archivo y `--all` todo o nada (consulta git log para el hash). Después, ajuste para los planos de PVcase (3DSOLID con transform binario y MULTILEADER; sección «Ajuste Fase 4: planos de PVcase»), sin commit todavía. 425 pruebas pasando, ruff limpio.
 
 ## Plan en 4 fases
 1. Selección de bloque + escala — hecha.
@@ -128,6 +128,26 @@ Hecho:
 Pendiente:
 - Nota: el PDF no es determinista (el `/ID` del trailer es aleatorio): el hash identifica el archivo publicado, pero la regresión gráfica sigue siendo con el SVG.
 - Condensar advertencias de handles duplicados.
+
+## Ajuste Fase 4: planos de PVcase (2026-10-29)
+Caso: bloque SUP_TOPO_PANELES de `data/input/Prueba_final/Prueba_Final_Exportador_V0.dxf` (`--units m --scale 1:3500 --solids footprint --omit-unsupported`). Los paneles (21 384 3DSOLID, 81 distintos) no salían en el PDF y 2 MULTILEADER se omitían por datos inválidos.
+
+Diagnóstico:
+- Los 81 sólidos son SAB `ASM BinaryFile4` (ACIS 22300, «ASM 231.6.4»), cajas de 6 caras planas, 12 aristas rectas y 8 vértices. Fallo de ezdxf 1.4.4: `SabDataLoader.read_transform` (ezdxf/acis/sab.py) espera el registro `transform` como texto (así lo escribe ezdxf), pero AutoCAD lo guarda como 4 vectores binarios (3 filas del giro y la traslación), la escala y tres indicadores (giro, reflejo, deformación). Los 162 sólidos de Plano_completo no tienen registro `transform` y por eso funcionaban.
+- MULTILEADER, fallo de ezdxf 1.4.4: `xref.Loader` traduce dos veces los handles de las entidades de un bloque copiado (desde `BlockRecord.map_resources` y desde `_Transfer.map_entity_resources`). El MULTILEADER traduce su contexto, flechas y atributos sobre la propia copia, así que la segunda vez toma un handle ya traducido como si fuera del origen. En este plano, el estilo del texto acababa apuntando a un 3DSOLID (`DXFAttributeError: Invalid DXF attribute "name" for entity 3DSOLID`); si cae en otro STYLE, el texto sale con otra fuente sin ningún error. En el DXF de origen están bien.
+
+Hecho:
+- `acis_reader.py` (nuevo): `load_bodies(solid)` lee el ACIS con subclases de `SabLoader` y `SabDataLoader` (internas de ezdxf, solo en esta lectura; no se cambia ezdxf para todo el programa) que aceptan el transform binario, en el mismo orden que ezdxf lee el SAT (filas y luego traslación, vector fila como `Matrix44`). Con escala ≠ 1 o deformación no se convierte (`UnsupportedTransform`, con su motivo), igual que ezdxf ignora esos casos en el SAT.
+- `solids.py`: `FootprintResult.own_transform` (handles convertidos con el lector propio). Aviso nuevo `SOLIDS_ACIS_OWN_READER` (info, categoría `entities`, consejo «Compare una muestra de huellas con el CAD»), en el TXT, el manifiesto y la línea «Huellas» de la terminal; solo sale si se dibujó algún sólido. Para ello `detail_model.Severity` admite `INFO` (`notices` lo traduce tal cual y el TXT lo rotula «info»).
+- `block_extractor._multileader_mapping_once`: durante `loader.execute()` cada MULTILEADER copiado se traduce una sola vez; el método de ezdxf se restaura al terminar.
+- Pruebas (10, datos sintéticos): `tests/test_acis_transform.py` (giro de 30° comparado con la fórmula del giro, porque una caja centrada girada ±90° ocupa lo mismo y no delata la traspuesta; 90°; transform en texto sin lector propio; escala y deformación rechazadas; flujo completo con TXT, manifiesto y copia de render; vigilancia de que ezdxf sigue sin leerlo y de que existen sus clases internas) y dos en `tests/test_extraction_resources.py` (estilo del MULTILEADER tras la extracción y vigilancia de la doble traducción).
+- Orientación comprobada con el DXF real: los 81 giros son inclinaciones alrededor del eje X. El ángulo del lado largo frente a los paneles vecinos no distingue la matriz de su traspuesta (81 de 81 a 0°/90° con las dos), pero la definición trae una POLYLINE 3D cerrada (el contorno de la mesa): la caja de las 81 huellas coincide con ella en tres bordes y difiere 0,0057 unidades en el cuarto; con la traspuesta, un borde se desvía 0,2993.
+- Hash de regresión de Perfil_K0010 sin cambios (`A2560C11…3FF9`; ese bloque no tiene MULTILEADER ni 3DSOLID).
+- Resultado real (`data/output/Prueba_final/verificacion_2026-10-29/`): 21 384 3DSOLID transformados (antes omitidos), 81 con el lector propio, error máximo de huella 0,001 mm en el papel; los 2 MULTILEADER se dibujan; desaparecen `SOLIDS_NOT_CONVERTED`, `ENTITIES_INVALID_DATA` (×2) y `FIDELITY_RECONCILIATION` (×2); quedan `ENTITIES_WITHOUT_BOUNDS`, `SOLIDS_AS_FOOTPRINT`, `UNSUPPORTED_OMITTED` (20 REGION) y el nuevo `SOLIDS_ACIS_OWN_READER`. Escala del dibujo [OK], texto buscable 406/406, `cad verify-package` correcto. Medido con el código del último commit frente al nuevo (mismas opciones, una ejecución tras otra): tiempo 330 s → 477–515 s (dibujar las 21 384 huellas en el PDF; ver el coste de `Shape.finish` en «Opcional»), pico de memoria 1,05 → 0,93 GiB, PDF 3 940 264 → 4 334 492 bytes (+10 %).
+
+Pendiente:
+- Avisar a ezdxf de los dos fallos (texto de los issues redactado el 2026-10-29, sin enviar). Cuando los corrijan, retirar `acis_reader` y `_multileader_mapping_once`; `test_ezdxf_still_cannot_read_the_binary_transform` y `test_ezdxf_still_maps_multileader_resources_twice` avisarán.
+- Revisión visual de una mesa del PDF sobre el plano en AutoCAD.
 
 ## Otros
 - Hablar con Alan: ¿limpiar historial de Git (SVG/TXT de salidas ya commiteados)? Investigar handles duplicados del DXF.

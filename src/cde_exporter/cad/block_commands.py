@@ -708,6 +708,7 @@ def _run_extract_block(args, font_restorers: list, staging: list[Path]) -> int:
                     footprints.converted,
                     footprints.failure_reasons,
                     footprints.max_error_mm,
+                    len(footprints.own_transform),
                 )
             # Un aviso crítico (p. ej. XREF sin resolver) se conoce antes de dibujar: se detiene
             # aquí para no gastar el tiempo del dibujo.
@@ -882,10 +883,12 @@ def _run_extract_block(args, font_restorers: list, staging: list[Path]) -> int:
             )
             distinct = len(footprints.converted)
             distinct_text = "sólido distinto" if distinct == 1 else "sólidos distintos"
+            own = len(footprints.own_transform)
+            own_text = f"; {own} con el lector propio del transform ACIS" if own else ""
             after_publish.append(
                 (
                     f"Huellas: {drawn} 3DSOLID {'dibujado' if drawn == 1 else 'dibujados'} como "
-                    f"huella 2D ({distinct} {distinct_text}).",
+                    f"huella 2D ({distinct} {distinct_text}{own_text}).",
                     False,
                 )
             )

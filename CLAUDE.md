@@ -9,7 +9,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - Lee cada archivo antes de editarlo. Pide confirmación antes de cambios grandes.
 
 ## Verificación (siempre antes de dar algo por terminado)
-- `python -m pytest -q --tb=short` (referencia: 415 pruebas pasando).
+- `python -m pytest -q --tb=short` (referencia: 425 pruebas pasando).
 - `ruff check src tests`.
 - NO ejecutar `ruff format` sobre archivos existentes (solo en archivos nuevos).
 - NO usar `pytest -s` (las pruebas del aviso de escala esperarían entrada).
@@ -46,15 +46,17 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - El TXT registra cada HATCH por tipo, patrón y escala con su tratamiento (conservado, relleno sólido, solo contorno u omitido) y el motivo.
 - Los objetos de Civil 3D requieren `EXPORTTOAUTOCAD` antes de guardar el DXF.
 - Los sólidos 3D (3DSOLID) se dibujan como huella en planta con `--solids footprint` o se omiten con `--omit-unsupported`; sin ninguna de las dos opciones, la extracción se detiene.
+- El ACIS de los 3DSOLID se lee con `acis_reader.load_bodies`, que admite el transform binario de AutoCAD 2018+ (PVcase) que ezdxf 1.4.4 no lee; los sólidos leídos así llevan el aviso `SOLIDS_ACIS_OWN_READER` (info). Un transform con escala ≠ 1 o deformación no se convierte (motivo en el TXT).
+- Al extraer, cada MULTILEADER copiado traduce sus handles una sola vez (`block_extractor._multileader_mapping_once`): ezdxf 1.4.4 lo hacía dos veces y el estilo del texto podía acabar apuntando a otra entidad.
 
 ## Avisos y manifiesto (Fase 4)
-- Lista única de avisos: `notices.collect_notices(detail)` genera todos los avisos (código, severidad `info`/`warning`/`critical`, categoría y consejo). La usan el TXT ("A tener en cuenta") y el manifiesto; el estado final es "con advertencias" si hay algún aviso `warning`. Los avisos `critical` (`notices.BLOCKING_SEVERITIES`: XREF o bloque sin resolver) bloquean: sin archivos, código 1 y un mensaje que dice qué falta; se comprueban antes de dibujar y antes de publicar. Todo código de aviso nuevo necesita su categoría en `notices.WARNING_CODES` (una prueba lo exige). La sustitución de fuente es `FONT_SUBSTITUTED` (info); `GLYPHS_MISSING` es warning.
+- Lista única de avisos: `notices.collect_notices(detail)` genera todos los avisos (código, severidad `info`/`warning`/`critical`, categoría y consejo). La usan el TXT ("A tener en cuenta") y el manifiesto; el estado final es "con advertencias" si hay algún aviso `warning`. Los avisos `critical` (`notices.BLOCKING_SEVERITIES`: XREF o bloque sin resolver) bloquean: sin archivos, código 1 y un mensaje que dice qué falta; se comprueban antes de dibujar y antes de publicar. Todo código de aviso nuevo necesita su categoría en `notices.WARNING_CODES` (una prueba lo exige). La sustitución de fuente es `FONT_SUBSTITUTED` (info); `GLYPHS_MISSING` es warning. Los avisos del modelo (`ExtractedDetail.warnings`) también pueden ser `Severity.INFO` (p. ej. `SOLIDS_ACIS_OWN_READER`).
 - Manifiesto v1 (`manifest.py`, documentado en `docs/manifiesto.md`): `build_manifest` y `validate_manifest` (esquema propio, sin jsonschema). Se valida contra su esquema, se escribe y se comprueba contra el PDF (`pdf_checks.check_manifest_coherence`: hash, bytes, páginas, tamaño y nombre) antes de publicar. Guarda nombres de archivo, nunca rutas, y la matriz CAD → página real (`ExportReport.cad_to_page_pt`).
 - Comprobaciones: toda comprobación está en `detail_model.BLOCKING_CHECKS` (si falla, no se publica nada) o en `ADVISORY_CHECKS` (solo avisa); `check_blocks` falla con una sin clasificar.
 - La página PDF se crea con su tamaño exacto y el dibujo centrado en ella: ezdxf la trunca a puntos enteros y además la redondea a 0,1 mm (`Page.width_in_mm` redondea al leerse); `_PdfBackend` compensa las dos cosas.
 
 ## Arquitectura (src/cde_exporter/cad)
-`detail_model.py` (modelo v2), `entity_policy.py` (tabla de política por tipo de entidad y `decide`; solo biblioteca estándar, como `detail_model.py`), `detail_builder.py`, `detail_extras.py`, `detail_text.py` (TXT), `pdf_checks.py`, `block_commands.py` (flujo), `scale.py`, `fidelity.py`, `exporters.py`, `solids.py` (huella de 3DSOLID), `block_catalog.py`, `block_extractor.py`, `notices.py` (lista única de avisos), `manifest.py` (manifiesto v1). `notices.py` y `manifest.py` solo usan la biblioteca estándar.
+`detail_model.py` (modelo v2), `entity_policy.py` (tabla de política por tipo de entidad y `decide`; solo biblioteca estándar, como `detail_model.py`), `detail_builder.py`, `detail_extras.py`, `detail_text.py` (TXT), `pdf_checks.py`, `block_commands.py` (flujo), `scale.py`, `fidelity.py`, `exporters.py`, `solids.py` (huella de 3DSOLID), `acis_reader.py` (lectura del ACIS con el transform binario; aísla las clases internas de ezdxf), `block_catalog.py`, `block_extractor.py`, `notices.py` (lista única de avisos), `manifest.py` (manifiesto v1). `notices.py` y `manifest.py` solo usan la biblioteca estándar.
 
 ## Estado y pendientes
 Ver `docs/estado_proyecto.md`.

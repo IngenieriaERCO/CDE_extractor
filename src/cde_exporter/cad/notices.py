@@ -93,6 +93,10 @@ WARNING_CODES: dict[str, tuple[NoticeCategory, str | None]] = {
         NoticeCategory.ENTITIES,
         "La huella muestra la planta del sólido, no su volumen ni su altura.",
     ),
+    "SOLIDS_ACIS_OWN_READER": (
+        NoticeCategory.ENTITIES,
+        "Compare una muestra de huellas con el CAD.",
+    ),
     "SOLIDS_NOT_CONVERTED": (NoticeCategory.ENTITIES, None),
     "FIDELITY_RECONCILIATION": (NoticeCategory.ENTITIES, None),
 }
@@ -146,7 +150,7 @@ def _text_notice(count: int, searchable: bool) -> Notice:
 
 
 def _severity(severity: Severity) -> NoticeSeverity:
-    return NoticeSeverity.CRITICAL if severity is Severity.CRITICAL else NoticeSeverity.WARNING
+    return NoticeSeverity(severity.value)
 
 
 def collect_notices(detail: ExtractedDetail) -> tuple[Notice, ...]:

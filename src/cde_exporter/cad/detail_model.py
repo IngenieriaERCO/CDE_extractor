@@ -18,6 +18,7 @@ class EntityStatus(StrEnum):
 
 
 class Severity(StrEnum):
+    INFO = "info"  # informa; no cambia el estado final
     WARNING = "warning"
     CRITICAL = "critical"
 
@@ -532,12 +533,15 @@ def mark_footprint_solids(
     converted_handles: tuple[str, ...],
     failure_reasons: tuple[tuple[str, int], ...] = (),
     max_error_mm: float = 0.0,
+    own_transform_count: int = 0,
 ) -> ExtractedDetail:
     """Marca como ``transformed`` los 3DSOLID sustituidos por su huella (--solids footprint).
 
     Se relacionan por handle: son entidades de la definición del bloque, y cada copia
     anidada de esa definición tiene su propia disposición con el mismo handle.
     ``failure_reasons`` agrupa (motivo, cantidad de definiciones) de los no convertidos.
+    ``own_transform_count`` cuenta las definiciones convertidas cuyo transform ACIS
+    binario leyó el lector propio (``acis_reader``); solo se informa si se dibujó alguna.
     """
     if not isinstance(detail, ExtractedDetail):
         raise TypeError("detail debe ser un ExtractedDetail")
@@ -572,6 +576,20 @@ def mark_footprint_solids(
                 f"error máximo estimado {max_error_mm:.3f} mm en el papel.",
             )
         )
+        if own_transform_count:
+            read = (
+                "1 sólido distinto se leyó"
+                if own_transform_count == 1
+                else f"{own_transform_count} sólidos distintos se leyeron"
+            )
+            warnings.append(
+                ExtractionWarning(
+                    "SOLIDS_ACIS_OWN_READER",
+                    Severity.INFO,
+                    f"{read} con el lector propio del transform ACIS binario "
+                    "(ezdxf no lo admite).",
+                )
+            )
     if failure_reasons:
         count = sum(amount for _reason, amount in failure_reasons)
         reasons = "; ".join(f"{reason} ({amount})" for reason, amount in failure_reasons)

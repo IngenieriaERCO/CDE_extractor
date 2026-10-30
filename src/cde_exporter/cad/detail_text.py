@@ -24,6 +24,7 @@ _STATUS_NAMES = {
     EntityStatus.UNSUPPORTED: "no soportadas",
     EntityStatus.NOT_VISIBLE: "no visibles",
 }
+_SEVERITY_LABELS = {"info": "info", "warning": "advertencia", "critical": "CRÍTICA"}
 _SELECTION_NAMES = {
     SelectionMethod.AUTOMATIC: "automática",
     SelectionMethod.OCCURRENCE: "por ocurrencia",
@@ -309,7 +310,7 @@ def _format_fidelity(detail: ExtractedDetail) -> list[str]:
     if detail.warnings:
         lines += ["Advertencias del modelo"]
         for warning in detail.warnings:
-            severity = "CRÍTICA" if warning.severity.value == "critical" else "advertencia"
+            severity = _SEVERITY_LABELS.get(warning.severity.value, "advertencia")
             lines += _line("", f"{warning.code} ({severity}): {warning.message}", indent="  ")
     else:
         lines += _line("Advertencias del modelo", "no hay")

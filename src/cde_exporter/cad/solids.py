@@ -16,6 +16,7 @@ import ezdxf
 from ezdxf.acis import api as acis
 from ezdxf.math import Matrix44, Vec3
 
+from cde_exporter.cad.acis_reader import UnsupportedTransform, load_bodies
 from cde_exporter.cad.models import CadProcessingError
 from cde_exporter.cad.reader import read_dxf
 
@@ -47,6 +48,8 @@ class FootprintResult:
     converted: tuple[str, ...]
     failures: tuple[tuple[str, str], ...]
     max_error_mm: float
+    # Convertidos cuyo transform binario leyó acis_reader (ezdxf no lo admite).
+    own_transform: tuple[str, ...] = ()
 
     @property
     def failure_reasons(self) -> tuple[tuple[str, int], ...]:
@@ -85,16 +88,19 @@ def _polygon_area(points) -> float:
     )
 
 
-def solid_footprint(solid) -> tuple[list[tuple[float, float]], float, float]:
-    """Devuelve la huella XY (contorno convexo), la cota Z media y la media altura.
+def solid_footprint(solid) -> tuple[list[tuple[float, float]], float, float, bool]:
+    """Devuelve la huella XY (contorno convexo), la cota Z media, la media altura y si
+    el transform se leyó con el lector propio (``acis_reader``).
 
     Lanza ValueError con el motivo si el ACIS no se puede leer o mallar, o si la huella
     no es convexa: en un sólido cerrado, las áreas proyectadas con signo suman cero y su
     parte positiva cubre la huella; solo si coincide con la envolvente no hay entrantes.
     """
     try:
-        bodies = acis.load_dxf(solid)
+        bodies, own_transform = load_bodies(solid)
         meshes = [mesh for body in bodies for mesh in acis.mesh_from_body(body)]
+    except UnsupportedTransform:
+        raise
     except _ACIS_ERRORS as error:
         raise ValueError(f"ACIS no convertible ({type(error).__name__})") from error
     vertices = [vertex for mesh in meshes for vertex in mesh.vertices]
@@ -116,7 +122,7 @@ def solid_footprint(solid) -> tuple[list[tuple[float, float]], float, float]:
     if abs(covered - hull_area) > 1e-6 * hull_area:
         raise ValueError("huella no convexa")
     low, high = min(v.z for v in vertices), max(v.z for v in vertices)
-    return hull, (low + high) / 2, (high - low) / 2
+    return hull, (low + high) / 2, (high - low) / 2, own_transform
 
 
 def _tilt_by_definition(document) -> dict[str, float]:
@@ -158,6 +164,7 @@ def footprint_document(
     document = read_dxf(source)
     tilts = _tilt_by_definition(document)
     converted: list[str] = []
+    own_transform: list[str] = []
     failures: list[tuple[str, str]] = []
     max_error = 0.0
     for block in document.blocks:
@@ -168,7 +175,7 @@ def footprint_document(
         for solid in solids:
             handle = str(solid.dxf.handle)
             try:
-                hull, z_mid, half_height = solid_footprint(solid)
+                hull, z_mid, half_height, own = solid_footprint(solid)
             except ValueError as error:
                 failures.append((handle, str(error)))
                 continue
@@ -189,9 +196,11 @@ def footprint_document(
             block.add_lwpolyline(hull, close=True, dxfattribs=attributes)
             block.delete_entity(solid)
             converted.append(handle)
+            if own:
+                own_transform.append(handle)
             max_error = max(max_error, error_mm)
     try:
         document.saveas(destination)
     except OSError as error:
         raise CadProcessingError(f"No se pudo escribir la copia de render: {error}") from error
-    return FootprintResult(tuple(converted), tuple(failures), max_error)
+    return FootprintResult(tuple(converted), tuple(failures), max_error, tuple(own_transform))

@@ -127,7 +127,7 @@ Es la misma lista que muestra el TXT en «A tener en cuenta», generada en un so
 - `by_category`: un objeto con las ocho categorías, siempre presentes aunque estén vacías: `fonts`, `hatch`, `dependencies`, `units`, `text`, `renderer`, `scale` y `entities`. Cada aviso tiene `code`, `severity`, `message` y `advice` (consejo, o null).
 
 Severidades:
-- `info`: informa (fuente sustituida, capa de texto). No cambia el estado.
+- `info`: informa (fuente sustituida, capa de texto, sólidos leídos con el lector propio del transform ACIS). No cambia el estado.
 - `warning`: el estado pasa a `complete_with_warnings`.
 - `critical`: dependencias sin resolver (XREF o bloque). **Impiden publicar**: la extracción termina con código 1, sin archivos y con un mensaje que dice qué falta. Por eso un manifiesto publicado nunca tiene avisos críticos.
 
@@ -142,7 +142,7 @@ Códigos:
 | `text` | `TEXT_LAYER` (info), `TEXT_AS_PATHS` (info, con `--no-text-layer`), `TEXT_NOT_SEARCHABLE` |
 | `renderer` | `RENDERER_MESSAGE` (mensajes de ezdxf, p. ej. «relative point size is not supported») |
 | `scale` | `DRAWING_SCALE_MISMATCH`, `PHYSICAL_SCALE_NOT_GUARANTEED` |
-| `entities` | `ENTITIES_WITHOUT_BOUNDS`, `UNSUPPORTED_OMITTED`, `ENTITIES_INVALID_DATA`, `SOLIDS_AS_FOOTPRINT`, `SOLIDS_NOT_CONVERTED`, `FIDELITY_RECONCILIATION` |
+| `entities` | `ENTITIES_WITHOUT_BOUNDS`, `UNSUPPORTED_OMITTED`, `ENTITIES_INVALID_DATA`, `SOLIDS_AS_FOOTPRINT`, `SOLIDS_ACIS_OWN_READER` (info), `SOLIDS_NOT_CONVERTED`, `FIDELITY_RECONCILIATION` |
 
 Si no se indica la severidad, es `warning`.
 
