@@ -164,7 +164,8 @@ def _drawn_extent_pt(page: pymupdf.Page) -> tuple[float, float] | None:
     """Ancho y alto (pt) de lo dibujado: todos los puntos de los trazos, sin el fondo.
 
     Se cuentan también los puntos de control de las curvas, como hace ezdxf al medir lo
-    que graba; el fondo es el rectángulo relleno del tamaño de la página.
+    que graba; el fondo es el rectángulo relleno del tamaño de la página. Los PDF actuales
+    ya no lo llevan, pero se sigue saltando para medir bien los PDF anteriores.
     """
     xs: list[float] = []
     ys: list[float] = []

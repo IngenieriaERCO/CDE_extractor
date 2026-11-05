@@ -493,7 +493,11 @@ def write_text_layer(page: pymupdf.Page, runs, matrix: Matrix44) -> None:
 
 
 class _ExactPageRenderBackend(pdf_backend.PyMuPdfRenderBackend):
-    """Página PDF con el tamaño exacto en puntos (ezdxf la crea truncada a puntos enteros)."""
+    """Página PDF con el tamaño exacto en puntos (ezdxf la crea truncada a puntos enteros).
+
+    La página no lleva fondo: el componedor coloca varios detalles en una plancha y un
+    rectángulo blanco del tamaño de la página taparía lo que queda debajo.
+    """
 
     def __init__(
         self, page: layout.Page, settings: layout.Settings, size_mm: tuple[float, float]
@@ -504,6 +508,13 @@ class _ExactPageRenderBackend(pdf_backend.PyMuPdfRenderBackend):
         self.page.set_mediabox(pymupdf.Rect(0, 0, self.page_width_in_pt, self.page_height_in_pt))
         # La forma compartida guarda la altura de la página al crearse: se crea de nuevo.
         self.content_shape = self.page.new_shape()
+
+    def set_background(self, color) -> None:
+        # ezdxf 1.4.4 pinta el fondo como un rectángulo relleno del tamaño de la página; quiere
+        # saltarlo si es blanco, pero compara "#ffffff" con (1.0, 1.0, 1.0) y lo pinta siempre.
+        # Aquí no se pinta. El color de fondo lógico sigue siendo blanco (BackgroundPolicy.WHITE
+        # en el frontend): el color 7 sale negro y los WIPEOUT, blancos, como hasta ahora.
+        return None
 
 
 class _PdfBackend(pdf_backend.PyMuPdfBackend):

@@ -1,6 +1,6 @@
 # Estado del proyecto — Exportador Vectorial
 
-Último hito: Fase 4, pasos 5, 6 y 7 — avisos críticos que bloquean, manifiesto publicado como tercer archivo y `--all` todo o nada (consulta git log para el hash). Después, ajuste para los planos de PVcase (3DSOLID con transform binario y MULTILEADER; sección «Ajuste Fase 4: planos de PVcase»), sin commit todavía. 425 pruebas pasando, ruff limpio.
+Último hito: Fase 4, pasos 5, 6 y 7 — avisos críticos que bloquean, manifiesto publicado como tercer archivo y `--all` todo o nada (consulta git log para el hash). Después, ajuste para los planos de PVcase (3DSOLID con transform binario y MULTILEADER; sección «Ajuste Fase 4: planos de PVcase»). Último ajuste: PDF sin rectángulo blanco de fondo de página (sección «Ajuste: PDF sin fondo de página»). 428 pruebas pasando, ruff limpio.
 
 ## Plan en 4 fases
 1. Selección de bloque + escala — hecha.
@@ -148,6 +148,24 @@ Hecho:
 Pendiente:
 - Avisar a ezdxf de los dos fallos (texto de los issues redactado el 2026-10-29, sin enviar). Cuando los corrijan, retirar `acis_reader` y `_multileader_mapping_once`; `test_ezdxf_still_cannot_read_the_binary_transform` y `test_ezdxf_still_maps_multileader_resources_twice` avisarán.
 - Revisión visual de una mesa del PDF sobre el plano en AutoCAD.
+
+## Ajuste: PDF sin fondo de página (2026-11-05)
+Caso: el componedor (proyecto aparte, plancha A1) superpone varios PDF de detalle. Cada PDF traía un rectángulo blanco relleno del tamaño de la página que tapaba lo que quedaba debajo (borde del área de dibujo, rosa de los vientos, otros detalles).
+
+Diagnóstico:
+- El fondo lo pintaba ezdxf: `PyMuPdfRenderBackend.set_background` (ezdxf/addons/drawing/pymupdf.py, líneas 250-257) dibuja un rectángulo del tamaño de la página con el color de fondo. Quiere saltarlo cuando es blanco, pero compara el texto `"#ffffff"` con la tupla `(1.0, 1.0, 1.0)` y lo pinta siempre (fallo de ezdxf 1.4.4).
+- El color 7 y el WIPEOUT no dependen de ese rectángulo, sino del color de fondo lógico del frontend (`LayoutProperties.set_colors`): con fondo blanco, el color 7 sale negro y el WIPEOUT se rellena de blanco.
+
+Hecho:
+- `_ExactPageRenderBackend.set_background` (exporters.py) no pinta nada. Se mantienen `BackgroundPolicy.WHITE` y `set_colors("#ffffff")`: los colores no cambian y los rellenos blancos del dibujo (HATCH sólido blanco, WIPEOUT) se conservan. Se descartó `BackgroundPolicy.OFF`: deja el fondo lógico transparente, así que los WIPEOUT tampoco taparían y cambiaría el SVG.
+- Solo afecta al PDF: el SVG no cambia (hash de regresión `A2560C11…3FF9` igual). Manifiesto (esquema 1.0), TXT, tamaño de página, margen, matriz CAD → página y texto buscable sin cambios.
+- `pdf_checks._drawn_extent_pt` sigue saltando un relleno del tamaño de la página, para medir bien los PDF anteriores.
+- Pruebas: `tests/test_pdf_background.py` (3, DXF sintético: sin relleno del tamaño de la página; HATCH sólido blanco y WIPEOUT conservados; color 7 y negro siguen negros) y `test_small_detail_is_drawn_at_its_exact_scale` ahora exige que no haya ningún relleno (antes exigía el fondo).
+- Probado con Perfil_K0010 (1:50, `data/output/sin_fondo_2026-11-05/`): 281 → 280 trazos (solo falta el fondo); trazos y rellenos por color iguales; render a 200 ppp sobre blanco con 0 píxeles distintos; comprobaciones en [OK] (escala 1:50,0000, texto 120/120); `cad verify-package` correcto; el manifiesto solo cambia en fecha, `sha256` y `bytes` del PDF.
+
+Pendiente:
+- El paquete de `data/output/referencia/perfil_k0010/` sigue siendo el anterior (con fondo); regenerarlo si se quiere que la referencia sea la nueva.
+- Avisar a ezdxf del fallo de `set_background` (comparación de texto con tupla).
 
 ## Otros
 - Hablar con Alan: ¿limpiar historial de Git (SVG/TXT de salidas ya commiteados)? Investigar handles duplicados del DXF.

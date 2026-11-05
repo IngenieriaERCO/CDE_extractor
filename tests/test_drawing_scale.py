@@ -69,10 +69,8 @@ def test_small_detail_is_drawn_at_its_exact_scale(tmp_path: Path) -> None:
         # Antes: 9,878 × 2,469 mm (−1,22 %).
         assert width == pytest.approx(10.0, abs=1e-4)
         assert height == pytest.approx(2.5, abs=1e-4)
-        # El fondo blanco cubre la página entera (antes se quedaba en puntos enteros).
-        background = next(item for item in page.get_drawings() if item.get("fill") is not None)
-        assert background["rect"].width == pytest.approx(page.rect.width, abs=1e-3)
-        assert background["rect"].height == pytest.approx(page.rect.height, abs=1e-3)
+        # La página no lleva fondo: ningún relleno (el detalle solo tiene líneas).
+        assert all(item.get("fill") is None for item in page.get_drawings())
     flat = " ".join(report.split())
     assert "[OK] Escala del dibujo: Escala medida en el PDF: 1:1000.0" in flat
     assert "Escala física: garantizada" in flat
