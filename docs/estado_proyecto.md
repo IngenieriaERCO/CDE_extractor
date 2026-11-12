@@ -1,6 +1,6 @@
 # Estado del proyecto — Exportador Vectorial
 
-Último hito: Fase 4, pasos 5, 6 y 7 — avisos críticos que bloquean, manifiesto publicado como tercer archivo y `--all` todo o nada (consulta git log para el hash). Después, ajuste para los planos de PVcase (3DSOLID con transform binario y MULTILEADER; sección «Ajuste Fase 4: planos de PVcase»). Último ajuste: PDF sin rectángulo blanco de fondo de página (sección «Ajuste: PDF sin fondo de página»). 428 pruebas pasando, ruff limpio.
+Último hito: Fase 4, pasos 5, 6 y 7 — avisos críticos que bloquean, manifiesto publicado como tercer archivo y `--all` todo o nada (consulta git log para el hash). Después, ajuste para los planos de PVcase (3DSOLID con transform binario y MULTILEADER; sección «Ajuste Fase 4: planos de PVcase»). Después, PDF sin rectángulo blanco de fondo de página (sección «Ajuste: PDF sin fondo de página»). Último ajuste: arreglo de `--help` y orden `cad extract-all-blocks` (sección «Ajuste: `--help` y exportación de proyecto»). 457 pruebas pasando, ruff limpio.
 
 ## Plan en 4 fases
 1. Selección de bloque + escala — hecha.
@@ -166,6 +166,25 @@ Hecho:
 Pendiente:
 - El paquete de `data/output/referencia/perfil_k0010/` sigue siendo el anterior (con fondo); regenerarlo si se quiere que la referencia sea la nueva.
 - Avisar a ezdxf del fallo de `set_background` (comparación de texto con tupla).
+
+## Ajuste: `--help` y exportación de proyecto (2026-11-11)
+Hecho:
+- `cde-exporter cad extract-block --help` (y `cad extract --help`) terminaba con `UnicodeEncodeError`: la ayuda de `--font-substitutions` lleva «→» y la consola de Windows (cp1252) no lo puede escribir. `main` pasaba la consola a UTF-8 después de `parse_args`, pero `--help` imprime y termina dentro de `parse_args`; ahora se hace antes. Prueba: `tests/test_cli_help.py` (consola cp1252 simulada).
+- Orden nueva `cad extract-all-blocks <dxf> --output-dir <carpeta>` (`project_commands.py`; uso en el README): un paquete por cada referencia de bloque del Model Space, con el mismo flujo de `extract-block` (`block_commands.run_extract_block`, que ahora acepta el DXF ya leído: se lee una sola vez). Decisiones de Luis Angel:
+  - Escala: `--scale` por defecto y `--scale-map` (JSON `{"bloque": "1:N"}`, admite BOM; los nombres se comparan sin mayúsculas). `--list` muestra cada paquete con su escala y su tamaño en mm sin crear nada; `--write-scale-map <json>` escribe la plantilla con todos los bloques exportables. Sin escala para algún bloque, o con un nombre del mapa que no existe, se detiene antes de crear nada.
+  - Varias referencias: `<bloque>_001`, `<bloque>_002`… (número = ocurrencia; se exporta cada una con `--occurrence`).
+  - Si falla una referencia, las demás se publican y la orden termina con código 1 (distinto de `--all`, que sigue todo o nada). Los omitidos no cuentan como fallo.
+  - Resumen en la terminal y en `resumen_proyecto.json` (`document_type` "cde_exporter.project_summary", `schema_version` "1"; claves en inglés como el manifiesto; nombres de archivo, nunca rutas).
+- Omitidos con motivo: anónimos (`*…`), sin definición, XREF y sin nada visible. Lo visible se decide con las reglas del dibujo: `fidelity.iter_detail_entities_with_visibility` acepta ahora `roots` (una sola referencia). Antes, un bloque vacío o apagado fallaba con «empty bounding box».
+- Nombres de archivo: `file_names.py` (solo biblioteca estándar): caracteres prohibidos en Windows y el punto → `_` (el punto se tomaría como extensión), espacios unidos, nombres reservados con `_`, máximo 80 caracteres, choques sin mayúsculas → `_2`, `_3`…
+- Pruebas: `tests/test_project_commands.py` (27) y `tests/test_cli_help.py` (2): 457 pruebas pasando, ruff limpio. Hash de regresión de Perfil_K0010 sin cambios (`A2560C11…3FF9`).
+- Probado con `data/input/Prueba_final/modulacion_bloques_v11LAdxf.dxf` a 1:50: 12 de 12 paquetes en 19 s, `cad verify-package` correcto en los 12; mismo contenido de PDF que con `extract-block`.
+- Probado con `prueba_erco_perfil.dxf` (1:50, opciones de la regresión): 112 paquetes publicados, 648 bloques anónimos omitidos y 268 fallos esperados (264 con 3DSOLID sin `--solids footprint` y 4 con REGION sin `--omit-unsupported`); el SVG de Perfil_K0010 sale con el hash de regresión. En la terminal, el motivo de un fallo se recorta a 300 caracteres (ezdxf lista cada entidad); el JSON lo guarda completo.
+
+Pendiente:
+- Bloques de símbolo muy repetidos: Plano_completo daría 225 paquetes (209 de «PC - PT») y `prueba_erco_perfil.dxf` 380 (264 de un bloque de panel PVcase). Valorar una opción para exportar solo la primera referencia o excluir bloques por nombre.
+- Bloques dinámicos: una referencia a un bloque dinámico con parámetros cambiados apunta a un bloque anónimo `*U…` y hoy se omite. Valorar resolver su nombre real (en Perfil hay 648 anónimos; no se ha comprobado cuántos son bloques dinámicos).
+- Resumen de la terminal largo con muchos omitidos (648 líneas en Perfil): valorar agruparlos por motivo.
 
 ## Otros
 - Hablar con Alan: ¿limpiar historial de Git (SVG/TXT de salidas ya commiteados)? Investigar handles duplicados del DXF.

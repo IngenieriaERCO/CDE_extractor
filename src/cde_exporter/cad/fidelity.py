@@ -106,8 +106,11 @@ class EntityVisibility:
     weight: int = 1
 
 
-def iter_detail_entities_with_visibility(document: Drawing):
+def iter_detail_entities_with_visibility(document: Drawing, roots=None):
     """Como ``iter_detail_entities``, indicando si ezdxf dibujaría cada entidad.
+
+    ``roots`` limita el recorrido a esas entidades del Model Space (por ejemplo, un solo
+    INSERT); por defecto se recorre todo el Model Space.
 
     Aplica las reglas del exportador con el mismo ``RenderContext``: un INSERT solo depende de
     su indicador de invisible (el estado de su capa no cuenta); el resto, de su capa
@@ -146,7 +149,7 @@ def iter_detail_entities_with_visibility(document: Drawing):
             if pushed:
                 ctx.pop_state()
 
-    for entity in document.modelspace():
+    for entity in document.modelspace() if roots is None else roots:
         yield from visit(entity, (), False, 1)
 
 

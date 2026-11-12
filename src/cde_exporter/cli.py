@@ -22,6 +22,7 @@ from cde_exporter.cad.block_commands import run_blocks, run_extract_block
 from cde_exporter.cad.fidelity import print_fidelity_summary, write_fidelity_report
 from cde_exporter.cad.font_config import configure_fonts
 from cde_exporter.cad.manifest import manifest_path_for, verify_package
+from cde_exporter.cad.project_commands import run_extract_all_blocks
 from cde_exporter.config import get_settings
 from cde_exporter.converters.pdf_to_svg import PDFConversionError, convert_page_to_svg
 from cde_exporter.validators.pdf_validator import validate_pdf
@@ -114,6 +115,60 @@ def build_parser() -> argparse.ArgumentParser:
     block_extract_command.add_argument(
         "--no-text-layer", action="store_true", help=_NO_TEXT_LAYER_HELP
     )
+
+    project_command = cad_subcommands.add_parser(
+        "extract-all-blocks",
+        help="Exporta cada bloque del Model Space como su propio paquete (un proyecto)",
+    )
+    project_command.add_argument("drawing", help="Ruta del dibujo DXF")
+    project_command.add_argument(
+        "--output-dir", required=True, help="Carpeta del proyecto donde quedan los paquetes"
+    )
+    project_command.add_argument("--scale", help="Escala por defecto de todos los bloques (1:N)")
+    project_command.add_argument(
+        "--scale-map", help='JSON UTF-8 con la escala de cada bloque: {"bloque": "1:N"}'
+    )
+    project_command.add_argument(
+        "--list",
+        action="store_true",
+        help="Solo muestra qué se exportaría, con su escala y su tamaño; no crea paquetes",
+    )
+    project_command.add_argument(
+        "--write-scale-map",
+        metavar="JSON",
+        help="Escribe una plantilla de escalas con todos los bloques (implica --list)",
+    )
+    project_command.add_argument("--overwrite", action="store_true")
+    project_command.add_argument(
+        "--units", choices=("mm", "cm", "m", "in", "ft"),
+        help="Declara o corrige las unidades del dibujo",
+    )
+    project_command.add_argument(
+        "--page-size-mm", nargs=2, type=float, metavar=("WIDTH", "HEIGHT")
+    )
+    project_command.add_argument("--margin-mm", type=float, default=5.0)
+    project_command.add_argument(
+        "--hatch-mode",
+        choices=("normal", "outline", "solid", "ignore", "auto"),
+        default="auto",
+    )
+    project_command.add_argument("--hatch-threshold", type=int, default=50000)
+    project_command.add_argument(
+        "--omit-unsupported",
+        action="store_true",
+        help="Omite (y declara) las entidades que ezdxf no puede dibujar en vez de detenerse",
+    )
+    project_command.add_argument(
+        "--solids",
+        choices=("footprint",),
+        help="footprint: dibuja cada 3DSOLID convertible como su huella en planta",
+    )
+    project_command.add_argument("--font-substitutions", help="JSON UTF-8 familia→fuente")
+    project_command.add_argument("--font-folder", help="Carpeta de fuentes del proyecto")
+    project_command.add_argument(
+        "--font-fallback", help="Fuente de respaldo (default: arial.ttf)"
+    )
+    project_command.add_argument("--no-text-layer", action="store_true", help=_NO_TEXT_LAYER_HELP)
 
     verify_command = cad_subcommands.add_parser(
         "verify-package",
@@ -357,6 +412,9 @@ def _run_cad(args: argparse.Namespace) -> int:
         if args.cad_command == "extract-block":
             return run_extract_block(args)
 
+        if args.cad_command == "extract-all-blocks":
+            return run_extract_all_blocks(args)
+
         source = Path(args.drawing)
         prefix = Path(args.output_prefix)
         if prefix.suffix:
@@ -507,10 +565,12 @@ def _run_cad(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    # Antes de leer los argumentos: --help imprime y termina dentro de parse_args, y la
+    # consola de Windows (cp1252) no puede escribir caracteres como «→».
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
+    args = build_parser().parse_args(argv)
     if args.command == "cad" and args.cad_command == "extract-block":
         if args.scale is not None and args.scale_factor is not None:
             print("Error CAD: No combines --scale con --scale-factor", file=sys.stderr)
@@ -524,7 +584,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"Error CAD: {error}", file=sys.stderr)
                 return 1
     settings = get_settings()
-    if args.command == "cad" and args.cad_command in {"extract", "extract-block"}:
+    if args.command == "cad" and args.cad_command in {
+        "extract",
+        "extract-block",
+        "extract-all-blocks",
+    }:
         args.font_substitutions = args.font_substitutions or (
             str(settings.font_substitutions) if settings.font_substitutions else None
         )

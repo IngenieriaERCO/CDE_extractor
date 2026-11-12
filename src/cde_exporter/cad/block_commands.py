@@ -402,11 +402,13 @@ def _publish_files(pairs: list[tuple[Path, Path]], overwrite: bool) -> None:
         raise
 
 
-def run_extract_block(args) -> int:
+def run_extract_block(args, document=None) -> int:
+    """``document`` permite reutilizar el DXF de origen ya leído (extract-all-blocks lo lee
+    una sola vez para todos los bloques); no se modifica."""
     font_restorers: list = []
     staging: list[Path] = []
     try:
-        return _run_extract_block(args, font_restorers, staging)
+        return _run_extract_block(args, font_restorers, staging, document)
     finally:
         for restore in font_restorers:
             restore()
@@ -440,7 +442,7 @@ def _outputs(prefix: Path, ref, all_references: bool, keep: bool) -> dict[str, P
     return outputs
 
 
-def _run_extract_block(args, font_restorers: list, staging: list[Path]) -> int:
+def _run_extract_block(args, font_restorers: list, staging: list[Path], document=None) -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
@@ -452,7 +454,8 @@ def _run_extract_block(args, font_restorers: list, staging: list[Path]) -> int:
         raise CadProcessingError("--output-prefix debe ser una ruta base sin extensión")
     if args.all and (args.handle is not None or args.occurrence is not None):
         raise CadProcessingError("--all no se combina con --occurrence ni --handle")
-    document = read_dxf(source)
+    if document is None:
+        document = read_dxf(source)
     if args.block_name not in document.blocks:
         from cde_exporter.cad.block_extractor import _similar_names
 
