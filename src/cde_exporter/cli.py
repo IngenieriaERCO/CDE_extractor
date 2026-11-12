@@ -22,6 +22,7 @@ from cde_exporter.cad.block_commands import run_blocks, run_extract_block
 from cde_exporter.cad.fidelity import print_fidelity_summary, write_fidelity_report
 from cde_exporter.cad.font_config import configure_fonts
 from cde_exporter.cad.manifest import manifest_path_for, verify_package
+from cde_exporter.cad.modelspace_commands import run_extract_modelspace
 from cde_exporter.cad.project_commands import run_extract_all_blocks
 from cde_exporter.config import get_settings
 from cde_exporter.converters.pdf_to_svg import PDFConversionError, convert_page_to_svg
@@ -31,6 +32,28 @@ _NO_TEXT_LAYER_HELP = (
     "No añade al PDF la capa de texto invisible: el texto queda solo como trazados "
     "(no se puede buscar, seleccionar ni copiar)"
 )
+# «cad extract» sigue funcionando igual, pero está en desuso: «cad extract-modelspace» la cubre
+# (paso 2, pendiente: convertirla en un alias).
+_EXTRACT_DEPRECATED = (
+    "Aviso: «cad extract» está en desuso y se retirará. Use «cad extract-modelspace --window "
+    "XMIN YMIN XMAX YMAX --scale 1:N --output-prefix …», que publica PDF, TXT y manifiesto con "
+    "las mismas comprobaciones que extract-block."
+)
+_INCLUDE_HIDDEN_HELP = (
+    "Dibuja también lo que está en capas apagadas o congeladas del bloque: todas, o solo las "
+    "indicadas (separadas por comas). Solo cambia la copia de trabajo, nunca el DXF"
+)
+
+
+def _add_include_hidden(command) -> None:
+    command.add_argument(
+        "--include-hidden-layers",
+        nargs="?",
+        const="*",
+        default=None,
+        metavar="CAPAS",
+        help=_INCLUDE_HIDDEN_HELP,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -115,6 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
     block_extract_command.add_argument(
         "--no-text-layer", action="store_true", help=_NO_TEXT_LAYER_HELP
     )
+    _add_include_hidden(block_extract_command)
 
     project_command = cad_subcommands.add_parser(
         "extract-all-blocks",
@@ -169,6 +193,79 @@ def build_parser() -> argparse.ArgumentParser:
         "--font-fallback", help="Fuente de respaldo (default: arial.ttf)"
     )
     project_command.add_argument("--no-text-layer", action="store_true", help=_NO_TEXT_LAYER_HELP)
+    _add_include_hidden(project_command)
+
+    modelspace_command = cad_subcommands.add_parser(
+        "extract-modelspace",
+        help="Exporta lo que hay en el Model Space (todo, por capas o por zona), sin bloque",
+    )
+    modelspace_command.add_argument("drawing", help="Ruta del dibujo DXF")
+    modelspace_command.add_argument(
+        "--output-prefix", required=True, help="Ruta base sin extensión del paquete"
+    )
+    modelspace_command.add_argument("--scale", help="Escala nominal de salida (1:N)")
+    modelspace_command.add_argument(
+        "--layers",
+        metavar="CAPAS",
+        help="Solo estas capas (separadas por comas; admite * y ?, sin distinguir mayúsculas)",
+    )
+    modelspace_command.add_argument(
+        "--exclude-layers", metavar="CAPAS", help="Quita estas capas (mismo formato que --layers)"
+    )
+    modelspace_command.add_argument(
+        "--window",
+        nargs=4,
+        type=float,
+        metavar=("XMIN", "YMIN", "XMAX", "YMAX"),
+        help="Zona en coordenadas CAD: entra entera cada entidad cuya caja la toca (sin recorte)",
+    )
+    modelspace_command.add_argument(
+        "--window-from-block",
+        metavar="BLOQUE",
+        help="Usa como zona la caja de una referencia de este bloque en el Model Space",
+    )
+    modelspace_command.add_argument(
+        "--occurrence", type=int, help="Referencia de --window-from-block si hay varias"
+    )
+    modelspace_command.add_argument(
+        "--list",
+        action="store_true",
+        help="Solo muestra qué se exportaría (entidades, vértices, tamaño); no crea archivos",
+    )
+    modelspace_command.add_argument("--overwrite", action="store_true")
+    modelspace_command.add_argument(
+        "--units", choices=("mm", "cm", "m", "in", "ft"),
+        help="Declara o corrige las unidades del dibujo",
+    )
+    modelspace_command.add_argument(
+        "--page-size-mm", nargs=2, type=float, metavar=("WIDTH", "HEIGHT")
+    )
+    modelspace_command.add_argument("--margin-mm", type=float, default=5.0)
+    modelspace_command.add_argument(
+        "--hatch-mode",
+        choices=("normal", "outline", "solid", "ignore", "auto"),
+        default="auto",
+    )
+    modelspace_command.add_argument("--hatch-threshold", type=int, default=50000)
+    modelspace_command.add_argument(
+        "--omit-unsupported",
+        action="store_true",
+        help="Omite (y declara) las entidades que ezdxf no puede dibujar en vez de detenerse",
+    )
+    modelspace_command.add_argument(
+        "--solids",
+        choices=("footprint",),
+        help="footprint: dibuja cada 3DSOLID convertible como su huella en planta",
+    )
+    modelspace_command.add_argument("--font-substitutions", help="JSON UTF-8 familia→fuente")
+    modelspace_command.add_argument("--font-folder", help="Carpeta de fuentes del proyecto")
+    modelspace_command.add_argument(
+        "--font-fallback", help="Fuente de respaldo (default: arial.ttf)"
+    )
+    modelspace_command.add_argument(
+        "--no-text-layer", action="store_true", help=_NO_TEXT_LAYER_HELP
+    )
+    _add_include_hidden(modelspace_command)
 
     verify_command = cad_subcommands.add_parser(
         "verify-package",
@@ -198,7 +295,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     extract_command = cad_subcommands.add_parser(
-        "extract", help="Extrae una ventana XY a DXF, SVG y PDF independientes"
+        "extract",
+        help="(En desuso: use extract-modelspace) Extrae una ventana XY a DXF, SVG y PDF",
+        description=_EXTRACT_DEPRECATED.removeprefix("Aviso: "),
     )
     extract_command.add_argument("drawing", help="Ruta del dibujo DXF")
     extract_command.add_argument(
@@ -415,6 +514,10 @@ def _run_cad(args: argparse.Namespace) -> int:
         if args.cad_command == "extract-all-blocks":
             return run_extract_all_blocks(args)
 
+        if args.cad_command == "extract-modelspace":
+            return run_extract_modelspace(args)
+
+        print(_EXTRACT_DEPRECATED, file=sys.stderr)
         source = Path(args.drawing)
         prefix = Path(args.output_prefix)
         if prefix.suffix:
@@ -588,6 +691,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "extract",
         "extract-block",
         "extract-all-blocks",
+        "extract-modelspace",
     }:
         args.font_substitutions = args.font_substitutions or (
             str(settings.font_substitutions) if settings.font_substitutions else None

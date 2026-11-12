@@ -96,6 +96,26 @@ def _format_block(detail: ExtractedDetail) -> list[str]:
     lines += _line("Método de selección", method)
     lines += _line("Handle de la referencia", reference.handle or "no disponible")
     lines += _line("Capa de la referencia", reference.layer or "no disponible")
+    selection = detail.modelspace_selection
+    if selection is not None:
+        lines += _line(
+            "Origen",
+            "Model Space (cad extract-modelspace): la selección se agrupa en un bloque de "
+            "trabajo que solo existe en la copia",
+        )
+        lines += _line("Capas pedidas", ", ".join(selection.layers) or "todas")
+        lines += _line("Capas excluidas", ", ".join(selection.exclude_layers) or "ninguna")
+        if selection.window is None:
+            zone = "todo el Model Space"
+        else:
+            zone = "(" + ", ".join(f"{value:.3f}" for value in selection.window) + ")"
+            if selection.window_block:
+                zone += f", caja del bloque «{selection.window_block}»"
+        lines += _line("Zona (xmin, ymin, xmax, ymax)", zone)
+        lines += _line("Entidades seleccionadas", str(selection.selected))
+        lines += _line("No copiadas", str(selection.not_copied))
+        lines += _line("De longitud nula (no se dibujan)", str(selection.zero_length))
+        lines += _line("Sin caja (fuera de la zona)", str(selection.without_bounds))
     return lines
 
 

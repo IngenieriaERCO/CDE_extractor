@@ -160,6 +160,45 @@ class ExternalDependency:
 
 
 @dataclass(frozen=True, slots=True)
+class HiddenLayerContent:
+    """Entidades que no se dibujan porque su capa está apagada o congelada en el CAD.
+
+    ``state`` es "apagada", "congelada" o "apagada y congelada". ``count`` cuenta cada vez
+    que la entidad aparecería en el dibujo (un bloque anidado 264 veces cuenta 264).
+    """
+
+    layer: str
+    state: str
+    count: int
+
+    def __post_init__(self) -> None:
+        if self.count < 0:
+            raise ValueError("count no puede ser negativo")
+
+
+@dataclass(frozen=True, slots=True)
+class ModelSpaceSelection:
+    """Qué se tomó del Model Space en ``cad extract-modelspace`` (sin bloque elegido).
+
+    ``layers`` y ``exclude_layers`` son los patrones pedidos (vacío: todas las capas);
+    ``window`` es la zona (xmin, ymin, xmax, ymax) en coordenadas CAD y ``window_block`` el
+    bloque del que se tomó, si se usó --window-from-block. ``selected`` cuenta las entidades
+    del Model Space elegidas (un INSERT cuenta como una); ``not_copied`` las que ezdxf no pudo
+    copiar; ``zero_length`` las líneas y polilíneas de longitud nula que no se dibujan y
+    ``without_bounds`` las que, con zona, no se pudieron situar por no tener caja.
+    """
+
+    layers: tuple[str, ...]
+    exclude_layers: tuple[str, ...]
+    window: tuple[float, float, float, float] | None
+    window_block: str | None
+    selected: int
+    not_copied: int = 0
+    zero_length: int = 0
+    without_bounds: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class ExtractionWarning:
     code: str
     severity: Severity
@@ -197,6 +236,14 @@ class ExtractedDetail:
     fonts: tuple[FontUse, ...] = ()
     hatches: HatchSummary | None = None
     result: ExtractionResult | None = None
+    # Capas apagadas o congeladas: lo que ocultan dentro del detalle (y no se dibuja), lo que
+    # se dibujó a propósito con --include-hidden-layers y las entidades sueltas del Model
+    # Space (fuera de cualquier bloque) que están sobre la zona del detalle.
+    hidden_layers: tuple[HiddenLayerContent, ...] = ()
+    included_hidden_layers: tuple[HiddenLayerContent, ...] = ()
+    modelspace_hidden_overlap: tuple[HiddenLayerContent, ...] = ()
+    # Solo en cad extract-modelspace: la selección que se agrupó en el bloque de trabajo.
+    modelspace_selection: ModelSpaceSelection | None = None
 
     def __post_init__(self) -> None:
         _require_tuple("inventory", self.inventory)
@@ -216,7 +263,14 @@ class ExtractedDetail:
         _require_finite("margin_mm", self.margin_mm)
         if self.margin_mm is not None and self.margin_mm < 0:
             raise ValueError("margin_mm no puede ser negativo")
-        for name in ("transformations", "nested_blocks", "fonts"):
+        for name in (
+            "transformations",
+            "nested_blocks",
+            "fonts",
+            "hidden_layers",
+            "included_hidden_layers",
+            "modelspace_hidden_overlap",
+        ):
             _require_tuple(name, getattr(self, name))
 
 

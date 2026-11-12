@@ -24,6 +24,8 @@ from cde_exporter.cad.detail_model import (
     ExternalDependency,
     ExtractedDetail,
     ExtractionWarning,
+    HiddenLayerContent,
+    ModelSpaceSelection,
     ScaleInfo,
     SelectedReference,
     SelectionMethod,
@@ -111,6 +113,98 @@ def _external_dependencies(
     return tuple(found[key] for key in sorted(found))
 
 
+def _entities_text(count: int) -> str:
+    return "1 entidad" if count == 1 else f"{count} entidades"
+
+
+def hidden_layer_warnings(
+    block_name: str,
+    hidden: tuple[HiddenLayerContent, ...],
+    included: tuple[HiddenLayerContent, ...],
+    overlap: tuple[HiddenLayerContent, ...],
+    *,
+    modelspace: bool = False,
+) -> list[ExtractionWarning]:
+    """Un aviso por capa oculta: dentro del bloque (info), incluida a propósito (info) y
+    suelta en el Model Space sobre la zona del bloque (warning: puede faltar en el PDF).
+
+    Con ``modelspace`` (cad extract-modelspace) se habla de la selección, no del bloque de
+    trabajo que la agrupa."""
+    owner = "de la selección del Model Space" if modelspace else f"del bloque «{block_name}»"
+    warnings = [
+        ExtractionWarning(
+            "HIDDEN_LAYERS_CONTENT",
+            Severity.INFO,
+            f"Capa {item.state} «{item.layer}»: {_entities_text(item.count)} {owner} no se "
+            f"{'dibuja' if item.count == 1 else 'dibujan'}.",
+        )
+        for item in hidden
+    ]
+    warnings += [
+        ExtractionWarning(
+            "HIDDEN_LAYERS_INCLUDED",
+            Severity.INFO,
+            f"Capa {item.state} en el CAD «{item.layer}»: se "
+            f"{'dibuja' if item.count == 1 else 'dibujan'} {_entities_text(item.count)} "
+            f"{owner} por --include-hidden-layers (el DXF de origen no cambia).",
+        )
+        for item in included
+    ]
+    warnings += [
+        ExtractionWarning(
+            "MODELSPACE_HIDDEN_OVERLAP",
+            Severity.WARNING,
+            f"Capa {item.state} «{item.layer}»: {_entities_text(item.count)} suelta"
+            f"{'' if item.count == 1 else 's'} en el Model Space (fuera de cualquier bloque) "
+            f"sobre la zona del bloque «{block_name}»; no forma"
+            f"{'' if item.count == 1 else 'n'} parte del bloque y no sale"
+            f"{'' if item.count == 1 else 'n'} en este PDF.",
+        )
+        for item in overlap
+    ]
+    return warnings
+
+
+def modelspace_selection_warnings(selection: ModelSpaceSelection | None) -> list[ExtractionWarning]:
+    """Avisos de la selección del Model Space (cad extract-modelspace)."""
+    if selection is None:
+        return []
+    warnings = []
+    if selection.not_copied:
+        warnings.append(
+            ExtractionWarning(
+                "MODELSPACE_NOT_COPIED",
+                Severity.WARNING,
+                f"{_entities_text(selection.not_copied)} de la selección no se "
+                f"{'pudo' if selection.not_copied == 1 else 'pudieron'} copiar (ezdxf no sabe "
+                f"copiar ese tipo) y no {'sale' if selection.not_copied == 1 else 'salen'} "
+                "en el PDF.",
+            )
+        )
+    if selection.zero_length:
+        warnings.append(
+            ExtractionWarning(
+                "MODELSPACE_ZERO_LENGTH",
+                Severity.INFO,
+                f"{_entities_text(selection.zero_length)} de longitud nula (líneas o "
+                "polilíneas que en el PDF serían un punto suelto) no se "
+                f"{'dibuja' if selection.zero_length == 1 else 'dibujan'}.",
+            )
+        )
+    if selection.without_bounds:
+        one = selection.without_bounds == 1
+        warnings.append(
+            ExtractionWarning(
+                "MODELSPACE_WITHOUT_BOUNDS",
+                Severity.WARNING,
+                f"{_entities_text(selection.without_bounds)} sin caja calculable no se "
+                f"{'pudo' if one else 'pudieron'} situar respecto a la zona pedida y no se "
+                f"{'incluyó' if one else 'incluyeron'}.",
+            )
+        )
+    return warnings
+
+
 def build_extracted_detail(
     *,
     source_path: str | Path,
@@ -139,6 +233,10 @@ def build_extracted_detail(
     fonts: tuple[FontUse, ...] = (),
     hatches: HatchSummary | None = None,
     total_references: int | None = None,
+    hidden_layers: tuple[HiddenLayerContent, ...] = (),
+    included_hidden_layers: tuple[HiddenLayerContent, ...] = (),
+    modelspace_hidden_overlap: tuple[HiddenLayerContent, ...] = (),
+    modelspace_selection: ModelSpaceSelection | None = None,
 ) -> ExtractedDetail:
     """Construye el detalle y clasifica cada entidad según la fidelidad existente.
 
@@ -234,6 +332,14 @@ def build_extracted_detail(
                 "La extracción contiene entidades sin caja geométrica calculable.",
             )
         )
+    warnings += modelspace_selection_warnings(modelspace_selection)
+    warnings += hidden_layer_warnings(
+        block_name,
+        hidden_layers,
+        included_hidden_layers,
+        modelspace_hidden_overlap,
+        modelspace=modelspace_selection is not None,
+    )
     if fidelity_report is not None and fidelity_report.missing_glyphs:
         warnings.append(
             ExtractionWarning(
@@ -400,4 +506,8 @@ def build_extracted_detail(
         nested_blocks=nested_blocks,
         fonts=fonts,
         hatches=hatches,
+        hidden_layers=hidden_layers,
+        included_hidden_layers=included_hidden_layers,
+        modelspace_hidden_overlap=modelspace_hidden_overlap,
+        modelspace_selection=modelspace_selection,
     )

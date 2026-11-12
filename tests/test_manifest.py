@@ -198,3 +198,17 @@ def test_file_name_keeps_only_the_name_with_forward_slashes() -> None:
     assert file_name("C:\\Proyectos\\ERCO\\plano.dxf") == "plano.dxf"
     assert file_name("data/input/plano.dxf") == "plano.dxf"
     assert file_name(None) is None
+
+
+def test_manifests_1_0_without_the_keys_added_in_1_1_stay_valid(valid_manifest: dict) -> None:
+    """Los paquetes 1.0 ya publicados (sin options.include_hidden_layers) siguen siendo
+    válidos para verify-package; un 1.1 sin esa clave no."""
+    del valid_manifest["options"]["include_hidden_layers"]
+    assert any(
+        "options.include_hidden_layers: falta la clave" in problem
+        for problem in validate_manifest(valid_manifest)
+    )
+
+    valid_manifest["schema_version"] = "1.0"
+
+    assert validate_manifest(valid_manifest) == ()

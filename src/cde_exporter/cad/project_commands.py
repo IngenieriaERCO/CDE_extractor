@@ -23,6 +23,7 @@ from cde_exporter.cad import block_commands
 from cde_exporter.cad.block_extractor import references_for_block
 from cde_exporter.cad.fidelity import iter_detail_entities_with_visibility
 from cde_exporter.cad.file_names import safe_file_stem, unique_stem
+from cde_exporter.cad.hidden_layers import STATE_VISIBLE, loose_summary, parse_layer_selection
 from cde_exporter.cad.manifest import MANIFEST_SUFFIX
 from cde_exporter.cad.models import CadProcessingError
 from cde_exporter.cad.reader import read_dxf, safe_extents
@@ -255,8 +256,25 @@ def _print_plan(document, plan: ProjectPlan, args) -> None:
             f"{_size_text(document, package, args.units)}"
         )
     _print_omitted(plan.omitted)
+    _print_loose(loose_summary(document))
 
 
+def _print_loose(loose: list[dict]) -> None:
+    """Lo suelto del Model Space (fuera de cualquier bloque): esta orden no lo exporta."""
+    if not loose:
+        return
+    visible = sum(row["entities"] for row in loose if row["state"] == STATE_VISIBLE)
+    hidden = [row for row in loose if row["state"] != STATE_VISIBLE]
+    print(
+        f"Entidades sueltas del Model Space (fuera de cualquier bloque; no se exportan): "
+        f"{visible} visibles, {sum(row['entities'] for row in hidden)} en capas ocultas"
+    )
+    for row in hidden:
+        print(f"  - capa {row['state']} «{row['layer']}»: {row['entities']}")
+
+
+def _hidden_rows(items) -> list[dict]:
+    return [{"layer": item.layer, "state": item.state, "entities": item.count} for item in items]
 
 
 def _print_omitted(omitted) -> None:
@@ -339,6 +357,8 @@ def run_extract_all_blocks(args) -> int:
     default_scale = _scale_text(args.scale) if args.scale is not None else None
     scale_map = read_scale_map(Path(args.scale_map)) if args.scale_map else {}
     document = read_dxf(source)
+    # Una capa pedida con --include-hidden-layers que no existe detiene la orden aquí.
+    parse_layer_selection(document, getattr(args, "include_hidden_layers", None))
     plan = plan_project(document, scale_map, default_scale)
     print(f"Proyecto: {source.stem} | DXF: {source.name} | carpeta: {output_dir}")
     if args.list or args.write_scale_map:
@@ -385,8 +405,11 @@ def run_extract_all_blocks(args) -> int:
         label = _label(package.block_name, package.occurrence, package.total_occurrences)
         print(f"\n[{index}/{len(plan.packages)}] Bloque {label} → {package.stem} | {package.scale}")
         sys.stdout.flush()
+        details: list = []
         try:
-            block_commands.run_extract_block(_block_args(args, package, output_dir), document)
+            block_commands.run_extract_block(
+                _block_args(args, package, output_dir), document, details
+            )
             status = _published_status(output_dir, package.stem)
         except KeyboardInterrupt:
             raise
@@ -397,11 +420,12 @@ def run_extract_all_blocks(args) -> int:
                 traceback.print_exc()
             reason = f"Error CAD inesperado ({type(error).__name__}): {error}"
         else:
-            published.append(_package_row(package, status))
+            published.append(_package_row(package, status, details[-1] if details else None))
             continue
         sys.stdout.flush()
         print(f"FALLÓ {label}: {_short(reason)}", file=sys.stderr)
         failed.append({**_reference_row(package), "reason": reason})
+    loose = loose_summary(document)
     summary = {
         "document_type": SUMMARY_DOCUMENT_TYPE,
         "schema_version": SUMMARY_SCHEMA_VERSION,
@@ -415,6 +439,13 @@ def run_extract_all_blocks(args) -> int:
             "packages": len(published),
             "omitted": len(plan.omitted),
             "failed": len(failed),
+            "hidden_layer_entities": sum(
+                row["entities"] for package in published for row in package["hidden_layers"]
+            ),
+            "modelspace_loose_entities": sum(row["entities"] for row in loose),
+            "modelspace_loose_hidden_entities": sum(
+                row["entities"] for row in loose if row["state"] != STATE_VISIBLE
+            ),
         },
         "packages": published,
         "omitted": [
@@ -427,9 +458,11 @@ def run_extract_all_blocks(args) -> int:
             for item in plan.omitted
         ],
         "failed": failed,
+        # Entidades del Model Space fuera de cualquier bloque, por capa y estado de la capa.
+        "modelspace_loose": loose,
     }
     _write_json_atomic(summary_path, summary)
-    _print_summary(source, plan, published, failed, summary_path)
+    _print_summary(source, plan, published, failed, summary_path, loose)
     if failed:
         sys.stdout.flush()
         print(
@@ -452,28 +485,69 @@ def _reference_row(package: PlannedPackage) -> dict:
     }
 
 
-def _package_row(package: PlannedPackage, status: str) -> dict:
+def _package_row(package: PlannedPackage, status: str, detail=None) -> dict:
     return {
         **_reference_row(package),
         "pdf": f"{package.stem}.pdf",
         "txt": f"{package.stem}.txt",
         "manifest": f"{package.stem}{MANIFEST_SUFFIX}",
         "status": status,
+        # Capas apagadas o congeladas: lo que no se dibujó del bloque, lo que se dibujó con
+        # --include-hidden-layers y lo suelto del Model Space sobre la zona del bloque.
+        "hidden_layers": _hidden_rows(detail.hidden_layers if detail else ()),
+        "included_hidden_layers": _hidden_rows(detail.included_hidden_layers if detail else ()),
+        "modelspace_hidden_overlap": _hidden_rows(
+            detail.modelspace_hidden_overlap if detail else ()
+        ),
     }
 
 
+def _hidden_text(row: dict) -> str:
+    parts = []
+    hidden = sum(item["entities"] for item in row["hidden_layers"])
+    if hidden:
+        parts.append(f"{hidden} entidades en capas ocultas sin dibujar")
+    included = sum(item["entities"] for item in row["included_hidden_layers"])
+    if included:
+        parts.append(f"{included} de capas ocultas incluidas")
+    overlap = sum(item["entities"] for item in row["modelspace_hidden_overlap"])
+    if overlap:
+        parts.append(f"AVISO: {overlap} sueltas ocultas en el Model Space encima")
+    return "".join(f" | {part}" for part in parts)
 
-def _print_summary(source: Path, plan: ProjectPlan, published, failed, summary_path) -> None:
+
+def _print_summary(
+    source: Path, plan: ProjectPlan, published, failed, summary_path, loose=()
+) -> None:
     total = len(plan.packages)
     print(f"\n=== Resumen del proyecto «{source.stem}» ===")
     print(f"Paquetes publicados: {len(published)} de {total}")
     for row in published:
         label = _label(row["block_name"], row["occurrence"], row["total_occurrences"])
         status = _STATUS_TEXT.get(row["status"], row["status"])
-        print(f"  - {label} → {row['pdf']} | {row['scale']} | {status}")
+        print(f"  - {label} → {row['pdf']} | {row['scale']} | {status}{_hidden_text(row)}")
+    _print_hidden_layers(published)
     _print_omitted(plan.omitted)
     print(f"Fallidos: {len(failed)}")
     for row in failed:
         label = _label(row["block_name"], row["occurrence"], row["total_occurrences"])
         print(f"  - {label}: {_short(row['reason'])}")
+    _print_loose(list(loose))
     print(f"Resumen: {summary_path}")
+
+
+def _print_hidden_layers(published) -> None:
+    """Capas apagadas o congeladas con contenido de los bloques publicados, agrupadas."""
+    groups: dict[tuple[str, str], list] = {}
+    for row in published:
+        label = _label(row["block_name"], row["occurrence"], row["total_occurrences"])
+        for item in row["hidden_layers"]:
+            group = groups.setdefault((item["layer"], item["state"]), [0, []])
+            group[0] += item["entities"]
+            group[1].append(label)
+    if not groups:
+        return
+    print("Capas ocultas con contenido de los bloques (no se dibujó; --include-hidden-layers):")
+    for (layer, state), (entities, labels) in sorted(groups.items()):
+        where = ", ".join(labels[:3]) + (f" y {len(labels) - 3} más" if len(labels) > 3 else "")
+        print(f"  - capa {state} «{layer}»: {entities} entidades en {where}")

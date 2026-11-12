@@ -12,6 +12,11 @@ sobre estos valores.
 Ambos comandos usan `--hatch-mode auto` por defecto. Se pueden elegir explícitamente
 `normal`, `solid`, `outline` e `ignore`.
 
+`cad extract` está **en desuso**: sigue funcionando igual (publica `.dxf`, `.svg`, `.pdf` y
+`_fidelidad.txt`), pero avisa en la terminal. Para exportar una zona del Model Space use
+`cad extract-modelspace --window …` (ver «Exportar el Model Space»), que publica el paquete
+completo con sus comprobaciones.
+
 ## Exportar todos los bloques de un DXF (un proyecto)
 
 `cad extract-all-blocks` exporta cada bloque referenciado en el Model Space como su propio
@@ -49,3 +54,60 @@ cde-exporter cad extract-all-blocks "data\input\via_la_union.dxf" --output-dir "
   `scale_map`, `totals`, `packages` (bloque, ocurrencia, archivos, escala y `status`
   `complete` o `complete_with_warnings`, el mismo del manifiesto), `omitted` y `failed`, cada
   uno con su `reason`.
+- **Capas ocultas:** cada paquete dice en `hidden_layers` qué capas apagadas o congeladas
+  tienen contenido del bloque que no se dibujó, y en `modelspace_hidden_overlap` qué
+  entidades sueltas del Model Space, en capas ocultas, están encima de la zona del bloque.
+  `modelspace_loose` cuenta todo lo suelto del Model Space (fuera de cualquier bloque) por capa
+  y estado: esta orden no lo exporta.
+
+## Capas apagadas o congeladas
+
+Lo que está en una capa apagada o congelada no se dibuja, igual que en el CAD. `cad
+extract-block` y `cad extract-all-blocks` lo avisan en la terminal, en el TXT («A tener en
+cuenta»), en el manifiesto y en `resumen_proyecto.json`:
+
+- `HIDDEN_LAYERS_CONTENT` (info): capa oculta con entidades **del bloque** que no se dibujan.
+  En la capa «0» de un bloque cuenta la capa del INSERT que lo contiene.
+- `MODELSPACE_HIDDEN_OVERLAP` (advertencia): entidades **sueltas** del Model Space, en una capa
+  oculta, encima de la zona del bloque. No forman parte del bloque, así que no salen en el PDF
+  (tampoco con `--include-hidden-layers`). Es el caso de unas curvas de nivel en una capa
+  congelada: AutoCAD no deja seleccionarlas al crear el bloque.
+
+Para dibujar a propósito lo que está en capas ocultas del bloque, `--include-hidden-layers`
+(todas) o `--include-hidden-layers "Capa1,Capa2"` (solo esas; si alguna no existe, la orden se
+detiene sin crear nada). Ponla después del DXF. Solo cambia la copia de trabajo, nunca el DXF
+de origen; el TXT y el manifiesto (`options.include_hidden_layers`) lo registran:
+
+```powershell
+cde-exporter cad extract-block "data\input\obra.dxf" --block-name DET --scale 1:50 --output-prefix "data\output\det" --include-hidden-layers "Curvas"
+```
+
+## Exportar el Model Space (sin bloque)
+
+`cad extract-modelspace` exporta lo que hay en el Model Space, aunque no esté en ningún bloque
+(por ejemplo, unas curvas de nivel sueltas), como un paquete normal (`.pdf`, `.txt` y
+`.manifest.json`), con el mismo flujo y las mismas comprobaciones que `cad extract-block`:
+
+```powershell
+# Ver qué entraría (entidades, vértices, tamaño y si cabe en A1), sin crear nada
+cde-exporter cad extract-modelspace "data\input\obra.dxf" --output-prefix "data\output\curvas" --layers "Curvas*" --include-hidden-layers --window-from-block BLOQUE1 --scale 1:2000 --list
+
+# Exportar
+cde-exporter cad extract-modelspace "data\input\obra.dxf" --output-prefix "data\output\curvas" --layers "Curvas*" --include-hidden-layers --window-from-block BLOQUE1 --scale 1:2000
+```
+
+- **Todo:** sin filtros entra todo el Model Space (también los INSERT, enteros).
+- **Por capas:** `--layers` y `--exclude-layers`, separadas por comas, con comodines `*` y `?`
+  y sin distinguir mayúsculas. Un INSERT se elige por su propia capa. Si ninguna capa
+  coincide, o todas las pedidas están apagadas o congeladas y no se usa
+  `--include-hidden-layers`, la orden se detiene sin crear nada.
+- **Por zona:** `--window XMIN YMIN XMAX YMAX` (coordenadas CAD) o `--window-from-block
+  <bloque>` (la caja de una referencia; con varias, `--occurrence N`). Entra **entera** cada
+  entidad cuya caja toca la zona (no se recorta). Lo que no tiene caja no se puede situar: no
+  entra y se avisa (`MODELSPACE_WITHOUT_BOUNDS`).
+- Las líneas y polilíneas de longitud nula no se dibujan (`MODELSPACE_ZERO_LENGTH`).
+- Las coordenadas del manifiesto son las del Model Space: con `--window-from-block` y la misma
+  escala que el bloque, los dos PDF se superponen en el componedor.
+- El TXT (sección B) y el manifiesto (`selection`) dicen qué se pidió y cuántas entidades
+  entraron. La selección se agrupa en un bloque de trabajo («Model_Space») que solo existe en la
+  copia: es el nombre que sale como bloque.

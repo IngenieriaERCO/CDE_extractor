@@ -54,7 +54,8 @@ def test_minimal_detail_serializes_all_version_2_keys_with_empty_defaults() -> N
         "block_definition_handle", "selection_method", "user_units_override", "detail_size",
         "output_factor_mm_per_unit", "content_size_mm", "page_size_mm", "margin_mm",
         "physical_scale_guaranteed", "physical_scale_note", "transformations", "nested_blocks",
-        "fonts", "hatches", "result",
+        "fonts", "hatches", "result", "hidden_layers", "included_hidden_layers",
+        "modelspace_hidden_overlap", "modelspace_selection",
     ]
     assert serialized["model_version"] == "2"
     assert serialized["extracted_at"] is None

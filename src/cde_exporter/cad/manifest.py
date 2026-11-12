@@ -31,7 +31,7 @@ from cde_exporter.cad.notices import (
 )
 
 DOCUMENT_TYPE = "cde-detail-manifest"
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 # El manifiesto se publica junto al PDF como <prefijo>.manifest.json, el último de los tres.
 MANIFEST_SUFFIX = ".manifest.json"
 _MM_PER_POINT = 25.4 / 72
@@ -51,6 +51,8 @@ class RunOptions:
     font_folder: str | None
     font_fallback: str | None
     margin_mm: float
+    # --include-hidden-layers: None si no se usó, ("*",) para todas o los nombres pedidos.
+    include_hidden_layers: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +310,7 @@ def build_manifest(
                 for check in detail.result.validations
             ],
         },
+        "selection": _selection(detail),
         "options": {
             "hatch_mode": options.hatch_mode,
             "hatch_threshold": options.hatch_threshold,
@@ -318,7 +321,30 @@ def build_manifest(
             "font_folder": file_name(options.font_folder),
             "font_fallback": file_name(options.font_fallback),
             "margin_mm": options.margin_mm,
+            "include_hidden_layers": (
+                None
+                if options.include_hidden_layers is None
+                else list(options.include_hidden_layers)
+            ),
         },
+    }
+
+
+def _selection(detail) -> dict | None:
+    """Selección del Model Space (cad extract-modelspace); None si se exportó un bloque."""
+    selection = detail.modelspace_selection
+    if selection is None:
+        return None
+    return {
+        "kind": "modelspace",
+        "layers": list(selection.layers),
+        "exclude_layers": list(selection.exclude_layers),
+        "window": None if selection.window is None else list(selection.window),
+        "window_from_block": selection.window_block,
+        "entities": selection.selected,
+        "not_copied": selection.not_copied,
+        "zero_length_skipped": selection.zero_length,
+        "without_bounds_skipped": selection.without_bounds,
     }
 
 
@@ -468,6 +494,19 @@ _SCHEMA = {
         "status": _Enum(frozenset({"complete", "complete_with_warnings"})),
         "checks": _List({"name": str, "passed": bool, "blocking": bool, "detail": _Null(str)}),
     },
+    "selection": _Null(
+        {
+            "kind": _Enum(frozenset({"modelspace"})),
+            "layers": _List(str),
+            "exclude_layers": _List(str),
+            "window": _Null(_Floats(4)),
+            "window_from_block": _Null(str),
+            "entities": int,
+            "not_copied": int,
+            "zero_length_skipped": int,
+            "without_bounds_skipped": int,
+        }
+    ),
     "options": {
         "hatch_mode": str,
         "hatch_threshold": int,
@@ -478,6 +517,7 @@ _SCHEMA = {
         "font_folder": _Null(_Name()),
         "font_fallback": _Null(_Name()),
         "margin_mm": _NUMBER,
+        "include_hidden_layers": _Null(_List(str)),
     },
 }
 
@@ -486,10 +526,37 @@ def _is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def _check(value: object, spec: object, where: str, errors: list[str]) -> None:
+# Claves añadidas en una versión menor: un manifiesto de una versión anterior (p. ej. los
+# paquetes 1.0 ya publicados) es válido sin ellas.
+_ADDED_IN: dict[str, tuple[int, int]] = {
+    "manifiesto.options.include_hidden_layers": (1, 1),
+    "manifiesto.selection": (1, 1),
+}
+
+
+def _schema_minor(data: object) -> tuple[int, int]:
+    """(mayor, menor) de ``schema_version``; la versión actual si no se puede leer."""
+    current = tuple(int(part) for part in SCHEMA_VERSION.split(".")[:2])
+    version = data.get("schema_version") if isinstance(data, dict) else None
+    if not isinstance(version, str):
+        return current
+    parts = version.split(".")
+    try:
+        return int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+    except ValueError:
+        return current
+
+
+def _check(
+    value: object,
+    spec: object,
+    where: str,
+    errors: list[str],
+    version: tuple[int, int] = (1, 1),
+) -> None:
     if isinstance(spec, _Null):
         if value is not None:
-            _check(value, spec.item, where, errors)
+            _check(value, spec.item, where, errors, version)
         return
     if value is None:
         errors.append(f"{where}: falta el valor (es None)")
@@ -502,9 +569,11 @@ def _check(value: object, spec: object, where: str, errors: list[str]) -> None:
             return
         for key, item_spec in spec.items():
             if key not in value:
-                errors.append(f"{where}.{key}: falta la clave")
+                added = _ADDED_IN.get(f"{where}.{key}")
+                if added is None or version >= added:
+                    errors.append(f"{where}.{key}: falta la clave")
             else:
-                _check(value[key], item_spec, f"{where}.{key}", errors)
+                _check(value[key], item_spec, f"{where}.{key}", errors, version)
         for key in value.keys() - spec.keys():
             errors.append(f"{where}.{key}: clave no prevista en el esquema")
     elif spec is dict:
@@ -515,7 +584,7 @@ def _check(value: object, spec: object, where: str, errors: list[str]) -> None:
             errors.append(f"{where}: se esperaba una lista")
             return
         for index, item in enumerate(value):
-            _check(item, spec.item, f"{where}[{index}]", errors)
+            _check(item, spec.item, f"{where}[{index}]", errors, version)
     elif isinstance(spec, _Enum):
         if value not in spec.values:
             errors.append(f"{where}: {value!r} no es uno de {sorted(spec.values)}")
@@ -550,7 +619,7 @@ def validate_manifest(data: object) -> tuple[str, ...]:
     haya ningún "\\" en los textos de tipo ruta.
     """
     errors: list[str] = []
-    _check(data, _SCHEMA, "manifiesto", errors)
+    _check(data, _SCHEMA, "manifiesto", errors, _schema_minor(data))
     if errors or not isinstance(data, dict):
         return tuple(errors)
     if data["schema_version"].split(".", 1)[0] != SCHEMA_VERSION.split(".", 1)[0]:

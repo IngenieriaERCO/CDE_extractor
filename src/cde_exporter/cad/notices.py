@@ -98,6 +98,26 @@ WARNING_CODES: dict[str, tuple[NoticeCategory, str | None]] = {
         "Compare una muestra de huellas con el CAD.",
     ),
     "SOLIDS_NOT_CONVERTED": (NoticeCategory.ENTITIES, None),
+    "HIDDEN_LAYERS_CONTENT": (
+        NoticeCategory.ENTITIES,
+        "Si debe salir en el PDF, enciéndala o descongélela en el CAD, o use "
+        "--include-hidden-layers.",
+    ),
+    "HIDDEN_LAYERS_INCLUDED": (NoticeCategory.ENTITIES, None),
+    "MODELSPACE_NOT_COPIED": (
+        NoticeCategory.ENTITIES,
+        "Revise en el CAD si esas entidades son necesarias en el PDF.",
+    ),
+    "MODELSPACE_ZERO_LENGTH": (NoticeCategory.ENTITIES, None),
+    "MODELSPACE_WITHOUT_BOUNDS": (
+        NoticeCategory.ENTITIES,
+        "Para incluirlas, exporte sin --window o amplíe la zona en el CAD.",
+    ),
+    "MODELSPACE_HIDDEN_OVERLAP": (
+        NoticeCategory.ENTITIES,
+        "--include-hidden-layers no la incluye, porque no está en el bloque. Si debe salir, "
+        "inclúyala en el bloque en el CAD.",
+    ),
     "FIDELITY_RECONCILIATION": (NoticeCategory.ENTITIES, None),
 }
 

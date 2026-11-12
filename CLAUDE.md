@@ -9,7 +9,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - Lee cada archivo antes de editarlo. Pide confirmación antes de cambios grandes.
 
 ## Verificación (siempre antes de dar algo por terminado)
-- `python -m pytest -q --tb=short` (referencia: 457 pruebas pasando).
+- `python -m pytest -q --tb=short` (referencia: 477 pruebas pasando).
 - `ruff check src tests`.
 - NO ejecutar `ruff format` sobre archivos existentes (solo en archivos nuevos).
 - NO usar `pytest -s` (las pruebas del aviso de escala esperarían entrada).
@@ -29,6 +29,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 
 ## Reglas del programa
 - Única entrada: DXF; se lee el Model Space.
+- `cad extract` (ventana XY, publica `.dxf`/`.svg`/`.pdf`/`_fidelidad.txt` sin manifiesto) está en desuso: hace lo mismo, pero avisa por stderr y remite a `cad extract-modelspace`. Paso 2 pendiente (decisión de Luis Angel): convertirla en alias cuando se confirme que nadie usa sus archivos.
 - Salidas publicadas: PDF + TXT (informe con secciones A–G generado desde el modelo interno) + manifiesto `<prefijo>.manifest.json`, publicados en ese orden (el manifiesto el último: un PDF sin manifiesto es un paquete incompleto; `cad verify-package` lo comprueba). Si la extracción falla, no queda ningún archivo. Con `--all`, todo o nada: se preparan todas las referencias antes de publicar ninguna. `--detail-json` ya no existe (las pruebas usan el fixture `model_details` de `tests/conftest.py`).
 - Nunca modificar el DXF de origen.
 - Todo se trabaja en carpetas temporales dentro de la carpeta de salida (una por referencia, que se borran al terminar la orden) y se publica de forma atómica (`_publish_files`).
@@ -44,6 +45,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - Lo apagado o congelado en el CAD no sale (se cuenta y se avisa en el TXT).
 - El texto va en el PDF como trazados vectoriales y, encima, una capa de texto invisible (TextWriter + Helvetica) que se puede buscar, seleccionar y copiar; se desactiva con `--no-text-layer`. La comprobación "Texto buscable: N de N" de `pdf_checks` lo verifica; si falta alguna línea es una advertencia (no impide publicar). El TXT lo declara en "A tener en cuenta".
 - El TXT registra cada HATCH por tipo, patrón y escala con su tratamiento (conservado, relleno sólido, solo contorno u omitido) y el motivo.
+- Capas ocultas: `HIDDEN_LAYERS_CONTENT` (info, contenido del bloque en capa apagada o congelada), `MODELSPACE_HIDDEN_OVERLAP` (warning, entidades sueltas del Model Space en capa oculta sobre la zona del bloque) y `HIDDEN_LAYERS_INCLUDED` (info). `--include-hidden-layers [CAPAS]` las dibuja cambiando solo la copia de trabajo. Manifiesto en esquema 1.1 (añade `options.include_hidden_layers` y `selection`; `validate_manifest` acepta los 1.0 sin esas claves: `manifest._ADDED_IN`).
 - Los objetos de Civil 3D requieren `EXPORTTOAUTOCAD` antes de guardar el DXF.
 - Los sólidos 3D (3DSOLID) se dibujan como huella en planta con `--solids footprint` o se omiten con `--omit-unsupported`; sin ninguna de las dos opciones, la extracción se detiene.
 - El ACIS de los 3DSOLID se lee con `acis_reader.load_bodies`, que admite el transform binario de AutoCAD 2018+ (PVcase) que ezdxf 1.4.4 no lee; los sólidos leídos así llevan el aviso `SOLIDS_ACIS_OWN_READER` (info). Un transform con escala ≠ 1 o deformación no se convierte (motivo en el TXT).
@@ -56,7 +58,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - La página PDF se crea con su tamaño exacto y el dibujo centrado en ella: ezdxf la trunca a puntos enteros y además la redondea a 0,1 mm (`Page.width_in_mm` redondea al leerse); `_PdfBackend` compensa las dos cosas.
 
 ## Arquitectura (src/cde_exporter/cad)
-`detail_model.py` (modelo v2), `entity_policy.py` (tabla de política por tipo de entidad y `decide`; solo biblioteca estándar, como `detail_model.py`), `detail_builder.py`, `detail_extras.py`, `detail_text.py` (TXT), `pdf_checks.py`, `block_commands.py` (flujo), `scale.py`, `fidelity.py`, `exporters.py`, `solids.py` (huella de 3DSOLID), `acis_reader.py` (lectura del ACIS con el transform binario; aísla las clases internas de ezdxf), `block_catalog.py`, `block_extractor.py`, `notices.py` (lista única de avisos), `manifest.py` (manifiesto v1), `project_commands.py` (orden `extract-all-blocks`: un paquete por bloque y `resumen_proyecto.json`), `file_names.py` (nombres de archivo seguros). `notices.py`, `manifest.py` y `file_names.py` solo usan la biblioteca estándar.
+`detail_model.py` (modelo v2), `entity_policy.py` (tabla de política por tipo de entidad y `decide`; solo biblioteca estándar, como `detail_model.py`), `detail_builder.py`, `detail_extras.py`, `detail_text.py` (TXT), `pdf_checks.py`, `block_commands.py` (flujo), `scale.py`, `fidelity.py`, `exporters.py`, `solids.py` (huella de 3DSOLID), `acis_reader.py` (lectura del ACIS con el transform binario; aísla las clases internas de ezdxf), `block_catalog.py`, `block_extractor.py`, `notices.py` (lista única de avisos), `manifest.py` (manifiesto v1), `project_commands.py` (orden `extract-all-blocks`: un paquete por bloque y `resumen_proyecto.json`), `file_names.py` (nombres de archivo seguros), `hidden_layers.py` (capas apagadas o congeladas: qué ocultan en el detalle y sueltas en el Model Space; `--include-hidden-layers`), `modelspace_commands.py` (orden `extract-modelspace`: elige del Model Space por capas o zona, sin recorte, lo agrupa en un bloque de trabajo «Model_Space» en una copia y lo exporta con el flujo de `extract-block`). `notices.py`, `manifest.py` y `file_names.py` solo usan la biblioteca estándar.
 
 ## Estado y pendientes
 Ver `docs/estado_proyecto.md`.

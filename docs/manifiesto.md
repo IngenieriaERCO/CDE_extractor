@@ -1,4 +1,4 @@
-# Manifiesto de detalle (`cde-detail-manifest`, esquema 1.0)
+# Manifiesto de detalle (`cde-detail-manifest`, esquema 1.1)
 
 Este documento es para quien programe el **componedor de PDF** (la plancha A1). El manifiesto es el contrato técnico de cada detalle extraído: con él se puede identificar, validar y colocar el PDF sin volver a leer el DXF de origen.
 
@@ -43,6 +43,7 @@ def cad_to_page_mm(x, y):          # coordenadas del Model Space -> mm de págin
 ## Versiones
 
 - `schema_version` versiona este contrato. Un cambio de la versión menor (`1.1`) solo añade información; un cambio de la mayor (`2.0`) puede romper a quien lo lea.
+- `1.1` (2026-11-11) añade `options.include_hidden_layers`, `selection` (paquetes de `cad extract-modelspace`) y los avisos de capas ocultas (`HIDDEN_LAYERS_CONTENT`, `HIDDEN_LAYERS_INCLUDED`, `MODELSPACE_HIDDEN_OVERLAP`) y del Model Space (`MODELSPACE_NOT_COPIED`, `MODELSPACE_ZERO_LENGTH`, `MODELSPACE_WITHOUT_BOUNDS`). Un lector de la `1.0` puede leerlo si ignora las claves que no conoce (comprobado con el componedor el 2026-11-12: integridad y coherencia pasan).
 - `model_version` es la versión del modelo interno del detalle (hoy `"2"`). Es un dato de trazabilidad: el componedor no debería depender de ella.
 
 ## Campos
@@ -52,7 +53,7 @@ def cad_to_page_mm(x, y):          # coordenadas del Model Space -> mm de págin
 | Campo | Tipo | Significado |
 |---|---|---|
 | `document_type` | texto | Siempre `"cde-detail-manifest"`. |
-| `schema_version` | texto | Versión de este esquema (`"1.0"`). |
+| `schema_version` | texto | Versión de este esquema (`"1.1"`). |
 | `model_version` | texto | Versión del modelo interno (`"2"`). |
 | `generated_at` | texto o null | Fecha y hora de la extracción (ISO 8601 con zona horaria). |
 
@@ -142,7 +143,7 @@ Códigos:
 | `text` | `TEXT_LAYER` (info), `TEXT_AS_PATHS` (info, con `--no-text-layer`), `TEXT_NOT_SEARCHABLE` |
 | `renderer` | `RENDERER_MESSAGE` (mensajes de ezdxf, p. ej. «relative point size is not supported») |
 | `scale` | `DRAWING_SCALE_MISMATCH`, `PHYSICAL_SCALE_NOT_GUARANTEED` |
-| `entities` | `ENTITIES_WITHOUT_BOUNDS`, `UNSUPPORTED_OMITTED`, `ENTITIES_INVALID_DATA`, `SOLIDS_AS_FOOTPRINT`, `SOLIDS_ACIS_OWN_READER` (info), `SOLIDS_NOT_CONVERTED`, `FIDELITY_RECONCILIATION` |
+| `entities` | `ENTITIES_WITHOUT_BOUNDS`, `UNSUPPORTED_OMITTED`, `ENTITIES_INVALID_DATA`, `SOLIDS_AS_FOOTPRINT`, `SOLIDS_ACIS_OWN_READER` (info), `SOLIDS_NOT_CONVERTED`, `FIDELITY_RECONCILIATION`, `MODELSPACE_NOT_COPIED` (warning), `MODELSPACE_ZERO_LENGTH` (info), `MODELSPACE_WITHOUT_BOUNDS` (warning), `HIDDEN_LAYERS_CONTENT` (info: capa apagada o congelada con entidades del bloque que no se dibujan), `HIDDEN_LAYERS_INCLUDED` (info: capa oculta dibujada con `--include-hidden-layers`), `MODELSPACE_HIDDEN_OVERLAP` (warning: entidades sueltas del Model Space, en capa oculta, sobre la zona del bloque) |
 
 Si no se indica la severidad, es `warning`.
 
@@ -151,14 +152,18 @@ Si no se indica la severidad, es `warning`.
 - `status`: `complete` (ningún aviso warning o critical) o `complete_with_warnings`.
 - `checks[]`: `name`, `passed`, `blocking` y `detail`. Las que tienen `blocking: true` (PDF legible, una sola página, tamaño de página coherente con la escala) impiden publicar si fallan, así que en un manifiesto publicado siempre están en `passed: true`. Las que tienen `blocking: false` («Escala del dibujo» y «Texto buscable») solo avisan.
 
+### `selection`
+
+Desde la 1.1. `null` si se exportó un bloque (`cad extract-block`). En un paquete de `cad extract-modelspace`: `kind` (`"modelspace"`), `layers` y `exclude_layers` (patrones pedidos; lista vacía = todas), `window` (`[xmin, ymin, xmax, ymax]` en coordenadas CAD, o null), `window_from_block` (bloque del que se tomó la zona, o null), `entities` (entidades del Model Space elegidas; un INSERT cuenta una), `not_copied`, `zero_length_skipped` y `without_bounds_skipped`. En esos paquetes, `source.block_name` es el bloque de trabajo que agrupa la selección («Model_Space») y `source.reference` su INSERT en (0, 0, 0): las coordenadas CAD siguen siendo las del Model Space de origen.
+
 ### `options`
 
-Las opciones con las que se ejecutó la extracción: `hatch_mode`, `hatch_threshold`, `solids` (`footprint` o null), `omit_unsupported`, `text_layer`, `font_substitutions`, `font_folder` y `font_fallback` (estos tres, como nombres de archivo o null) y `margin_mm`.
+Las opciones con las que se ejecutó la extracción: `hatch_mode`, `hatch_threshold`, `solids` (`footprint` o null), `omit_unsupported`, `text_layer`, `font_substitutions`, `font_folder` y `font_fallback` (estos tres, como nombres de archivo o null), `margin_mm` e `include_hidden_layers` (desde la 1.1: null si no se usó la opción, `["*"]` para todas las capas ocultas o la lista de capas pedidas).
 
 ## Validación del manifiesto
 
 `validate_manifest(datos)` devuelve una tupla de errores (vacía si es válido). No usa `jsonschema`: el esquema está declarado en el propio módulo y exige todas las claves, sin claves de más. Además comprueba:
-- la versión mayor del esquema;
+- la versión mayor del esquema (un manifiesto de una versión menor anterior es válido sin las claves que se añadieron después: los paquetes 1.0 ya publicados siguen pasando `cad verify-package`);
 - que haya al menos una página;
 - que los hashes sean SHA-256 en hexadecimal;
 - que los nombres de archivo no lleven ruta;
@@ -182,7 +187,7 @@ Termina con código 0 («Paquete completo y coherente») o con código 1 y la li
 ```json
 {
   "document_type": "cde-detail-manifest",
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "model_version": "2",
   "source": {"dxf_name": "prueba_erco_perfil.dxf", "dxf_sha256": "1f1726e9…c07b38ed", "dxf_bytes": 58025354, "block_name": "Perfil_K0010"},
   "scale": {"requested": "1:50", "denominator": 50.0, "factor_mm_per_cad_unit": 20.0, "physical_scale_guaranteed": true, "physical_scale_reason": null},

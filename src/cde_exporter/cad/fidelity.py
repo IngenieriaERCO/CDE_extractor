@@ -11,7 +11,7 @@ import ezdxf
 from ezdxf import bbox
 from ezdxf.addons.drawing import Frontend, RenderContext, config, svg
 from ezdxf.addons.drawing.config import HatchPolicy
-from ezdxf.addons.drawing.properties import Properties
+from ezdxf.addons.drawing.properties import Properties, layer_key
 from ezdxf.document import Drawing
 from ezdxf.fonts import fonts
 from ezdxf.protocols import SupportsVirtualEntities, virtual_entities
@@ -104,6 +104,10 @@ class EntityVisibility:
     hidden_by_ancestor: bool = False
     # Veces que ezdxf la recorre (un INSERT en matriz repite su contenido en cada celda).
     weight: int = 1
+    # Nombre real de la capa apagada o congelada que la oculta (en la capa "0" de un bloque,
+    # la del INSERT que la contiene). None si se ve o si la oculta otra cosa: su indicador de
+    # invisible o un INSERT invisible que la contiene.
+    hidden_layer: str | None = None
 
 
 def iter_detail_entities_with_visibility(document: Drawing, roots=None):
@@ -122,7 +126,12 @@ def iter_detail_entities_with_visibility(document: Drawing, roots=None):
 
     def visit(entity, block_stack: tuple[str, ...], hidden_above: bool, weight: int):
         visible = not hidden_above and ctx.resolve_visible(entity)
-        yield EntityVisibility(entity, visible, hidden_above, weight)
+        hidden_layer = (
+            _hiding_layer(ctx, entity)
+            if not visible and not hidden_above and entity.dxftype() != "INSERT"
+            else None
+        )
+        yield EntityVisibility(entity, visible, hidden_above, weight, hidden_layer)
         if entity.dxftype() != "INSERT":
             return
         pushed = False
@@ -151,6 +160,14 @@ def iter_detail_entities_with_visibility(document: Drawing, roots=None):
 
     for entity in document.modelspace() if roots is None else roots:
         yield from visit(entity, (), False, 1)
+
+
+def _hiding_layer(ctx: RenderContext, entity) -> str | None:
+    """Capa apagada o congelada que oculta ``entity``, con las mismas reglas que ezdxf."""
+    properties = ctx.layers.get(layer_key(ctx.resolve_layer(entity)))
+    if properties is not None and not properties.is_visible:
+        return str(properties.layer)
+    return None
 
 
 def hidden_skip_events(document: Drawing) -> int:

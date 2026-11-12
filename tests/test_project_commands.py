@@ -250,7 +250,14 @@ def test_exports_every_block_as_its_own_package(tmp_path: Path, capsys) -> None:
     assert summary["project"] == "obra"
     assert summary["source_dxf"] == "obra.dxf"
     assert summary["default_scale"] == "1:50"
-    assert summary["totals"] == {"packages": 4, "omitted": 2, "failed": 0}
+    assert summary["totals"] == {
+        "packages": 4,
+        "omitted": 2,
+        "failed": 0,
+        "hidden_layer_entities": 0,
+        "modelspace_loose_entities": 0,
+        "modelspace_loose_hidden_entities": 0,
+    }
     first = summary["packages"][1]
     assert first["block_name"] == "Detalle 1.5 (Ñ)"
     assert first["pdf"] == "Detalle 1_5 (Ñ).pdf"
@@ -272,10 +279,10 @@ def test_a_failed_block_does_not_stop_the_others(tmp_path: Path, monkeypatch, ca
     out = tmp_path / "proyecto"
     real = block_commands.run_extract_block
 
-    def fail_for_det(args, document=None):
+    def fail_for_det(args, document=None, details=None):
         if args.block_name == "DET":
             raise CadProcessingError("fallo simulado de DET")
-        return real(args, document)
+        return real(args, document, details)
 
     monkeypatch.setattr(block_commands, "run_extract_block", fail_for_det)
 
@@ -285,7 +292,11 @@ def test_a_failed_block_does_not_stop_the_others(tmp_path: Path, monkeypatch, ca
     assert not any(name.startswith("DET.") for name in names)
     assert "MURO_001.pdf" in names and "MURO_002.manifest.json" in names
     summary = json.loads((out / SUMMARY_NAME).read_text(encoding="utf-8"))
-    assert summary["totals"] == {"packages": 3, "omitted": 2, "failed": 1}
+    assert {key: summary["totals"][key] for key in ("packages", "omitted", "failed")} == {
+        "packages": 3,
+        "omitted": 2,
+        "failed": 1,
+    }
     assert summary["failed"][0]["block_name"] == "DET"
     assert summary["failed"][0]["reason"] == "fallo simulado de DET"
     captured = capsys.readouterr()
@@ -343,7 +354,7 @@ def test_long_failure_reasons_are_shortened_only_in_the_terminal(
     out = tmp_path / "proyecto"
     reason = "ezdxf omite entidades: " + ", ".join(["3DSOLID: unsupported"] * 500)
 
-    def always_fail(args, document=None):
+    def always_fail(args, document=None, details=None):
         raise CadProcessingError(reason)
 
     monkeypatch.setattr(block_commands, "run_extract_block", always_fail)

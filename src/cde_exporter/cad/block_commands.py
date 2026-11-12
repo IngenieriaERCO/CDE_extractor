@@ -53,6 +53,13 @@ from cde_exporter.cad.fidelity import (
     write_fidelity_report,
 )
 from cde_exporter.cad.font_config import configure_fonts
+from cde_exporter.cad.hidden_layers import (
+    hidden_layer_counts,
+    hidden_overlap,
+    option_value,
+    parse_layer_selection,
+    reveal_layers,
+)
 from cde_exporter.cad.manifest import (
     MANIFEST_SUFFIX,
     PdfFacts,
@@ -402,13 +409,14 @@ def _publish_files(pairs: list[tuple[Path, Path]], overwrite: bool) -> None:
         raise
 
 
-def run_extract_block(args, document=None) -> int:
+def run_extract_block(args, document=None, details: list | None = None) -> int:
     """``document`` permite reutilizar el DXF de origen ya leído (extract-all-blocks lo lee
-    una sola vez para todos los bloques); no se modifica."""
+    una sola vez para todos los bloques); no se modifica. Si se pasa ``details``, se le
+    añade el detalle finalizado de cada referencia publicada."""
     font_restorers: list = []
     staging: list[Path] = []
     try:
-        return _run_extract_block(args, font_restorers, staging, document)
+        return _run_extract_block(args, font_restorers, staging, document, details)
     finally:
         for restore in font_restorers:
             restore()
@@ -442,7 +450,17 @@ def _outputs(prefix: Path, ref, all_references: bool, keep: bool) -> dict[str, P
     return outputs
 
 
-def _run_extract_block(args, font_restorers: list, staging: list[Path], document=None) -> int:
+# Avisos de capas ocultas que se repiten en la terminal: (código, ¿por stderr?).
+_HIDDEN_TERMINAL_CODES = {
+    "HIDDEN_LAYERS_CONTENT": False,
+    "HIDDEN_LAYERS_INCLUDED": False,
+    "MODELSPACE_HIDDEN_OVERLAP": True,
+}
+
+
+def _run_extract_block(
+    args, font_restorers: list, staging: list[Path], document=None, details: list | None = None
+) -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
@@ -462,6 +480,12 @@ def _run_extract_block(args, font_restorers: list, staging: list[Path], document
         raise CadProcessingError(
             f"No existe el bloque '{args.block_name}'.{_similar_names(document, args.block_name)}"
         )
+    # Capas que se dibujan aunque estén ocultas (solo en la copia de trabajo).
+    reveal = parse_layer_selection(
+        document,
+        getattr(args, "include_hidden_layers", None),
+        strict=getattr(args, "modelspace_selection", None) is None,
+    )
     references = references_for_block(document, args.block_name)
     if not references:
         raise CadProcessingError(
@@ -549,6 +573,7 @@ def _run_extract_block(args, font_restorers: list, staging: list[Path], document
                 document=document,
             )
             extracted_document = read_dxf(temp_dxf)
+            hidden, included = _hidden_layers(extracted_document, temp_dxf, reveal)
             if not font_restorers:
                 # Las fuentes se configuran ya validados el bloque y la escala, y solo con
                 # el detalle extraído; todas las referencias comparten la misma definición.
@@ -644,6 +669,18 @@ def _run_extract_block(args, font_restorers: list, staging: list[Path], document
                     effective_bounds_xyz[1][1] - effective_bounds_xyz[0][1],
                 )
             )
+            # Entidades sueltas del Model Space de origen, en capas ocultas, sobre el detalle.
+            overlap = hidden_overlap(
+                document,
+                None
+                if effective_bounds_xyz is None
+                else (
+                    effective_bounds_xyz[0][0],
+                    effective_bounds_xyz[0][1],
+                    effective_bounds_xyz[1][0],
+                    effective_bounds_xyz[1][1],
+                ),
+            )
             if nominal_denominator is not None:
                 scale, geometry_page_size, geometry_box, content_size = _nominal_scale_parameters(
                     args, effective_bounds_xyz, verification, nominal_denominator
@@ -704,6 +741,10 @@ def _run_extract_block(args, font_restorers: list, staging: list[Path], document
                 content_size_mm=content_size,
                 page_size_mm=geometry_page_size,
                 margin_mm=args.margin_mm if nominal_denominator is not None else None,
+                hidden_layers=hidden,
+                included_hidden_layers=included,
+                modelspace_hidden_overlap=overlap,
+                modelspace_selection=getattr(args, "modelspace_selection", None),
             )
             if footprints is not None:
                 detail = mark_footprint_solids(
@@ -840,6 +881,8 @@ def _run_extract_block(args, font_restorers: list, staging: list[Path], document
                     f"La validación del PDF falló; no se publicó ningún archivo. {failed}"
                 ) from error
             detail = finalize_detail(detail, extraction_result)
+            if details is not None:
+                details.append(detail)
             temp_report.write_text(format_detail_report(detail), encoding="utf-8", newline="\n")
             # Manifiesto v1: validado contra su esquema, escrito y comprobado contra el PDF.
             manifest = _checked_manifest(source, temp_pdf, detail, export_report, args)
@@ -901,6 +944,11 @@ def _run_extract_block(args, font_restorers: list, staging: list[Path], document
                 )
         if export_report.omitted:
             after_publish.append((_omitted_terminal_line(export_report.omitted), True))
+        for warning in detail.warnings:
+            to_stderr = _HIDDEN_TERMINAL_CODES.get(warning.code)
+            if to_stderr is not None:
+                text = f"Aviso: {warning.message}" if to_stderr else warning.message
+                after_publish.append((text, to_stderr))
     # Orden de publicación: PDF y TXT (y los intermedios de desarrollo) de todas las
     # referencias y, al final, los manifiestos. Un PDF sin su manifiesto es un paquete
     # incompleto (``manifest.verify_package``).
@@ -988,6 +1036,24 @@ def _invalid_data_messages(
     return messages
 
 
+def _hidden_layers(extracted_document, extracted_path: Path, reveal: frozenset[str] | None):
+    """Capas ocultas del detalle extraído y, con --include-hidden-layers, las que se muestran.
+
+    Las capas pedidas se encienden y descongelan en la copia de trabajo (que se guarda de
+    nuevo, porque el resto del flujo la lee del disco); el DXF de origen no cambia. Devuelve
+    (lo que sigue oculto, lo que se incluyó), cada uno por capa.
+    """
+    hidden = hidden_layer_counts(extracted_document)
+    if reveal is None:
+        return hidden, ()
+    revealed = {name.casefold() for name in reveal_layers(extracted_document, reveal)}
+    if not revealed:
+        return hidden, ()
+    extracted_document.saveas(extracted_path)
+    included = tuple(item for item in hidden if item.layer.casefold() in revealed)
+    return hidden_layer_counts(extracted_document), included
+
+
 def _raise_if_blocking(detail) -> None:
     """Sin archivos y código 1 si hay algún aviso crítico (``notices.BLOCKING_SEVERITIES``)."""
     notices = blocking_notices(detail)
@@ -1006,6 +1072,7 @@ def _run_options(args) -> RunOptions:
         font_folder=args.font_folder,
         font_fallback=args.font_fallback,
         margin_mm=args.margin_mm,
+        include_hidden_layers=option_value(getattr(args, "include_hidden_layers", None)),
     )
 
 

@@ -553,6 +553,22 @@ def test_cli_extract_creates_three_outputs_and_refuses_overwrite(tmp_path: Path,
     assert "ya existe" in capsys.readouterr().err
 
 
+def test_cli_extract_warns_that_it_is_deprecated(tmp_path: Path, capsys) -> None:
+    """«cad extract» hace lo mismo que antes, pero avisa de que está en desuso."""
+    source = create_sample_dxf(tmp_path / "source.dxf")
+    prefix = tmp_path / "output" / "detail"
+
+    assert main(
+        ["cad", "extract", str(source), "--window", "0", "0", "8", "8", "--output-prefix",
+         str(prefix)]
+    ) == 0
+
+    error = capsys.readouterr().err
+    assert "«cad extract» está en desuso" in error
+    assert "cad extract-modelspace --window" in error
+    assert prefix.with_suffix(".dxf").is_file() and prefix.with_suffix(".pdf").is_file()
+
+
 def test_cli_can_publish_only_requested_vector_format(tmp_path: Path) -> None:
     source = create_sample_dxf(tmp_path / "source.dxf")
     prefix = tmp_path / "output" / "detail"
