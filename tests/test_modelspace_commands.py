@@ -229,6 +229,10 @@ def test_list_shows_the_size_and_creates_nothing(tmp_path: Path, capsys) -> None
     assert "De longitud nula (no se dibujarían): 1" in text
     assert "cabe en una plancha A1" in text
 
+    assert _run(source, out / "todo", "--list", "--include-hidden-layers") == 0
+    text = capsys.readouterr().out
+    assert "capa «CURVAS»: 3 (congelada en el CAD: se dibuja por --include-hidden-layers)" in text
+
 
 def test_empty_selection_stops(tmp_path: Path, capsys) -> None:
     source = _source(tmp_path / "obra.dxf")
@@ -251,3 +255,18 @@ def test_working_block_name_does_not_clash_with_an_existing_block() -> None:
     (reference,) = working.modelspace()
     assert reference.dxf.name == name
     assert [entity.dxftype() for entity in working.blocks[name]] == ["LINE", "INSERT"]
+
+
+def test_window_uses_the_vertices_when_ezdxf_cannot_measure_a_polyline(monkeypatch) -> None:
+    """En el DXF real, polilíneas de 2 o 3 mm con coordenadas de millones de metros: ezdxf no
+    les calcula caja. La selección por zona usa entonces la de sus vértices."""
+    from cde_exporter.cad import modelspace_commands
+
+    document = ezdxf.new("R2018")
+    polyline = document.modelspace().add_polyline3d([(5, 5, 0), (5.002, 5.001, 0)])
+    monkeypatch.setattr(modelspace_commands, "entity_bounds", lambda entity: None)
+
+    selection = modelspace_commands.select_modelspace(document, (), (), (0, 0, 10, 10))
+
+    assert selection.entities == (polyline,)
+    assert selection.without_bounds == 0

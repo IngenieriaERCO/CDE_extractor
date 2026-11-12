@@ -109,6 +109,7 @@ WARNING_CODES: dict[str, tuple[NoticeCategory, str | None]] = {
         "Revise en el CAD si esas entidades son necesarias en el PDF.",
     ),
     "MODELSPACE_ZERO_LENGTH": (NoticeCategory.ENTITIES, None),
+    "SOURCE_UNUSED_BLOCKS_SKIPPED": (NoticeCategory.ENTITIES, None),
     "MODELSPACE_WITHOUT_BOUNDS": (
         NoticeCategory.ENTITIES,
         "Para incluirlas, exporte sin --window o amplíe la zona en el CAD.",

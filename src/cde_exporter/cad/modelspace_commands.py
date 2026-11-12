@@ -37,7 +37,7 @@ from cde_exporter.cad.block_extractor import (
 from cde_exporter.cad.detail_model import ModelSpaceSelection
 from cde_exporter.cad.hidden_layers import layer_state, parse_layer_selection
 from cde_exporter.cad.models import CadProcessingError
-from cde_exporter.cad.reader import entity_bounds, read_dxf
+from cde_exporter.cad.reader import entity_bounds
 from cde_exporter.cad.scale import parse_nominal_scale
 
 # Nombre del bloque de trabajo que agrupa la selección (con _2, _3… si ya existe).
@@ -76,6 +76,19 @@ def _vertex_count(entity) -> int:
     if kind == "POLYLINE":
         return len(entity.vertices)
     return 2 if kind == "LINE" else 0
+
+
+def _points_bounds(entity) -> tuple[float, float, float, float] | None:
+    """Caja XY de los vértices de una línea o polilínea. Respaldo para las que ezdxf no sabe
+    medir: en un DXF real, polilíneas de 2 o 3 mm con coordenadas de millones de metros."""
+    try:
+        points = _xy_points(entity)
+    except Exception:  # noqa: BLE001 - datos inválidos: sin caja
+        return None
+    if not points:
+        return None
+    xs, ys = [x for x, _y in points], [y for _x, y in points]
+    return min(xs), min(ys), max(xs), max(ys)
 
 
 def _is_zero_length(entity) -> bool:
@@ -129,7 +142,7 @@ def select_modelspace(
             if window is None or (window[0] <= x <= window[2] and window[1] <= y <= window[3]):
                 zero += 1
             continue
-        bounds = entity_bounds(entity)
+        bounds = entity_bounds(entity) or _points_bounds(entity)
         if window is not None:
             if bounds is None:
                 unbounded += 1
@@ -246,7 +259,9 @@ def working_document(document: Drawing, entities: tuple) -> tuple[Drawing, str, 
     return target, name, len(entities) - len(copied)
 
 
-def _print_list(selection: Selection, document: Drawing, args) -> None:
+def _print_list(
+    selection: Selection, document: Drawing, args, reveal: frozenset[str] | None
+) -> None:
     states = {str(layer.dxf.name).casefold(): layer_state(layer) for layer in document.layers}
     print(
         f"Entidades seleccionadas: {len(selection.entities)} | vértices de líneas y "
@@ -254,7 +269,13 @@ def _print_list(selection: Selection, document: Drawing, args) -> None:
     )
     for layer, count in sorted(selection.layers.items(), key=lambda item: item[0].casefold()):
         state = states.get(layer.casefold())
-        print(f"  - capa «{layer}»: {count}" + (f" ({state}: no se dibuja)" if state else ""))
+        if not state:
+            note = ""
+        elif reveal is not None and layer.casefold() in reveal:
+            note = f" ({state} en el CAD: se dibuja por --include-hidden-layers)"
+        else:
+            note = f" ({state}: no se dibuja)"
+        print(f"  - capa «{layer}»: {count}{note}")
     if selection.zero_length:
         print(f"De longitud nula (no se dibujarían): {selection.zero_length}")
     if selection.without_bounds:
@@ -293,7 +314,7 @@ def run_extract_modelspace(args) -> int:
     source = Path(args.drawing)
     if Path(args.output_prefix).suffix:
         raise CadProcessingError("--output-prefix debe ser una ruta base sin extensión")
-    document = read_dxf(source)
+    document, pruned = block_commands.read_source_dxf(source, Path(args.output_prefix).parent)
     layers, exclude = _patterns(args.layers), _patterns(args.exclude_layers)
     reveal = parse_layer_selection(document, args.include_hidden_layers)
     _check_requested_layers(document, layers, reveal)
@@ -307,7 +328,7 @@ def run_extract_modelspace(args) -> int:
         + "."
     )
     if args.list:
-        _print_list(selection, document, args)
+        _print_list(selection, document, args, reveal)
         return 0
     if not selection.entities:
         raise CadProcessingError(
@@ -322,6 +343,7 @@ def run_extract_modelspace(args) -> int:
         handle=None,
         all=False,
         scale_factor=None,
+        source_pruning=pruned,
         modelspace_selection=ModelSpaceSelection(
             layers=layers,
             exclude_layers=exclude,

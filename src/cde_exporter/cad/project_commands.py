@@ -26,7 +26,7 @@ from cde_exporter.cad.file_names import safe_file_stem, unique_stem
 from cde_exporter.cad.hidden_layers import STATE_VISIBLE, loose_summary, parse_layer_selection
 from cde_exporter.cad.manifest import MANIFEST_SUFFIX
 from cde_exporter.cad.models import CadProcessingError
-from cde_exporter.cad.reader import read_dxf, safe_extents
+from cde_exporter.cad.reader import safe_extents
 from cde_exporter.cad.scale import parse_nominal_scale, verify_drawing_units
 
 SUMMARY_NAME = "resumen_proyecto.json"
@@ -356,7 +356,8 @@ def run_extract_all_blocks(args) -> int:
         raise CadProcessingError(f"--output-dir no es una carpeta: {output_dir}")
     default_scale = _scale_text(args.scale) if args.scale is not None else None
     scale_map = read_scale_map(Path(args.scale_map)) if args.scale_map else {}
-    document = read_dxf(source)
+    document, pruned = block_commands.read_source_dxf(source, output_dir)
+    args.source_pruning = pruned  # cada paquete lo declara en su TXT y su manifiesto
     # Una capa pedida con --include-hidden-layers que no existe detiene la orden aquí.
     parse_layer_selection(document, getattr(args, "include_hidden_layers", None))
     plan = plan_project(document, scale_map, default_scale)
@@ -460,6 +461,18 @@ def run_extract_all_blocks(args) -> int:
         "failed": failed,
         # Entidades del Model Space fuera de cualquier bloque, por capa y estado de la capa.
         "modelspace_loose": loose,
+        # DXF muy grande leído desde una copia sin bloques sin usar (null si no hizo falta).
+        "source_copy": None
+        if pruned is None
+        else {
+            "source_bytes": pruned.source_bytes,
+            "copy_bytes": pruned.copy_bytes,
+            "seconds": round(pruned.seconds, 1),
+            "emptied_blocks": [
+                {"name": item.name, "entities": item.entities, "bytes": item.bytes}
+                for item in pruned.emptied
+            ],
+        },
     }
     _write_json_atomic(summary_path, summary)
     _print_summary(source, plan, published, failed, summary_path, loose)

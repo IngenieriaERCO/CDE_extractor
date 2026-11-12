@@ -9,7 +9,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - Lee cada archivo antes de editarlo. Pide confirmación antes de cambios grandes.
 
 ## Verificación (siempre antes de dar algo por terminado)
-- `python -m pytest -q --tb=short` (referencia: 477 pruebas pasando).
+- `python -m pytest -q --tb=short` (referencia: 483 pruebas pasando).
 - `ruff check src tests`.
 - NO ejecutar `ruff format` sobre archivos existentes (solo en archivos nuevos).
 - NO usar `pytest -s` (las pruebas del aviso de escala esperarían entrada).
@@ -29,6 +29,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 
 ## Reglas del programa
 - Única entrada: DXF; se lee el Model Space.
+- DXF de 200 MB o más (`CDE_LARGE_DXF_MB`): las tres órdenes de exportación lo leen desde una copia temporal sin el contenido de los bloques sin usar, hecha por partes (`large_dxf.py`, dos pasadas, conservadora) en la carpeta de salida y borrada tras leerla (`block_commands.read_source_dxf`). Aviso `SOURCE_UNUSED_BLOCKS_SKIPPED` (info); el manifiesto guarda el hash del original.
 - `cad extract` (ventana XY, publica `.dxf`/`.svg`/`.pdf`/`_fidelidad.txt` sin manifiesto) está en desuso: hace lo mismo, pero avisa por stderr y remite a `cad extract-modelspace`. Paso 2 pendiente (decisión de Luis Angel): convertirla en alias cuando se confirme que nadie usa sus archivos.
 - Salidas publicadas: PDF + TXT (informe con secciones A–G generado desde el modelo interno) + manifiesto `<prefijo>.manifest.json`, publicados en ese orden (el manifiesto el último: un PDF sin manifiesto es un paquete incompleto; `cad verify-package` lo comprueba). Si la extracción falla, no queda ningún archivo. Con `--all`, todo o nada: se preparan todas las referencias antes de publicar ninguna. `--detail-json` ya no existe (las pruebas usan el fixture `model_details` de `tests/conftest.py`).
 - Nunca modificar el DXF de origen.
@@ -58,7 +59,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - La página PDF se crea con su tamaño exacto y el dibujo centrado en ella: ezdxf la trunca a puntos enteros y además la redondea a 0,1 mm (`Page.width_in_mm` redondea al leerse); `_PdfBackend` compensa las dos cosas.
 
 ## Arquitectura (src/cde_exporter/cad)
-`detail_model.py` (modelo v2), `entity_policy.py` (tabla de política por tipo de entidad y `decide`; solo biblioteca estándar, como `detail_model.py`), `detail_builder.py`, `detail_extras.py`, `detail_text.py` (TXT), `pdf_checks.py`, `block_commands.py` (flujo), `scale.py`, `fidelity.py`, `exporters.py`, `solids.py` (huella de 3DSOLID), `acis_reader.py` (lectura del ACIS con el transform binario; aísla las clases internas de ezdxf), `block_catalog.py`, `block_extractor.py`, `notices.py` (lista única de avisos), `manifest.py` (manifiesto v1), `project_commands.py` (orden `extract-all-blocks`: un paquete por bloque y `resumen_proyecto.json`), `file_names.py` (nombres de archivo seguros), `hidden_layers.py` (capas apagadas o congeladas: qué ocultan en el detalle y sueltas en el Model Space; `--include-hidden-layers`), `modelspace_commands.py` (orden `extract-modelspace`: elige del Model Space por capas o zona, sin recorte, lo agrupa en un bloque de trabajo «Model_Space» en una copia y lo exporta con el flujo de `extract-block`). `notices.py`, `manifest.py` y `file_names.py` solo usan la biblioteca estándar.
+`detail_model.py` (modelo v2), `entity_policy.py` (tabla de política por tipo de entidad y `decide`; solo biblioteca estándar, como `detail_model.py`), `detail_builder.py`, `detail_extras.py`, `detail_text.py` (TXT), `pdf_checks.py`, `block_commands.py` (flujo), `scale.py`, `fidelity.py`, `exporters.py`, `solids.py` (huella de 3DSOLID), `acis_reader.py` (lectura del ACIS con el transform binario; aísla las clases internas de ezdxf), `block_catalog.py`, `block_extractor.py`, `notices.py` (lista única de avisos), `manifest.py` (manifiesto v1), `project_commands.py` (orden `extract-all-blocks`: un paquete por bloque y `resumen_proyecto.json`), `file_names.py` (nombres de archivo seguros), `hidden_layers.py` (capas apagadas o congeladas: qué ocultan en el detalle y sueltas en el Model Space; `--include-hidden-layers`), `modelspace_commands.py` (orden `extract-modelspace`: elige del Model Space por capas o zona, sin recorte, lo agrupa en un bloque de trabajo «Model_Space» en una copia y lo exporta con el flujo de `extract-block`). `large_dxf.py` (copia por partes de un DXF muy grande sin bloques sin usar). `notices.py`, `manifest.py`, `file_names.py` y `large_dxf.py` solo usan la biblioteca estándar.
 
 ## Estado y pendientes
 Ver `docs/estado_proyecto.md`.

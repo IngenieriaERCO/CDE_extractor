@@ -60,6 +60,12 @@ from cde_exporter.cad.hidden_layers import (
     parse_layer_selection,
     reveal_layers,
 )
+from cde_exporter.cad.large_dxf import (
+    is_large,
+    prune_unused_blocks,
+    pruning_message,
+    pruning_warning,
+)
 from cde_exporter.cad.manifest import (
     MANIFEST_SUFFIX,
     PdfFacts,
@@ -409,6 +415,36 @@ def _publish_files(pairs: list[tuple[Path, Path]], overwrite: bool) -> None:
         raise
 
 
+def read_source_dxf(source: Path, work_parent: Path):
+    """Lee el DXF de origen. Si es muy grande (``large_dxf.is_large``), lo lee desde una copia
+    temporal sin el contenido de los bloques que no se usan, hecha por partes dentro de
+    ``work_parent`` (la carpeta de salida) y borrada en cuanto se ha leído. El DXF de origen no
+    se modifica. Devuelve el documento y el informe de la copia (None si no se hizo).
+    """
+    if not is_large(source):
+        return read_dxf(source), None
+    created = not work_parent.exists()
+    work_parent.mkdir(parents=True, exist_ok=True)
+    folder = Path(tempfile.mkdtemp(dir=work_parent))
+    try:
+        copy = folder / f"{source.stem}_sin_bloques_sin_usar.dxf"
+        print(
+            f"DXF grande ({source.stat().st_size / 1_000_000:.1f} MB): se prepara una copia "
+            "temporal sin los bloques que no se usan…"
+        )
+        sys.stdout.flush()
+        report = prune_unused_blocks(source, copy)
+        if not report.emptied:
+            return read_dxf(source), None
+        print(pruning_message(report))
+        return read_dxf(copy), report
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+        if created:
+            with contextlib.suppress(OSError):
+                work_parent.rmdir()  # solo si quedó vacía (p. ej. con --list)
+
+
 def run_extract_block(args, document=None, details: list | None = None) -> int:
     """``document`` permite reutilizar el DXF de origen ya leído (extract-all-blocks lo lee
     una sola vez para todos los bloques); no se modifica. Si se pasa ``details``, se le
@@ -472,8 +508,9 @@ def _run_extract_block(
         raise CadProcessingError("--output-prefix debe ser una ruta base sin extensión")
     if args.all and (args.handle is not None or args.occurrence is not None):
         raise CadProcessingError("--all no se combina con --occurrence ni --handle")
+    pruned = getattr(args, "source_pruning", None)
     if document is None:
-        document = read_dxf(source)
+        document, pruned = read_source_dxf(source, prefix.parent)
     if args.block_name not in document.blocks:
         from cde_exporter.cad.block_extractor import _similar_names
 
@@ -746,6 +783,10 @@ def _run_extract_block(
                 modelspace_hidden_overlap=overlap,
                 modelspace_selection=getattr(args, "modelspace_selection", None),
             )
+            if pruned is not None:
+                detail = dataclasses.replace(
+                    detail, warnings=(*detail.warnings, pruning_warning(pruned))
+                )
             if footprints is not None:
                 detail = mark_footprint_solids(
                     detail,

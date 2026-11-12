@@ -111,3 +111,17 @@ cde-exporter cad extract-modelspace "data\input\obra.dxf" --output-prefix "data\
 - El TXT (sección B) y el manifiesto (`selection`) dicen qué se pidió y cuántas entidades
   entraron. La selección se agrupa en un bloque de trabajo («Model_Space») que solo existe en la
   copia: es el nombre que sale como bloque.
+
+## DXF muy grandes
+
+ezdxf carga todo el DXF en memoria. Si el DXF pesa 200 MB o más, `cad extract-block`,
+`cad extract-all-blocks` y `cad extract-modelspace` lo leen desde una **copia temporal** sin el
+contenido de los bloques que no se usan en ningún sitio (por ejemplo, un bloque pegado en el
+dibujo y luego borrado del Model Space). La copia se hace leyendo el archivo por partes, sin
+cargarlo entero, dentro de la carpeta de salida, y se borra en cuanto se ha leído. El DXF de
+origen no cambia: el manifiesto guarda su hash y el TXT lo dice en «A tener en cuenta»
+(`SOURCE_UNUSED_BLOCKS_SKIPPED`). No hace falta hacer PURGE en AutoCAD.
+
+Un bloque se conserva si lo nombra o lo apunta cualquier cosa (otro bloque usado, una cota, un
+estilo, un objeto…). El umbral se cambia con la variable de entorno `CDE_LARGE_DXF_MB` (en
+PowerShell, `$env:CDE_LARGE_DXF_MB = "0"` la usa siempre).
