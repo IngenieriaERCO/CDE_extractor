@@ -102,12 +102,18 @@ cde-exporter cad extract-modelspace "data\input\obra.dxf" --output-prefix "data\
   coincide, o todas las pedidas están apagadas o congeladas y no se usa
   `--include-hidden-layers`, la orden se detiene sin crear nada.
 - **Por zona:** `--window XMIN YMIN XMAX YMAX` (coordenadas CAD) o `--window-from-block
-  <bloque>` (la caja de una referencia; con varias, `--occurrence N`). Entra **entera** cada
-  entidad cuya caja toca la zona (no se recorta). Lo que no tiene caja no se puede situar: no
-  entra y se avisa (`MODELSPACE_WITHOUT_BOUNDS`).
+  <bloque>` (la caja de una referencia; con varias, `--occurrence N`). Entra cada entidad cuya
+  caja toca la zona. Lo que no tiene caja no se puede situar: no entra y se avisa
+  (`MODELSPACE_WITHOUT_BOUNDS`).
+- **Recorte a la zona** (por defecto con zona): las LINE y las polilíneas de tramos rectos
+  (POLYLINE 3D y 2D, LWPOLYLINE) se cortan de verdad en el borde, con su cota, su ancho y sus
+  propiedades; una curva que entra y sale varias veces queda en varios tramos. La página mide
+  **exactamente la zona** (`MODELSPACE_CLIPPED`). Lo demás (arcos, círculos, texto, HATCH,
+  INSERT, polilíneas con arcos…) entra entero; si cruza el borde, la página se amplía para que
+  quepa y se avisa (`MODELSPACE_NOT_CLIPPED`). `--no-clip` deja todo entero, como antes.
 - Las líneas y polilíneas de longitud nula no se dibujan (`MODELSPACE_ZERO_LENGTH`).
-- Las coordenadas del manifiesto son las del Model Space: con `--window-from-block` y la misma
-  escala que el bloque, los dos PDF se superponen en el componedor.
+- Las coordenadas del manifiesto son las del Model Space: con `--window-from-block`, recorte y
+  la misma escala que el bloque, las dos páginas miden lo mismo y se superponen exactas.
 - El TXT (sección B) y el manifiesto (`selection`) dicen qué se pidió y cuántas entidades
   entraron. La selección se agrupa en un bloque de trabajo («Model_Space») que solo existe en la
   copia: es el nombre que sale como bloque.

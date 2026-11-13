@@ -698,6 +698,14 @@ def _run_extract_block(
             # La caja se calcula una sola vez, sobre lo que se dibuja, y se reutiliza para la
             # sección C, la página y la comprobación de que el dibujo cabe en el exportador.
             effective_bounds_xyz, render_invalid = _effective_bounds_xyz(render_document)
+            # extract-modelspace con recorte: la página es la ventana, no la caja de lo dibujado
+            # (lo recortado puede no tocar los cuatro bordes).
+            page_window = getattr(args, "page_window", None)
+            if page_window is not None and effective_bounds_xyz is not None:
+                effective_bounds_xyz = (
+                    (page_window[0], page_window[1], effective_bounds_xyz[0][2]),
+                    (page_window[2], page_window[3], effective_bounds_xyz[1][2]),
+                )
             cad_size = (
                 None
                 if effective_bounds_xyz is None
@@ -837,6 +845,7 @@ def _run_extract_block(
                     # El SVG solo se publica con CDE_KEEP_INTERMEDIATES; si no, no se dibuja.
                     draw_svg=keep,
                     text_layer=not args.no_text_layer,
+                    render_box=page_window,
                 )
             except CadProcessingError as error:
                 if footprints is None or not footprints.failures:

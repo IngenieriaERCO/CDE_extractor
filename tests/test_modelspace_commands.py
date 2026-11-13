@@ -102,6 +102,7 @@ def test_exports_the_whole_modelspace_as_a_package(tmp_path: Path) -> None:
         "not_copied": 0,
         "zero_length_skipped": 1,
         "without_bounds_skipped": 0,
+        "clip": None,  # sin zona no hay recorte
     }
     # Coordenadas del Model Space de origen: las curvas congeladas no se dibujan, así que la
     # caja va de la vía de abajo (y = -5) a la segunda referencia de DET (x0 + 210).
@@ -167,15 +168,13 @@ def test_unknown_layer_pattern_stops(tmp_path: Path, capsys) -> None:
     assert "Ninguna capa del DXF coincide con --layers" in capsys.readouterr().err
 
 
-def test_window_keeps_whole_entities_that_touch_it(tmp_path: Path) -> None:
+def test_window_with_no_clip_keeps_whole_entities_that_touch_it(tmp_path: Path) -> None:
     source = _source(tmp_path / "obra.dxf")
     prefix = tmp_path / "salida" / "zona"
     x0 = 4_920_000.0
+    window = (str(x0 + 50), "0", str(x0 + 60), "35")
 
-    assert (
-        _run(source, prefix, "--layers", "VIAS", "--window", str(x0 + 50), "0", str(x0 + 60), "35")
-        == 0
-    )
+    assert _run(source, prefix, "--layers", "VIAS", "--window", *window, "--no-clip") == 0
 
     manifest = _manifest(prefix)
     assert manifest["selection"]["entities"] == 1
@@ -184,6 +183,32 @@ def test_window_keeps_whole_entities_that_touch_it(tmp_path: Path) -> None:
     cad = manifest["pdf"]["drawing"]["cad_bounds"]
     assert cad["min"][0] == pytest.approx(x0 + 30)
     assert cad["max"][0] == pytest.approx(x0 + 80)
+
+
+def test_window_clips_lines_and_the_page_is_the_window(tmp_path: Path) -> None:
+    source = _source(tmp_path / "obra.dxf")
+    prefix = tmp_path / "salida" / "zona"
+    x0 = 4_920_000.0
+    window = (str(x0 + 50), "0", str(x0 + 60), "35")
+
+    assert _run(source, prefix, "--layers", "VIAS", "--window", *window) == 0
+
+    manifest = _manifest(prefix)
+    assert manifest["selection"]["clip"] == {
+        "clipped_entities": 1,
+        "pieces": 1,
+        "outside_removed": 0,
+        "not_clipped": [],
+    }
+    # Lo dibujado es el trozo de la línea dentro de la zona…
+    cad = manifest["pdf"]["drawing"]["cad_bounds"]
+    assert cad["min"] == pytest.approx([x0 + 50, 30])
+    assert cad["max"] == pytest.approx([x0 + 60, 30])
+    # …y la página mide la zona (10 × 35 m a 1:500 = 20 × 70 mm, más 5 mm de margen).
+    assert manifest["pdf"]["page_size_mm"] == pytest.approx([30.0, 80.0], abs=1e-6)
+    assert "MODELSPACE_CLIPPED" in _codes(manifest)
+    checks = {check["name"]: check["passed"] for check in manifest["validation"]["checks"]}
+    assert all(checks.values()), checks
 
 
 def test_window_from_block_needs_the_occurrence_when_there_are_several(
@@ -248,10 +273,10 @@ def test_working_block_name_does_not_clash_with_an_existing_block() -> None:
     line = document.modelspace().add_line((0, 0), (5, 0))
     insert = document.modelspace().add_blockref(WORKING_BLOCK, (10, 0))
 
-    working, name, not_copied = working_document(document, (line, insert))
+    working, name, not_copied, clip = working_document(document, (line, insert))
 
     assert name == f"{WORKING_BLOCK}_2"
-    assert not_copied == 0
+    assert not_copied == 0 and clip is None
     (reference,) = working.modelspace()
     assert reference.dxf.name == name
     assert [entity.dxftype() for entity in working.blocks[name]] == ["LINE", "INSERT"]

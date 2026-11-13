@@ -191,6 +191,31 @@ def modelspace_selection_warnings(selection: ModelSpaceSelection | None) -> list
                 f"{'dibuja' if selection.zero_length == 1 else 'dibujan'}.",
             )
         )
+    if selection.clipped:
+        warnings.append(
+            ExtractionWarning(
+                "MODELSPACE_CLIPPED",
+                Severity.INFO,
+                f"Recorte a la zona: {_entities_text(selection.clipped_entities)} "
+                f"{'recortada' if selection.clipped_entities == 1 else 'recortadas'} "
+                f"({selection.clip_pieces} {'tramo' if selection.clip_pieces == 1 else 'tramos'}"
+                f") y {selection.outside_removed} que solo tocaban la zona con su caja, quitadas."
+                " La página mide la zona.",
+            )
+        )
+    crossing = sum(count for _kind, count in selection.not_clipped)
+    if crossing:
+        kinds = ", ".join(f"{kind} {count}" for kind, count in selection.not_clipped)
+        warnings.append(
+            ExtractionWarning(
+                "MODELSPACE_NOT_CLIPPED",
+                Severity.WARNING,
+                f"{_entities_text(crossing)} {'cruza' if crossing == 1 else 'cruzan'} el borde de "
+                f"la zona y {'entra entera' if crossing == 1 else 'entran enteras'} porque no se "
+                f"{'puede' if crossing == 1 else 'pueden'} recortar ({kinds}); la página se amplía "
+                "para que quepan.",
+            )
+        )
     if selection.without_bounds:
         one = selection.without_bounds == 1
         warnings.append(

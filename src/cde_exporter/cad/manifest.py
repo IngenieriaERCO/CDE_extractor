@@ -31,7 +31,7 @@ from cde_exporter.cad.notices import (
 )
 
 DOCUMENT_TYPE = "cde-detail-manifest"
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
 # El manifiesto se publica junto al PDF como <prefijo>.manifest.json, el último de los tres.
 MANIFEST_SUFFIX = ".manifest.json"
 _MM_PER_POINT = 25.4 / 72
@@ -345,6 +345,16 @@ def _selection(detail) -> dict | None:
         "not_copied": selection.not_copied,
         "zero_length_skipped": selection.zero_length,
         "without_bounds_skipped": selection.without_bounds,
+        "clip": None
+        if not selection.clipped
+        else {
+            "clipped_entities": selection.clipped_entities,
+            "pieces": selection.clip_pieces,
+            "outside_removed": selection.outside_removed,
+            "not_clipped": [
+                {"type": kind, "count": count} for kind, count in selection.not_clipped
+            ],
+        },
     }
 
 
@@ -505,6 +515,14 @@ _SCHEMA = {
             "not_copied": int,
             "zero_length_skipped": int,
             "without_bounds_skipped": int,
+            "clip": _Null(
+                {
+                    "clipped_entities": int,
+                    "pieces": int,
+                    "outside_removed": int,
+                    "not_clipped": _List({"type": str, "count": int}),
+                }
+            ),
         }
     ),
     "options": {
@@ -531,6 +549,7 @@ def _is_number(value: object) -> bool:
 _ADDED_IN: dict[str, tuple[int, int]] = {
     "manifiesto.options.include_hidden_layers": (1, 1),
     "manifiesto.selection": (1, 1),
+    "manifiesto.selection.clip": (1, 2),
 }
 
 

@@ -24,7 +24,7 @@ from ezdxf.addons.drawing.config import HatchPolicy
 from ezdxf.addons.drawing.pipeline import prepare_string_for_rendering
 from ezdxf.addons.drawing.properties import LayoutProperties
 from ezdxf.document import Drawing
-from ezdxf.math import Matrix44, Vec2, Vec3
+from ezdxf.math import BoundingBox2d, Matrix44, Vec2, Vec3
 from ezdxf.path import nesting
 from ezdxf.render import hatching
 from ezdxf.tools.pattern import scale_pattern
@@ -43,7 +43,6 @@ HATCHING_TIMEOUT = 30.0
 # Altura de las mayúsculas de Helvetica, en fracción del tamaño de letra.
 HELVETICA_CAP_HEIGHT = 0.718
 _POINTS_PER_MM = 72 / 25.4
-
 
 @dataclass(frozen=True, slots=True)
 class TextRun:
@@ -544,13 +543,16 @@ class _PdfBackend(pdf_backend.PyMuPdfBackend):
         # y la página exactos.
         settings = settings if settings is not None else layout.Settings()
         player = self.player()  # cambia las grabaciones originales, como en ezdxf
+        # Lo dibujado se mide siempre en la geometría real; ``render_box`` (si se pasa) solo fija
+        # qué rectángulo se coloca en la página (extract-modelspace con recorte: la ventana).
+        drawn = player.bbox()
         if render_box is None:
-            render_box = player.bbox()
-        if render_box.has_data:
-            self.drawn_size = (float(render_box.size.x), float(render_box.size.y))
+            render_box = drawn
+        if drawn.has_data:
+            self.drawn_size = (float(drawn.size.x), float(drawn.size.y))
             self.drawn_bounds = (
-                (float(render_box.extmin.x), float(render_box.extmin.y)),
-                (float(render_box.extmax.x), float(render_box.extmax.y)),
+                (float(drawn.extmin.x), float(drawn.extmin.y)),
+                (float(drawn.extmax.x), float(drawn.extmax.y)),
             )
         output_layout = layout.Layout(render_box, flip_y=self._init_flip_y)
         requested = page
@@ -612,6 +614,7 @@ def _draw_to_svg(
     omit_unsupported: bool = False,
     suggest_solids_footprint: bool = False,
     stats: dict | None = None,
+    render_box: BoundingBox2d | None = None,
 ) -> tuple[str, tuple[str, ...], tuple[tuple[str, str, int], ...]]:
     backend = svg_backend.SVGBackend()
     layout_properties = LayoutProperties.from_layout(document.modelspace())
@@ -631,7 +634,7 @@ def _draw_to_svg(
     if stats is not None:
         stats["degraded"] = tuple(frontend.degraded)
     return (
-        backend.get_string(page, settings=settings),
+        backend.get_string(page, settings=settings, render_box=render_box),
         _frontend_messages(frontend),
         _omitted_rows(frontend),
     )
@@ -647,6 +650,7 @@ def _draw_to_pdf(
     suggest_solids_footprint: bool = False,
     stats: dict | None = None,
     text_layer: bool = False,
+    render_box: BoundingBox2d | None = None,
 ) -> tuple[bytes, tuple[str, ...], tuple[tuple[str, str, int], ...]]:
     backend = _PdfBackend()
     layout_properties = LayoutProperties.from_layout(document.modelspace())
@@ -670,7 +674,7 @@ def _draw_to_pdf(
         frontend.draw_layout(document.modelspace(), layout_properties=layout_properties)
     _raise_if_skipped(frontend, "PDF", suggest_solids_footprint)
     backend.text_runs = frontend.text_runs
-    pdf_content = backend.get_pdf_bytes(page, settings=settings)
+    pdf_content = backend.get_pdf_bytes(page, settings=settings, render_box=render_box)
     if stats is not None:
         stats["invisible"] = frontend.invisible
         stats["degraded"] = tuple(frontend.degraded)
@@ -770,6 +774,7 @@ def export_vector_outputs(
     content_size: tuple[float, float] | None = None,
     draw_svg: bool = True,
     text_layer: bool = True,
+    render_box: tuple[float, float, float, float] | None = None,
 ) -> ExportReport:
     """Crea SVG/PDF vectoriales ajustados o con escala y página explícitas.
 
@@ -845,6 +850,13 @@ def export_vector_outputs(
     if hatch_threshold < 1:
         raise CadProcessingError("El umbral de rayados debe ser un entero positivo")
     stats: dict = {}
+    # Rectángulo CAD (xmin, ymin, xmax, ymax) que se coloca en la página, en vez de la caja de lo
+    # dibujado: con recorte, la página mide exactamente la ventana.
+    box = (
+        None
+        if render_box is None
+        else BoundingBox2d([(render_box[0], render_box[1]), (render_box[2], render_box[3])])
+    )
     try:
         svg_content, svg_warnings, svg_omitted, svg_element_count = None, (), None, 0
         svg_degraded: tuple = ()
@@ -858,6 +870,7 @@ def export_vector_outputs(
                 omit_unsupported,
                 suggest_solids_footprint,
                 stats=stats,
+                render_box=box,
             )
             svg_element_count = _validate_svg(svg_content)
             svg_degraded = stats.get("degraded", ())
@@ -871,6 +884,7 @@ def export_vector_outputs(
             suggest_solids_footprint,
             stats=stats,
             text_layer=text_layer,
+            render_box=box,
         )
         if draw_svg and svg_omitted != pdf_omitted:
             raise CadProcessingError(

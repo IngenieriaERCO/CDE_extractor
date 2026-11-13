@@ -116,6 +116,16 @@ def _format_block(detail: ExtractedDetail) -> list[str]:
         lines += _line("No copiadas", str(selection.not_copied))
         lines += _line("De longitud nula (no se dibujan)", str(selection.zero_length))
         lines += _line("Sin caja (fuera de la zona)", str(selection.without_bounds))
+        if selection.clipped:
+            crossing = ", ".join(f"{kind} {count}" for kind, count in selection.not_clipped)
+            lines += _line(
+                "Recorte a la zona",
+                f"{selection.clipped_entities} recortadas ({selection.clip_pieces} tramos), "
+                f"{selection.outside_removed} quitadas por quedar fuera, sin recortar (enteras): "
+                f"{crossing or 'ninguna'}",
+            )
+        elif selection.window is not None:
+            lines += _line("Recorte a la zona", "no (--no-clip): las entidades entran enteras")
     return lines
 
 

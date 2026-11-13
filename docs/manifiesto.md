@@ -1,4 +1,4 @@
-# Manifiesto de detalle (`cde-detail-manifest`, esquema 1.1)
+# Manifiesto de detalle (`cde-detail-manifest`, esquema 1.2)
 
 Este documento es para quien programe el **componedor de PDF** (la plancha A1). El manifiesto es el contrato técnico de cada detalle extraído: con él se puede identificar, validar y colocar el PDF sin volver a leer el DXF de origen.
 
@@ -44,6 +44,7 @@ def cad_to_page_mm(x, y):          # coordenadas del Model Space -> mm de págin
 
 - `schema_version` versiona este contrato. Un cambio de la versión menor (`1.1`) solo añade información; un cambio de la mayor (`2.0`) puede romper a quien lo lea.
 - `1.1` (2026-11-11) añade `options.include_hidden_layers`, `selection` (paquetes de `cad extract-modelspace`) y los avisos de capas ocultas (`HIDDEN_LAYERS_CONTENT`, `HIDDEN_LAYERS_INCLUDED`, `MODELSPACE_HIDDEN_OVERLAP`) y del Model Space (`MODELSPACE_NOT_COPIED`, `MODELSPACE_ZERO_LENGTH`, `MODELSPACE_WITHOUT_BOUNDS`). Un lector de la `1.0` puede leerlo si ignora las claves que no conoce (comprobado con el componedor el 2026-11-12: integridad y coherencia pasan).
+- `1.2` (2026-11-12) añade `selection.clip` (recorte a la zona) y los avisos `MODELSPACE_CLIPPED` (info) y `MODELSPACE_NOT_CLIPPED` (warning).
 - `model_version` es la versión del modelo interno del detalle (hoy `"2"`). Es un dato de trazabilidad: el componedor no debería depender de ella.
 
 ## Campos
@@ -53,7 +54,7 @@ def cad_to_page_mm(x, y):          # coordenadas del Model Space -> mm de págin
 | Campo | Tipo | Significado |
 |---|---|---|
 | `document_type` | texto | Siempre `"cde-detail-manifest"`. |
-| `schema_version` | texto | Versión de este esquema (`"1.1"`). |
+| `schema_version` | texto | Versión de este esquema (`"1.2"`). |
 | `model_version` | texto | Versión del modelo interno (`"2"`). |
 | `generated_at` | texto o null | Fecha y hora de la extracción (ISO 8601 con zona horaria). |
 
@@ -154,7 +155,7 @@ Si no se indica la severidad, es `warning`.
 
 ### `selection`
 
-Desde la 1.1. `null` si se exportó un bloque (`cad extract-block`). En un paquete de `cad extract-modelspace`: `kind` (`"modelspace"`), `layers` y `exclude_layers` (patrones pedidos; lista vacía = todas), `window` (`[xmin, ymin, xmax, ymax]` en coordenadas CAD, o null), `window_from_block` (bloque del que se tomó la zona, o null), `entities` (entidades del Model Space elegidas; un INSERT cuenta una), `not_copied`, `zero_length_skipped` y `without_bounds_skipped`. En esos paquetes, `source.block_name` es el bloque de trabajo que agrupa la selección («Model_Space») y `source.reference` su INSERT en (0, 0, 0): las coordenadas CAD siguen siendo las del Model Space de origen.
+Desde la 1.1. `null` si se exportó un bloque (`cad extract-block`). En un paquete de `cad extract-modelspace`: `kind` (`"modelspace"`), `layers` y `exclude_layers` (patrones pedidos; lista vacía = todas), `window` (`[xmin, ymin, xmax, ymax]` en coordenadas CAD, o null), `window_from_block` (bloque del que se tomó la zona, o null), `entities` (entidades del Model Space elegidas; un INSERT cuenta una), `not_copied`, `zero_length_skipped`, `without_bounds_skipped` y, desde la 1.2, `clip`: null sin recorte (sin zona o con `--no-clip`), o `clipped_entities` (entidades recortadas), `pieces` (tramos que quedaron), `outside_removed` (las que solo tocaban la zona con su caja) y `not_clipped` (lista de `{type, count}`: lo que cruza el borde y entra entero). Con recorte, `pdf.page_size_mm` es la zona (ampliada solo por lo que entra entero y cruza el borde) y `pdf.drawing.cad_bounds` la caja de lo dibujado, que puede ser menor. En esos paquetes, `source.block_name` es el bloque de trabajo que agrupa la selección («Model_Space») y `source.reference` su INSERT en (0, 0, 0): las coordenadas CAD siguen siendo las del Model Space de origen.
 
 ### `options`
 
@@ -187,7 +188,7 @@ Termina con código 0 («Paquete completo y coherente») o con código 1 y la li
 ```json
 {
   "document_type": "cde-detail-manifest",
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "model_version": "2",
   "source": {"dxf_name": "prueba_erco_perfil.dxf", "dxf_sha256": "1f1726e9…c07b38ed", "dxf_bytes": 58025354, "block_name": "Perfil_K0010"},
   "scale": {"requested": "1:50", "denominator": 50.0, "factor_mm_per_cad_unit": 20.0, "physical_scale_guaranteed": true, "physical_scale_reason": null},

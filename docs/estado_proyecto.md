@@ -1,6 +1,6 @@
 # Estado del proyecto — Exportador Vectorial
 
-Último hito: Fase 4, pasos 5, 6 y 7 — avisos críticos que bloquean, manifiesto publicado como tercer archivo y `--all` todo o nada (consulta git log para el hash). Después, ajuste para los planos de PVcase (3DSOLID con transform binario y MULTILEADER; sección «Ajuste Fase 4: planos de PVcase»). Después, PDF sin rectángulo blanco de fondo de página (sección «Ajuste: PDF sin fondo de página»). Después, arreglo de `--help` y orden `cad extract-all-blocks` (sección «Ajuste: `--help` y exportación de proyecto»). Último ajuste, en la rama `trabajo/capas-ocultas-model-space`: avisos de capas ocultas, `--include-hidden-layers`, orden `cad extract-modelspace` y copia por partes de DXF muy grandes (sección «Ajuste: capas ocultas y Model Space»). 483 pruebas pasando, ruff limpio.
+Último hito: Fase 4, pasos 5, 6 y 7 — avisos críticos que bloquean, manifiesto publicado como tercer archivo y `--all` todo o nada (consulta git log para el hash). Después, ajuste para los planos de PVcase (3DSOLID con transform binario y MULTILEADER; sección «Ajuste Fase 4: planos de PVcase»). Después, PDF sin rectángulo blanco de fondo de página (sección «Ajuste: PDF sin fondo de página»). Después, arreglo de `--help` y orden `cad extract-all-blocks` (sección «Ajuste: `--help` y exportación de proyecto»). Último ajuste, en la rama `trabajo/capas-ocultas-model-space`: avisos de capas ocultas, `--include-hidden-layers`, orden `cad extract-modelspace` y copia por partes de DXF muy grandes y recorte a la zona en `extract-modelspace` (sección «Ajuste: capas ocultas y Model Space»). 499 pruebas pasando, ruff limpio.
 
 ## Plan en 4 fases
 1. Selección de bloque + escala — hecha.
@@ -218,8 +218,24 @@ Hecho (punto 3, DXF muy grandes):
 - Encontrado con el DXF real: 22 polilíneas de 2–3 mm (coordenadas de millones de metros) a las que ezdxf no calcula caja; `extract-modelspace` usa entonces la caja de sus vértices (`_points_bounds`).
 - Pruebas: `tests/test_large_dxf.py` (5: qué bloques se vacían, la copia es el original sin unas líneas y pasa la auditoría, umbral y DXF binario, `extract-block` con la copia da el mismo dibujo y el hash del original, proyecto y Model Space) y una en `tests/test_modelspace_commands.py`. 483 pruebas pasando, ruff limpio, hash de Perfil sin cambios.
 
+Commit `fb68fd4` (C: copia por partes, 483 pruebas).
+
+Hecho (recorte a la zona; antes era el punto 5 y Luis Angel lo adelantó porque sin recorte la página de las curvas cubría todo el terreno):
+- `clipping.py` (nuevo): Liang–Barsky en XY por segmento; Z y ancho (constante o por vértice) interpolados en el corte; un tramo por cada paso dentro de la ventana; las cerradas quedan en tramos abiertos y, si el corte cae en el comienzo del anillo, el último tramo se une al primero. Se recortan LINE, POLYLINE 3D y POLYLINE 2D/LWPOLYLINE de tramos rectos y planta XY; lo demás (arcos, círculos, splines, texto, HATCH, INSERT, mallas, polilíneas con bulge o ajustadas) entra entero. Lo entero dentro no se toca.
+- `extract-modelspace`: con zona recorta por defecto (`--no-clip` para no recortar). La página es la zona: `exporters.export_vector_outputs(render_box=…)` fija el rectángulo que se coloca en la página y el flujo usa la zona como caja efectiva (`page_window`); si algo que no se recorta cruza el borde, la página se amplía con su caja. Lo dibujado (`drawn_size`, `drawn_bounds`, `cad_bounds` del manifiesto) se sigue midiendo en la geometría real, así que «Escala del dibujo» y la coherencia del componedor siguen valiendo.
+- Avisos `MODELSPACE_CLIPPED` (info) y `MODELSPACE_NOT_CLIPPED` (warning); `--list` da la página con recorte. Manifiesto 1.2: `selection.clip` (`_ADDED_IN`: los 1.1 sin esa clave siguen siendo válidos). TXT: línea «Recorte a la zona».
+- Pruebas: `tests/test_clipping.py` (15: segmentos, zigzag que entra y sale tres veces, anillo cerrado cortado en su comienzo, cerrado dentro, Z y ancho interpolados, LINE y LWPOLYLINE con ancho constante y propiedades, bulge y círculo enteros, curva 3D de 2 001 vértices en 7 tramos, POLYLINE 2D cerrada con ancho por vértice, superposición exacta con el PDF de `extract-block`, arco que cruza y amplía la página) y las de `test_modelspace_commands.py` actualizadas (`--no-clip` y recorte). 499 pruebas pasando, ruff limpio, hash de Perfil sin cambios.
+- Prueba real (DXF original de 830 MB, `--layers LaEstación1_Contours --include-hidden-layers --window-from-block BLOQUE1`, carpeta `data/output/curvas_recorte_2026-11-12/`):
+  - Curvas a 1:2000: página 405,840 × 496,072 mm (la zona de BLOQUE1), 2 682 curvas (28 recortadas en 62 tramos, 1 quitada, 0 enteras), 2 706 trazados, 39 216 segmentos, PDF de 337 KB, pico de 688 MB en uso; todas las comprobaciones en [OK]. Tardó 6 200 s, pero con el equipo sin memoria (189 MB libres): la misma exportación a 1:5000 tardó 167 s.
+  - Curvas a 1:5000: página 168,336 × 204,429 mm (cabe en A1), mismos trazos, PDF de 341 KB, 167 s, pico de 703 MB.
+  - BLOQUE1 a 1:2000 (`--solids footprint --omit-unsupported`): página 405,840 × 496,072 mm, 69 304 trazados, PDF de 1,76 MB, 812 s, pico de 814 MB.
+  - Superposición: página de las curvas y de BLOQUE1 a 1:2000 idéntica (diferencia 0,000 mm) y matriz CAD → página igual salvo 0,0007 pt (0,0003 mm) en la traslación X.
+  - El aviso «el bloque contiene entidades sin caja» de las curvas lo dan las polilíneas de 2–3 mm que ezdxf no mide; no afecta al dibujo.
+
 Límites:
-- Lo suelto que se cuenta es todo lo que no es un INSERT. Un INSERT suelto en una capa oculta (cuyo contenido en la capa «0» no se vería) no se cuenta.
+- Lo suelto que se cuenta es todo lo que no es un INSERT.
+- El recorte no corta arcos, círculos, splines ni polilíneas con arcos: entran enteros y amplían la página si cruzan el borde.
+- Un tipo de línea discontinuo vuelve a empezar su patrón en cada tramo recortado. Un INSERT suelto en una capa oculta (cuyo contenido en la capa «0» no se vería) no se cuenta.
 - La zona del detalle es su caja: algo oculto puede «tocar» la caja sin estar encima del dibujo.
 
 ## Otros

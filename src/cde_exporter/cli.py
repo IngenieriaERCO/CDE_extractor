@@ -228,6 +228,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--occurrence", type=int, help="Referencia de --window-from-block si hay varias"
     )
     modelspace_command.add_argument(
+        "--no-clip",
+        action="store_true",
+        help="Con zona, no recorta: cada entidad que toca la zona entra entera",
+    )
+    modelspace_command.add_argument(
         "--list",
         action="store_true",
         help="Solo muestra qué se exportaría (entidades, vértices, tamaño); no crea archivos",

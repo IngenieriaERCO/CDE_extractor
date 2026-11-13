@@ -34,6 +34,13 @@ from cde_exporter.cad.block_extractor import (
     _multileader_mapping_once,
     _restore_default_resources,
 )
+from cde_exporter.cad.clipping import (
+    ClipReport,
+    clip_layout,
+    inside,
+    is_clippable,
+    union_boxes,
+)
 from cde_exporter.cad.detail_model import ModelSpaceSelection
 from cde_exporter.cad.hidden_layers import layer_state, parse_layer_selection
 from cde_exporter.cad.models import CadProcessingError
@@ -234,10 +241,31 @@ def _unique_block_name(document: Drawing) -> str:
     return name
 
 
-def working_document(document: Drawing, entities: tuple) -> tuple[Drawing, str, int]:
+def _bounds(entity) -> tuple[float, float, float, float] | None:
+    return entity_bounds(entity) or _points_bounds(entity)
+
+
+def clip_preview(entities, window) -> tuple[tuple[float, float, float, float], Counter]:
+    """Página que daría el recorte (la ventana, ampliada con lo que no se puede recortar y
+    cruza el borde) y esas entidades por tipo, sin copiar nada (para --list)."""
+    box, crossing = window, Counter()
+    for entity in entities:
+        bounds = _bounds(entity)
+        if bounds is None or inside(bounds, window) or is_clippable(entity):
+            continue
+        crossing[entity.dxftype()] += 1
+        box = union_boxes(box, bounds)
+    return box, crossing
+
+
+def working_document(
+    document: Drawing, entities: tuple, clip_window=None
+) -> tuple[Drawing, str, int, ClipReport | None]:
     """Copia las entidades elegidas a un DXF nuevo y las agrupa en un bloque de trabajo.
 
-    Devuelve el documento, el nombre del bloque y cuántas entidades no se pudieron copiar.
+    Con ``clip_window``, recorta la copia contra esa ventana (``clipping.clip_layout``).
+    Devuelve el documento, el nombre del bloque, cuántas entidades no se pudieron copiar y el
+    informe del recorte (None sin recorte).
     Las coordenadas no cambian: el bloque tiene su base en (0, 0, 0) y se inserta ahí, así
     que la matriz CAD → página del manifiesto sigue en coordenadas del Model Space de origen.
     """
@@ -250,17 +278,23 @@ def working_document(document: Drawing, entities: tuple) -> tuple[Drawing, str, 
     _restore_default_resources(document, target)
     target.header["$INSUNITS"] = int(document.header.get("$INSUNITS", 0) or 0)
     modelspace = target.modelspace()
+    copied_count = len(modelspace)
+    clip = None if clip_window is None else clip_layout(modelspace, clip_window, _bounds)
     copied = list(modelspace)
     name = _unique_block_name(target)
     block = target.blocks.new(name)
     for entity in copied:
         modelspace.move_to_layout(entity, block)
     modelspace.add_blockref(name, (0, 0, 0))
-    return target, name, len(entities) - len(copied)
+    return target, name, len(entities) - copied_count, clip
 
 
 def _print_list(
-    selection: Selection, document: Drawing, args, reveal: frozenset[str] | None
+    selection: Selection,
+    document: Drawing,
+    args,
+    reveal: frozenset[str] | None,
+    clip_window=None,
 ) -> None:
     states = {str(layer.dxf.name).casefold(): layer_state(layer) for layer in document.layers}
     print(
@@ -280,13 +314,21 @@ def _print_list(
         print(f"De longitud nula (no se dibujarían): {selection.zero_length}")
     if selection.without_bounds:
         print(f"Sin caja (no se pueden situar en la zona): {selection.without_bounds}")
-    if selection.box is None:
+    box = selection.box
+    if clip_window is not None and box is not None:
+        box, crossing = clip_preview(selection.entities, clip_window)
+        print("Con recorte a la zona: la página mide la zona" + (
+            "." if not crossing else
+            ", ampliada por lo que no se puede recortar y cruza el borde: "
+            + ", ".join(f"{kind} {count}" for kind, count in sorted(crossing.items())) + "."
+        ))
+    if box is None:
         print("Tamaño: no calculable (ninguna entidad con caja).")
         return
-    width, height = selection.box[2] - selection.box[0], selection.box[3] - selection.box[1]
+    width, height = box[2] - box[0], box[3] - box[1]
     print(
-        f"Caja CAD (xmin, ymin, xmax, ymax): ({selection.box[0]:.3f}, {selection.box[1]:.3f}, "
-        f"{selection.box[2]:.3f}, {selection.box[3]:.3f}); {width:.3f} × {height:.3f} unidades"
+        f"Caja CAD (xmin, ymin, xmax, ymax): ({box[0]:.3f}, {box[1]:.3f}, "
+        f"{box[2]:.3f}, {box[3]:.3f}); {width:.3f} × {height:.3f} unidades"
     )
     code = int(document.header.get("$INSUNITS", 0) or 0)
     if args.units:
@@ -327,14 +369,23 @@ def run_extract_modelspace(args) -> int:
         + ("" if window is None else " en la zona pedida")
         + "."
     )
+    clip_window = window if window is not None and not args.no_clip else None
     if args.list:
-        _print_list(selection, document, args, reveal)
+        _print_list(selection, document, args, reveal, clip_window)
         return 0
     if not selection.entities:
         raise CadProcessingError(
             "La selección del Model Space está vacía; no se generaron archivos."
         )
-    working, block_name, not_copied = working_document(document, selection.entities)
+    working, block_name, not_copied, clip = working_document(
+        document, selection.entities, clip_window
+    )
+    if clip is not None:
+        print(
+            f"Recorte a la zona: {clip.clipped} entidades recortadas ({clip.pieces} tramos), "
+            f"{clip.outside} fuera de la zona quitadas, "
+            f"{sum(clip.not_clipped.values())} sin recortar (entran enteras)."
+        )
     sys.stdout.flush()
     values = dict(vars(args))
     values.update(
@@ -353,6 +404,19 @@ def run_extract_modelspace(args) -> int:
             not_copied=not_copied,
             zero_length=selection.zero_length,
             without_bounds=selection.without_bounds,
+            clipped=clip is not None,
+            clipped_entities=0 if clip is None else clip.clipped,
+            clip_pieces=0 if clip is None else clip.pieces,
+            outside_removed=0 if clip is None else clip.outside,
+            not_clipped=tuple(sorted(clip.not_clipped.items())) if clip is not None else (),
+        ),
+        # Con recorte, la página es la ventana (ampliada por lo que entra entero y la cruza).
+        page_window=None
+        if clip is None
+        else (
+            clip_window
+            if clip.not_clipped_bounds is None
+            else union_boxes(clip_window, clip.not_clipped_bounds)
         ),
     )
     return block_commands.run_extract_block(argparse.Namespace(**values), working)

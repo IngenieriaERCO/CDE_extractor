@@ -109,6 +109,12 @@ WARNING_CODES: dict[str, tuple[NoticeCategory, str | None]] = {
         "Revise en el CAD si esas entidades son necesarias en el PDF.",
     ),
     "MODELSPACE_ZERO_LENGTH": (NoticeCategory.ENTITIES, None),
+    "MODELSPACE_CLIPPED": (NoticeCategory.ENTITIES, None),
+    "MODELSPACE_NOT_CLIPPED": (
+        NoticeCategory.ENTITIES,
+        "Solo se recortan líneas y polilíneas de tramos rectos; use --no-clip para que todo "
+        "entre entero.",
+    ),
     "SOURCE_UNUSED_BLOCKS_SKIPPED": (NoticeCategory.ENTITIES, None),
     "MODELSPACE_WITHOUT_BOUNDS": (
         NoticeCategory.ENTITIES,

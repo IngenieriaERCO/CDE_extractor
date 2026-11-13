@@ -196,6 +196,14 @@ class ModelSpaceSelection:
     not_copied: int = 0
     zero_length: int = 0
     without_bounds: int = 0
+    # Recorte a la zona (por defecto con zona; --no-clip lo quita): entidades recortadas, tramos
+    # que quedaron, las que resultaron estar fuera y, por tipo, las que cruzan el borde y entran
+    # enteras porque no se pueden recortar.
+    clipped: bool = False
+    clipped_entities: int = 0
+    clip_pieces: int = 0
+    outside_removed: int = 0
+    not_clipped: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
