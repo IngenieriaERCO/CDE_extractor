@@ -62,15 +62,13 @@ def verify_drawing_units(
     block_unit = UNIT_MM_PER_UNIT.get(block_units_code)
     selected = dxf_unit or block_unit
     warnings = []
-    # Heuristics: meters with >=1000 block units; or INSERT scale 0.001 at >=1e6 units.
+    # Indicios: el DXF y el bloque declaran unidades distintas, o un INSERT a escala 0.001 con
+    # coordenadas de un millón o más. Un bloque de 1000 m o más con $INSUNITS en metros ya no se
+    # marca: en ERCO las plantas y las vías miden kilómetros (aviso falso con GUAMO_prueba.dxf).
+    # ``max_block_dimension`` se conserva en la firma por compatibilidad.
     if dxf_unit and block_unit and dxf_units_code != block_units_code:
         warnings.append(
             f"$INSUNITS declara {dxf_unit[0]} y el bloque declara {block_unit[0]}"
-        )
-    if dxf_units_code == 6 and max_block_dimension is not None and max_block_dimension >= 1000:
-        warnings.append(
-            "el bloque mide 1000 o más unidades aunque $INSUNITS declara metros; "
-            "podrían ser coordenadas expresadas en milímetros"
         )
     if any(math.isclose(abs(value), 0.001, rel_tol=0.0, abs_tol=1e-9) for value in insert_scale):
         if max(abs(value) for value in insert_position) >= 1_000_000:

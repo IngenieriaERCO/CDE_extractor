@@ -257,13 +257,15 @@ def test_user_units_override_unknown_declaration() -> None:
     assert verification.verified
 
 
-def test_declared_meters_with_millimeter_sized_geometry_is_flagged() -> None:
+def test_declared_meters_are_trusted_even_for_large_blocks() -> None:
+    """Una planta solar de 2,5 km en metros no es un indicio de milímetros (GUAMO_prueba.dxf:
+    957 × 1350 m daba un aviso falso). Si las unidades son otras, se corrige con --units."""
     verification = verify_drawing_units(
         6, 0, max_block_dimension=2500, insert_scale=(1, 1, 1), insert_position=(0, 0, 0)
     )
-    assert verification.status == "con indicios de inconsistencia"
-    assert not verification.verified
-    assert "coordenadas expresadas en milímetros" in " ".join(verification.warnings)
+    assert verification.status == "declaradas en el DXF y coherentes"
+    assert verification.verified
+    assert verification.warnings == ()
 
 
 def test_small_insert_scale_with_large_coordinates_is_flagged() -> None:

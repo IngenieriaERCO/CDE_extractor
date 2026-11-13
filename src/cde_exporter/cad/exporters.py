@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pymupdf
-from ezdxf import bbox
+from ezdxf import bbox, xclip
 from ezdxf.addons.drawing import Frontend, RenderContext, config, layout
 from ezdxf.addons.drawing import pymupdf as pdf_backend
 from ezdxf.addons.drawing import svg as svg_backend
@@ -24,6 +24,7 @@ from ezdxf.addons.drawing.config import HatchPolicy
 from ezdxf.addons.drawing.pipeline import prepare_string_for_rendering
 from ezdxf.addons.drawing.properties import LayoutProperties
 from ezdxf.document import Drawing
+from ezdxf.entities import Insert
 from ezdxf.math import BoundingBox2d, Matrix44, Vec2, Vec3
 from ezdxf.path import nesting
 from ezdxf.render import hatching
@@ -43,6 +44,71 @@ HATCHING_TIMEOUT = 30.0
 # Altura de las mayúsculas de Helvetica, en fracción del tamaño de letra.
 HELVETICA_CAP_HEIGHT = 0.718
 _POINTS_PER_MM = 72 / 25.4
+
+# Reutilización de bloques (``_StrictFrontend``): con CDE_INSTANCING=0 se dibuja cada INSERT
+# entero, como antes (para comparar).
+INSTANCING_ENV = "CDE_INSTANCING"
+# Lo que impide reutilizar el dibujo de un bloque: texto (capa de texto buscable), cotas y
+# similares, lo que depende de la vista o del tamaño (puntos, imágenes, WIPEOUT) y lo que el
+# exportador trata aparte (sólidos, proxies). Los HATCH solo si son sólidos: el patrón se
+# alinea con el origen del dibujo, no con el del bloque.
+_NOT_INSTANCEABLE = frozenset(
+    {
+        "TEXT", "MTEXT", "ATTRIB", "DIMENSION", "ARC_DIMENSION", "LARGE_RADIAL_DIMENSION",
+        "LEADER", "MULTILEADER", "MLEADER", "ACAD_TABLE", "TOLERANCE", "IMAGE", "WIPEOUT",
+        "POINT", "SHAPE", "VIEWPORT", "OLE2FRAME", "ACAD_PROXY_ENTITY", "3DSOLID", "REGION",
+        "BODY", "SURFACE", "MESH", "PDFUNDERLAY", "DWFUNDERLAY", "DGNUNDERLAY",
+    }
+)
+
+
+def instancing_enabled() -> bool:
+    return os.environ.get(INSTANCING_ENV, "").strip() not in {"0", "no", "false"}
+
+
+def _instanceable_insert(insert) -> bool:
+    """El INSERT en sí: sin atributos, sin matriz de filas y columnas, sin recorte XCLIP y en
+    planta (extrusión 0, 0, 1)."""
+    if insert.attribs or insert.mcount > 1:
+        return False
+    if insert.has_extension_dict:
+        clip = xclip.XClip(insert)
+        if clip.has_clipping_path and clip.is_clipping_enabled:
+            return False
+    extrusion = insert.dxf.get("extrusion", (0, 0, 1))
+    return abs(extrusion[0]) < 1e-12 and abs(extrusion[1]) < 1e-12 and extrusion[2] > 0
+
+
+def _instanceable_block(document, name: str, known: dict[str, bool], stack=()) -> bool:
+    """¿Sale igual el dibujo de este bloque en cualquier sitio donde se inserte?"""
+    if name in known:
+        return known[name]
+    if name in stack or document is None or name not in document.blocks:
+        return False
+    result = True
+    for entity in document.blocks[name]:
+        kind = entity.dxftype()
+        if kind in _NOT_INSTANCEABLE:
+            result = False
+        elif kind == "HATCH" and not entity.dxf.get("solid_fill", 0):
+            result = False
+        elif kind == "INSERT":
+            result = _instanceable_insert(entity) and _instanceable_block(
+                document, entity.dxf.name, known, (*stack, name)
+            )
+        if not result:
+            break
+    known[name] = result
+    return result
+
+
+@dataclass(slots=True)
+class _Instance:
+    """Dibujo grabado de un bloque, en coordenadas del bloque, y lo invisible que contiene."""
+
+    records: list
+    invisible: int
+
 
 @dataclass(frozen=True, slots=True)
 class TextRun:
@@ -90,6 +156,12 @@ class _StrictFrontend(Frontend):
         backend = args[1] if len(args) > 1 else kwargs.get("backend")
         # Los backends SVG y PDF de ezdxf graban los trazos en ``records``.
         self._records = getattr(backend, "records", None)
+        # Bloques con muchas referencias idénticas: el primer INSERT se dibuja entero y su
+        # grabación se reutiliza en los demás, colocada con su matriz (``_draw_instance``).
+        self.instancing = instancing_enabled() and self._records is not None
+        self._instances: dict[tuple, _Instance | None] = {}
+        self._instanceable: dict[str, bool] = {}
+        self.instances_reused = 0
         if capture_text:
             self.pipeline.draw_text = self._capture_text(self.pipeline.draw_text)
 
@@ -149,6 +221,73 @@ class _StrictFrontend(Frontend):
                 and len(self.skipped) + sum(self.omitted.values()) + self.invisible == reported
             ):
                 self.skip_entity(entity, "unsupported")
+
+    def draw_composite_entity(self, entity, properties) -> None:
+        key = self._instance_key(entity, properties) if self.instancing else None
+        if key is None:
+            super().draw_composite_entity(entity, properties)
+            return
+        matrix = entity.matrix44()
+        cached = self._instances.get(key, False)
+        if cached:
+            self._replay_instance(cached, matrix, entity)
+            return
+        before = (
+            len(self.skipped), sum(self.omitted.values()), len(self.text_runs),
+            len(self.degraded), len(self.messages),
+        )
+        invisible, start = self.invisible, len(self._records)
+        super().draw_composite_entity(entity, properties)
+        after = (
+            len(self.skipped), sum(self.omitted.values()), len(self.text_runs),
+            len(self.degraded), len(self.messages),
+        )
+        if cached is None or after != before:
+            # Algo distinto de trazos (una omisión, un aviso…): ese bloque no se reutiliza.
+            self._instances[key] = None
+            return
+        inverse = matrix.copy()
+        inverse.inverse()
+        records = [copy.deepcopy(record) for record in self._records[start:]]
+        for record in records:
+            record.transform_inplace(inverse)
+        self._instances[key] = _Instance(records, self.invisible - invisible)
+
+    def _instance_key(self, entity, properties) -> tuple | None:
+        """Clave de los INSERT que se dibujan igual; None si este no se puede reutilizar."""
+        if not isinstance(entity, Insert) or self.pipeline.clipping_portal.is_active:
+            return None
+        if not _instanceable_insert(entity):
+            return None
+        name = entity.dxf.name
+        if not _instanceable_block(entity.doc, name, self._instanceable):
+            return None
+        # Lo que hereda el contenido del INSERT (PorBloque y capa «0») y la escala, con su signo
+        # (el tipo de línea depende del tamaño).
+        return (
+            name,
+            properties.color,
+            properties.pen,
+            properties.linetype_name,
+            tuple(properties.linetype_pattern),
+            properties.linetype_scale,
+            properties.lineweight,
+            properties.layer,
+            properties.is_visible,
+            round(float(entity.dxf.get("xscale", 1)), 12),
+            round(float(entity.dxf.get("yscale", 1)), 12),
+            round(float(entity.dxf.get("zscale", 1)), 12),
+        )
+
+    def _replay_instance(self, cached: _Instance, matrix: Matrix44, entity) -> None:
+        handle = str(entity.dxf.get("handle") or "")
+        for record in cached.records:
+            placed = copy.deepcopy(record)
+            placed.transform_inplace(matrix)
+            placed.handle = handle
+            self._records.append(placed)
+        self.invisible += cached.invisible
+        self.instances_reused += 1
 
     def skip_entity(self, entity, msg: str) -> None:
         if msg == "invisible":

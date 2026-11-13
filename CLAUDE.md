@@ -9,7 +9,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - Lee cada archivo antes de editarlo. Pide confirmación antes de cambios grandes.
 
 ## Verificación (siempre antes de dar algo por terminado)
-- `python -m pytest -q --tb=short` (referencia: 499 pruebas pasando).
+- `python -m pytest -q --tb=short` (referencia: 504 pruebas pasando).
 - `ruff check src tests`.
 - NO ejecutar `ruff format` sobre archivos existentes (solo en archivos nuevos).
 - NO usar `pytest -s` (las pruebas del aviso de escala esperarían entrada).
@@ -36,6 +36,8 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - Todo se trabaja en carpetas temporales dentro de la carpeta de salida (una por referencia, que se borran al terminar la orden) y se publica de forma atómica (`_publish_files`).
 - La escala se pide al usuario tras identificar el bloque (`--scale 1:N` o pregunta interactiva). Sin terminal y sin `--scale`: aviso.
 - Factor de salida = mm por unidad CAD × escala del INSERT ÷ N. No afirmar escala física si las unidades no están verificadas.
+- Unidades: con `$INSUNITS` en metros no se marca un bloque de 1000 m o más como «posibles milímetros» (aviso falso en plantas y vías); siguen los indicios de unidades distintas entre DXF y bloque y de INSERT a escala 0,001 con coordenadas de millones (`scale.verify_drawing_units`).
+- Reutilización de bloques (`exporters._StrictFrontend`): el primer INSERT de un bloque se dibuja entero y su grabación (registros del backend de ezdxf, en coordenadas del bloque) se reutiliza en los INSERT idénticos, colocada con su matriz. Solo con la misma definición, las mismas propiedades resueltas del INSERT (PorBloque, capa «0»…), la misma escala con signo y extrusión en planta; sin atributos, MINSERT ni XCLIP, sin recorte activo en la cadena y sin texto, cotas, HATCH con patrón, imágenes, puntos, sólidos o proxies en el bloque; si el primer dibujo deja algo más que trazos (omisión, aviso…), no se reutiliza. `CDE_INSTANCING=0` lo desactiva. El PDF no cambia (0 píxeles distintos en GUAMO).
 - La escala del dibujo se mide en el propio PDF (comprobación "Escala del dibujo" de `pdf_checks`: puntos de los trazos frente a la caja que grabó ezdxf; tolerancia 0,01 mm por eje). Es una advertencia, no bloquea; la escala física solo es "garantizada" si las unidades están verificadas y esa comprobación pasa. La página PDF se crea con su tamaño exacto en puntos (`_PdfBackend`; ezdxf la truncaba a puntos enteros).
 - `detail_model.py` solo usa la biblioteca estándar (sin ezdxf).
 - Variable de desarrollo `CDE_KEEP_INTERMEDIATES=1` conserva `.dxf` y `.svg` (con `--solids footprint`, el `.dxf` es la copia de render).
