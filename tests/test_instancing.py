@@ -1,7 +1,10 @@
-"""Reutilización del dibujo de un bloque con muchas referencias idénticas (``_StrictFrontend``).
+"""Reutilización del dibujo de un bloque con muchas referencias idénticas (``_StrictFrontend``)
+y, en el PDF, su escritura como Form XObject colocado con su matriz.
 
 Cada caso se exporta con y sin reutilización (CDE_INSTANCING=0) y se exige el mismo PDF:
-mismos trazados, colores, anchos y posiciones.
+mismos trazados, colores, rellenos, anchos y tramos, y cada trazado en el mismo sitio a menos de
+0,01 pt (PyMuPDF escribe 6 cifras significativas: el redondeo de una coordenada de cientos de
+puntos cambia según se escriba cada trazo en su sitio o una vez dentro del XObject).
 """
 
 import json
@@ -19,6 +22,7 @@ from cde_exporter.cli import main
 def _no_intermediates(monkeypatch):
     monkeypatch.delenv("CDE_KEEP_INTERMEDIATES", raising=False)
     monkeypatch.delenv(exporters.INSTANCING_ENV, raising=False)
+    monkeypatch.delenv(exporters.XOBJECT_ENV, raising=False)
 
 
 @pytest.fixture
@@ -101,21 +105,42 @@ def _export(source: Path, out: Path, monkeypatch, *, instancing: bool) -> Path:
     return prefix
 
 
-def _drawings(pdf: Path) -> list:
+def _drawings(pdf: Path) -> dict:
+    """Página, trazados agrupados por (tipo, color, relleno, ancho, tramos) con su caja, y
+    cuántos Form XObject tiene la página."""
     with pymupdf.open(pdf) as document:
         page = document[0]
-        rows = [
-            (
+        groups: dict = {}
+        for item in page.get_drawings():
+            key = (
                 item["type"],
                 tuple(round(value, 3) for value in item.get("color") or ()),
                 tuple(round(value, 3) for value in item.get("fill") or ()),
                 round(item.get("width") or 0, 3),
-                tuple(round(value, 2) for value in item["rect"]),
                 len(item["items"]),
             )
-            for item in page.get_drawings()
-        ]
-        return [tuple(round(value, 3) for value in page.rect), sorted(rows)]
+            groups.setdefault(key, []).append(tuple(item["rect"]))
+        return {
+            "page": tuple(round(value, 3) for value in page.rect),
+            "groups": groups,
+            "xobjects": len(page.get_xobjects()),
+        }
+
+
+def _assert_same(before: dict, after: dict, tolerance: float = 0.01) -> None:
+    assert after["page"] == before["page"]
+    assert {key: len(rects) for key, rects in after["groups"].items()} == {
+        key: len(rects) for key, rects in before["groups"].items()
+    }
+    for key, rects in before["groups"].items():
+        pending = list(after["groups"][key])
+        for rect in rects:
+            distances = [
+                max(abs(a - b) for a, b in zip(rect, other, strict=True)) for other in pending
+            ]
+            best = min(range(len(pending)), key=distances.__getitem__)
+            assert distances[best] < tolerance, (key, rect, pending[best])
+            pending.pop(best)
 
 
 def _same_pdf(source: Path, tmp_path: Path, monkeypatch) -> tuple[list, list]:
@@ -135,10 +160,11 @@ def test_repeated_modules_are_reused_and_the_pdf_is_the_same(
 
     before, after = _same_pdf(source, tmp_path, monkeypatch)
 
-    assert before == after
+    _assert_same(before, after)
     # 60 módulos con 16 combinaciones distintas (capa, color propio, giro no cuenta,
-    # simetría y escala): el resto se reutiliza.
+    # simetría y escala): el resto se reutiliza, y en el PDF como Form XObject.
     assert len(reused) >= 40
+    assert before["xobjects"] == 0 and after["xobjects"] > 0
     manifest = json.loads((tmp_path / "despues" / "planta.manifest.json").read_text("utf-8"))
     checks = {item["name"]: item["passed"] for item in manifest["validation"]["checks"]}
     assert all(checks.values()), checks
@@ -167,7 +193,7 @@ def test_nested_blocks_and_hidden_layers_inside_are_reused_consistently(
 
     before, after = _same_pdf(source, tmp_path, monkeypatch)
 
-    assert before == after
+    _assert_same(before, after)
     assert len(reused) >= 29
     manifest = json.loads((tmp_path / "despues" / "planta.manifest.json").read_text("utf-8"))
     codes = {
@@ -203,5 +229,33 @@ def test_blocks_that_change_per_reference_are_not_reused(
 
     before, after = _same_pdf(source, tmp_path, monkeypatch)
 
-    assert before == after
+    _assert_same(before, after)
     assert reused == []
+    assert after["xobjects"] == 0
+
+
+def test_copying_the_strokes_instead_of_xobjects_gives_the_same_pdf(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """CDE_XOBJECT=0: se reutiliza el dibujo pero se copian los trazos (como en el SVG)."""
+    source = _source(tmp_path / "planta.dxf", _place_modules)
+    monkeypatch.setenv(exporters.XOBJECT_ENV, "0")
+
+    before, after = _same_pdf(source, tmp_path, monkeypatch)
+
+    _assert_same(before, after)
+    assert after["xobjects"] == 0
+
+
+def test_xobject_package_passes_the_checks_and_verify_package(tmp_path: Path, monkeypatch) -> None:
+    from cde_exporter.cad.manifest import verify_package
+
+    source = _source(tmp_path / "planta.dxf", _place_modules)
+    prefix = _export(source, tmp_path / "salida", monkeypatch, instancing=True)
+
+    assert verify_package(prefix.with_suffix(".pdf")) == ()
+    manifest = json.loads(prefix.with_name("planta.manifest.json").read_text("utf-8"))
+    checks = {item["name"]: item for item in manifest["validation"]["checks"]}
+    # «Escala del dibujo» mide los trazos con get_drawings, que entra en los XObject.
+    assert checks["Escala del dibujo"]["passed"], checks["Escala del dibujo"]["detail"]
+    assert all(item["passed"] for item in checks.values())

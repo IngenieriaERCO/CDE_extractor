@@ -20,9 +20,18 @@ from ezdxf import bbox, xclip
 from ezdxf.addons.drawing import Frontend, RenderContext, config, layout
 from ezdxf.addons.drawing import pymupdf as pdf_backend
 from ezdxf.addons.drawing import svg as svg_backend
+from ezdxf.addons.drawing.backend import BackendProperties
 from ezdxf.addons.drawing.config import HatchPolicy
 from ezdxf.addons.drawing.pipeline import prepare_string_for_rendering
 from ezdxf.addons.drawing.properties import LayoutProperties
+from ezdxf.addons.drawing.recorder import (
+    DataRecord,
+    FilledPathsRecord,
+    ImageRecord,
+    PathRecord,
+    PointsRecord,
+    SolidLinesRecord,
+)
 from ezdxf.document import Drawing
 from ezdxf.entities import Insert
 from ezdxf.math import BoundingBox2d, Matrix44, Vec2, Vec3
@@ -62,8 +71,19 @@ _NOT_INSTANCEABLE = frozenset(
 )
 
 
+# En el PDF, cada bloque reutilizado se escribe una vez como Form XObject y cada INSERT lo coloca
+# con su matriz. CDE_XOBJECT=0 lo quita (los trazos se copian, como con el SVG); CDE_INSTANCING=0
+# quita toda la reutilización.
+XOBJECT_ENV = "CDE_XOBJECT"
+
+
 def instancing_enabled() -> bool:
     return os.environ.get(INSTANCING_ENV, "").strip() not in {"0", "no", "false"}
+
+
+def xobjects_enabled() -> bool:
+    value = os.environ.get(XOBJECT_ENV, "").strip()
+    return instancing_enabled() and value not in {"0", "no", "false"}
 
 
 def _instanceable_insert(insert) -> bool:
@@ -108,6 +128,66 @@ class _Instance:
 
     records: list
     invisible: int
+
+
+class InstanceRecord(DataRecord):
+    """Marca en la grabación: «aquí va el dibujo de ``instance`` colocado con ``matrix``».
+
+    Solo la usa el PDF (``_ExactPageRenderBackend.draw_instance``), que escribe el dibujo una vez
+    como Form XObject y lo coloca en cada marca. ``matrix`` lleva de coordenadas del bloque a las
+    de la grabación; la colocación en la página se le suma con ``transform_inplace``.
+    """
+
+    def __init__(self, instance: _Instance, matrix: Matrix44) -> None:
+        super().__init__()
+        self.instance = instance
+        self.matrix = matrix
+
+    def bbox(self) -> BoundingBox2d:
+        box = BoundingBox2d()
+        for record in self.instance.records:
+            corners = record.bbox()
+            if corners.has_data:
+                box.extend(self.matrix.fast_2d_transform(corners.rect_vertices()))
+        return box
+
+    def transform_inplace(self, m: Matrix44) -> None:
+        self.matrix = Matrix44.chain(self.matrix, m)
+
+    def expanded(self) -> list:
+        """Los registros del bloque colocados (para lo que no sabe de marcas)."""
+        placed = []
+        for record in self.instance.records:
+            item = copy.deepcopy(record)
+            item.transform_inplace(self.matrix)
+            item.handle = self.handle
+            placed.append(item)
+        return placed
+
+
+def replay_record(backend, record, properties) -> None:
+    """Envía un registro al backend, como ``Player.replay`` de ezdxf 1.4.4."""
+    if isinstance(record, PointsRecord):
+        count = len(record.points)
+        if count == 0:
+            return
+        if count > 2:
+            backend.draw_filled_polygon(record.points, properties)
+            return
+        vertices = record.points.vertices()
+        if len(vertices) == 1:
+            backend.draw_point(vertices[0], properties)
+        else:
+            backend.draw_line(vertices[0], vertices[1], properties)
+    elif isinstance(record, SolidLinesRecord):
+        vertices = list(record.lines.vertices())
+        backend.draw_solid_lines(zip(vertices[0::2], vertices[1::2], strict=False), properties)
+    elif isinstance(record, PathRecord):
+        backend.draw_path(record.path, properties)
+    elif isinstance(record, FilledPathsRecord):
+        backend.draw_filled_paths(record.paths, properties)
+    elif isinstance(record, ImageRecord):
+        backend.draw_image(record.image_data, properties)
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +239,8 @@ class _StrictFrontend(Frontend):
         # Bloques con muchas referencias idénticas: el primer INSERT se dibuja entero y su
         # grabación se reutiliza en los demás, colocada con su matriz (``_draw_instance``).
         self.instancing = instancing_enabled() and self._records is not None
+        # Solo el PDF sabe escribir las marcas como XObject (el SVG copia los trazos).
+        self.xobjects = False
         self._instances: dict[tuple, _Instance | None] = {}
         self._instanceable: dict[str, bool] = {}
         self.instances_reused = 0
@@ -281,6 +363,14 @@ class _StrictFrontend(Frontend):
 
     def _replay_instance(self, cached: _Instance, matrix: Matrix44, entity) -> None:
         handle = str(entity.dxf.get("handle") or "")
+        if self.xobjects and cached.records:
+            marker = InstanceRecord(cached, matrix)
+            marker.property_hash = cached.records[0].property_hash
+            marker.handle = handle
+            self._records.append(marker)
+            self.invisible += cached.invisible
+            self.instances_reused += 1
+            return
         for record in cached.records:
             placed = copy.deepcopy(record)
             placed.transform_inplace(matrix)
@@ -647,12 +737,121 @@ class _ExactPageRenderBackend(pdf_backend.PyMuPdfRenderBackend):
         # La forma compartida guarda la altura de la página al crearse: se crea de nuevo.
         self.content_shape = self.page.new_shape()
 
+    def draw_instance(self, marker: InstanceRecord, properties_of) -> None:
+        """Coloca el dibujo de un bloque reutilizado como Form XObject, en este punto del orden.
+
+        La primera vez se dibujan sus registros (colocados con la matriz de esta marca) en la
+        forma de contenido de la página y ese trozo se aparta como contenido del XObject. Cada
+        marca escribe ``q <matriz> cm /Fm Do Q``: la matriz lleva del primer dibujo a este (solo
+        giro, traslación o simetría: la escala es la misma por la clave de la reutilización).
+        """
+        forms = self.__dict__.setdefault("forms", {})
+        shape = self.content_shape
+        key = id(marker.instance)
+        form = forms.get(key)
+        if form is None:
+            assert shape.draw_cont == ""
+            start = len(shape.totalcont)
+            for record in marker.expanded():
+                if isinstance(record, InstanceRecord):
+                    # Bloque anidado ya reutilizado: su propio XObject, dentro de este.
+                    self.draw_instance(record, properties_of)
+                else:
+                    replay_record(self, record, properties_of(record))
+            content = shape.totalcont[start:]
+            shape.totalcont = shape.totalcont[:start]
+            xref = self.doc.get_new_xref()
+            self.doc.update_object(
+                xref,
+                "<< /Type /XObject /Subtype /Form "
+                "/BBox [-100000 -100000 100000 100000] /Resources << >> >>",
+            )
+            self.doc.update_stream(xref, content.encode())
+            name = f"FmCde{len(forms)}"
+            _add_page_xobject(self.doc, self.page.xref, name, xref)
+            inverse = marker.matrix.copy()
+            inverse.inverse()
+            form = (name, xref, inverse)
+            forms[key] = form
+        name, _xref, inverse = form
+        # De la página (arriba a la izquierda) del primer dibujo a la de esta marca, y al espacio
+        # PDF de la forma (``pctm``: PDF -> página; ``ipctm``: página -> PDF).
+        relative = Matrix44.chain(inverse, marker.matrix)
+        page_matrix = pymupdf.Matrix(
+            relative[0, 0],
+            relative[0, 1],
+            relative[1, 0],
+            relative[1, 1],
+            relative[3, 0],
+            relative[3, 1],
+        )
+        transform = shape.pctm * page_matrix * shape.ipctm
+        values = " ".join(_pdf_number(value) for value in tuple(transform))
+        shape.totalcont += f"\nq\n{values} cm\n/{name} Do\nQ\n"
+
+    def link_form_resources(self) -> None:
+        """Los XObject usan los mismos recursos que la página (capas como contenido opcional,
+        transparencias): se les asigna su diccionario de recursos al terminar."""
+        forms = self.__dict__.get("forms", {})
+        if not forms:
+            return
+        kind, value = self.doc.xref_get_key(self.page.xref, "Resources")
+        if kind == "null":
+            return
+        for _name, xref, _inverse in forms.values():
+            self.doc.xref_set_key(xref, "Resources", value)
+
     def set_background(self, color) -> None:
         # ezdxf 1.4.4 pinta el fondo como un rectángulo relleno del tamaño de la página; quiere
         # saltarlo si es blanco, pero compara "#ffffff" con (1.0, 1.0, 1.0) y lo pinta siempre.
         # Aquí no se pinta. El color de fondo lógico sigue siendo blanco (BackgroundPolicy.WHITE
         # en el frontend): el color 7 sale negro y los WIPEOUT, blancos, como hasta ahora.
         return None
+
+
+def _pdf_number(value: float) -> str:
+    """Número para un flujo de contenido PDF: decimal fijo (PDF no admite «1e-13»)."""
+    text = f"{value:.6f}".rstrip("0").rstrip(".")
+    return "0" if text in ("", "-0") else text
+
+
+def _indirect(value: str) -> int | None:
+    parts = value.split()
+    return int(parts[0]) if len(parts) == 3 and parts[2] == "R" else None
+
+
+def _add_page_xobject(doc, page_xref: int, name: str, xref: int) -> None:
+    """Añade ``/name xref 0 R`` a /Resources/XObject de la página, siguiendo las referencias
+    indirectas (PyMuPDF no escribe una ruta de claves que pase por un objeto indirecto)."""
+    target, key = page_xref, "Resources"
+    kind, value = doc.xref_get_key(target, key)
+    if kind == "xref":
+        target, key = _indirect(value), ""
+    sub = f"{key}/XObject" if key else "XObject"
+    kind, value = doc.xref_get_key(target, sub)
+    if kind == "xref":
+        doc.xref_set_key(_indirect(value), name, f"{xref} 0 R")
+    else:
+        doc.xref_set_key(target, f"{sub}/{name}", f"{xref} 0 R")
+
+
+def _replay_with_instances(player, backend) -> None:
+    """``Player.replay`` de ezdxf, pero las marcas de bloques reutilizados se escriben como
+    Form XObject en su lugar del orden de dibujo."""
+    props = player.properties
+
+    def properties_of(record) -> BackendProperties:
+        return BackendProperties(*props[record.property_hash][:4], record.handle)
+
+    backend.configure(player.config)
+    backend.set_background(player.background)
+    for record in player.records:
+        if isinstance(record, InstanceRecord):
+            backend.draw_instance(record, properties_of)
+        else:
+            replay_record(backend, record, properties_of(record))
+    backend.finalize()
+    backend.link_form_resources()
 
 
 class _PdfBackend(pdf_backend.PyMuPdfBackend):
@@ -733,7 +932,10 @@ class _PdfBackend(pdf_backend.PyMuPdfBackend):
             )
         self._init_flip_y = False
         backend = _ExactPageRenderBackend(page, settings, size_mm)
-        player.replay(backend)
+        if any(isinstance(record, InstanceRecord) for record in player.records):
+            _replay_with_instances(player, backend)
+        else:
+            player.replay(backend)
         return backend
 
     def get_pdf_bytes(self, page, *, settings=None, render_box=None) -> bytes:
@@ -801,6 +1003,7 @@ def _draw_to_pdf(
         omit_unsupported=omit_unsupported,
         capture_text=text_layer,
     )
+    frontend.xobjects = frontend.instancing and xobjects_enabled()
     frontend.auto_hatch_threshold = hatch_threshold if hatch_mode == "auto" else None
     if stats is not None:
         # Lo que ya se degradó al dibujar el SVG no se vuelve a intentar (otros 30 s).
