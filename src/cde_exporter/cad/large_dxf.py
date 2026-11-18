@@ -99,9 +99,13 @@ def _text(raw: bytes) -> str:
     return raw.strip().decode("utf-8", "replace")
 
 
-def unused_blocks(path: Path) -> dict[str, tuple[str, int, int]]:
+def unused_blocks(path: Path, digest=None) -> dict[str, tuple[str, int, int]]:
     """Bloques que nada usa (clave: nombre sin mayúsculas), con su nombre, las entidades y los
-    bytes de su contenido. Primera pasada."""
+    bytes de su contenido. Primera pasada.
+
+    Con ``digest`` (p. ej. ``hashlib.sha256()``), le suma todos los bytes leídos: así el hash
+    del archivo sale de esta misma pasada, sin volver a leerlo.
+    """
     section = None
     table = None
     entity = None
@@ -118,6 +122,9 @@ def unused_blocks(path: Path) -> dict[str, tuple[str, int, int]]:
 
     with path.open("rb") as stream:
         for raw_code, raw_value in _pairs(stream):
+            if digest is not None:
+                digest.update(raw_code)
+                digest.update(raw_value)
             code = _code(raw_code)
             if code == 0:
                 value = _text(raw_value)
@@ -247,14 +254,15 @@ def write_without_blocks(source: Path, destination: Path, empty: set[str]) -> in
     return written
 
 
-def prune_unused_blocks(source: Path, destination: Path) -> PrunedSource:
+def prune_unused_blocks(source: Path, destination: Path, digest=None) -> PrunedSource:
     """Escribe en ``destination`` una copia de ``source`` sin el contenido de los bloques que
-    no se usan (dos pasadas por partes). El DXF de origen no se modifica."""
+    no se usan (dos pasadas por partes). El DXF de origen no se modifica. Con ``digest``, la
+    primera pasada le suma el contenido del archivo (ver ``unused_blocks``)."""
     started = time.perf_counter()
     source, destination = Path(source), Path(destination)
     if source.resolve() == destination.resolve():
         raise ValueError("La copia no puede sobrescribir el DXF de origen")
-    unused = unused_blocks(source)
+    unused = unused_blocks(source, digest)
     written = write_without_blocks(source, destination, set(unused))
     emptied = tuple(
         sorted(

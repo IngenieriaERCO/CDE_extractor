@@ -118,6 +118,24 @@ cde-exporter cad extract-modelspace "data\input\obra.dxf" --output-prefix "data\
   entraron. La selección se agrupa en un bloque de trabajo («Model_Space») que solo existe en la
   copia: es el nombre que sale como bloque.
 
+## Inventario en JSON y trabajador (para el Componedor)
+
+`--list --json` escribe por la salida estándar un solo JSON con cada bloque exportable (caja en
+coordenadas del Model Space, tamaño, unidades, nombre del paquete), los que no se exportan con
+su motivo, las capas con sus colores y lo suelto del Model Space. No crea ningún archivo:
+
+```powershell
+cde-exporter cad extract-all-blocks "data\input\obra.dxf" --output-dir "data\output\obra" --list --json --scale 1:50
+```
+
+(En Windows PowerShell 5.1, `>` guarda el archivo en UTF-16: el Componedor lee la salida
+directamente, sin pasar por un archivo.)
+
+`cde-exporter worker` es un proceso que el Componedor deja abierto: lee el DXF una vez y
+atiende pedidos en JSON, uno por línea. El formato está en `docs/protocolo_trabajador.md`. Por
+ahora atiende `load`, `status`, `cancel` y `close`; la vista previa y la exportación llegarán
+en las etapas siguientes.
+
 ## DXF muy grandes
 
 ezdxf carga todo el DXF en memoria. Si el DXF pesa 200 MB o más, `cad extract-block`,

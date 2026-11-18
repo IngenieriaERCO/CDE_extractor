@@ -351,6 +351,11 @@ def _published_status(output_dir: Path, stem: str) -> str:
 
 
 def run_extract_all_blocks(args) -> int:
+    if getattr(args, "json", False):
+        # Inventario en JSON sin trabajador (docs/protocolo_trabajador.md, sección 11).
+        from cde_exporter.cad.list_json import run_list_json
+
+        return run_list_json(args)
     source, output_dir = Path(args.drawing), Path(args.output_dir)
     if output_dir.exists() and not output_dir.is_dir():
         raise CadProcessingError(f"--output-dir no es una carpeta: {output_dir}")

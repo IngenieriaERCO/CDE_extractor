@@ -5,6 +5,7 @@ Solo usa la biblioteca estándar.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import unicodedata
 
@@ -36,6 +37,41 @@ def safe_file_stem(name: str) -> str:
     if stem.upper() in _RESERVED:
         stem += "_"
     return stem
+
+
+# Nombres de paquete del trabajador (docs/protocolo_trabajador.md, 5.1): solo ASCII seguro.
+PACKAGE_NAME_MAX = 60
+PACKAGE_PATH_MAX = 240
+_PACKAGE_ALLOWED = re.compile(r"[^A-Za-z0-9._-]+")
+PACKAGE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")
+
+
+def package_name(name: str, limit: int = PACKAGE_NAME_MAX) -> str:
+    """Nombre de paquete válido para ``name``: letras sin acentos, números, punto, guion y
+    guion bajo, sin empezar por punto y de ``limit`` caracteres como mucho.
+
+    Los acentos y la eñe pasan a su letra sin tilde; lo demás, a ``_``. Si hay que recortar,
+    se añade ``_`` y 6 cifras hexadecimales del SHA-1 del nombre original, para que dos
+    nombres largos distintos no acaben iguales.
+    """
+    plain = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    stem = _PACKAGE_ALLOWED.sub("_", plain).strip("._")
+    stem = re.sub(r"_{2,}", "_", stem) or FALLBACK_STEM
+    if stem.upper() in _RESERVED:
+        stem += "_"
+    if len(stem) > limit:
+        digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:6]
+        stem = f"{stem[: limit - 7].rstrip('._-')}_{digest}"
+    return stem
+
+
+def is_package_name(value: str, limit: int = PACKAGE_NAME_MAX) -> bool:
+    """¿Cumple ``value`` las reglas de nombre de paquete (sin mirar la ruta)?"""
+    return (
+        bool(PACKAGE_NAME_PATTERN.match(value))
+        and len(value) <= limit
+        and value.upper() not in _RESERVED
+    )
 
 
 def unique_stem(base: str, needed: int, used: set[str]) -> str:

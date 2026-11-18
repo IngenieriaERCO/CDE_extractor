@@ -67,6 +67,17 @@ def build_parser() -> argparse.ArgumentParser:
     validate_command = commands.add_parser("validate", help="Valida un archivo PDF")
     validate_command.add_argument("pdf", help="Ruta del PDF que se validará")
 
+    worker_command = commands.add_parser(
+        "worker",
+        help="Trabajador persistente: JSON por líneas (ver docs/protocolo_trabajador.md)",
+    )
+    worker_command.add_argument(
+        "--work-dir", help="Carpeta para temporales y caché de vistas previas"
+    )
+    worker_command.add_argument(
+        "--preview-cache-mb", type=int, default=500, help="Tamaño máximo de la caché (MB)"
+    )
+
     export_command = commands.add_parser("export", help="Exporta una página PDF a SVG")
     export_command.add_argument("pdf", help="Ruta del PDF de origen")
     export_command.add_argument(
@@ -156,6 +167,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--list",
         action="store_true",
         help="Solo muestra qué se exportaría, con su escala y su tamaño; no crea paquetes",
+    )
+    project_command.add_argument(
+        "--json",
+        action="store_true",
+        help="Con --list: escribe por stdout un JSON con bloques, cajas y capas (sin trabajador)",
+    )
+    project_command.add_argument(
+        "--no-layers", action="store_true", help="Con --list --json: sin la tabla de capas"
     )
     project_command.add_argument(
         "--write-scale-map",
@@ -679,6 +698,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
     args = build_parser().parse_args(argv)
+    if args.command == "worker":
+        from cde_exporter.cad.worker import run_worker
+
+        return run_worker(args.work_dir, args.preview_cache_mb)
     if args.command == "cad" and args.cad_command == "extract-block":
         if args.scale is not None and args.scale_factor is not None:
             print("Error CAD: No combines --scale con --scale-factor", file=sys.stderr)
