@@ -24,7 +24,7 @@ from ezdxf.colors import aci2rgb
 from ezdxf.math import BoundingBox
 
 from cde_exporter.cad.file_names import package_name
-from cde_exporter.cad.hidden_layers import layer_state, loose_summary
+from cde_exporter.cad.hidden_layers import STATE_VISIBLE, layer_state, loose_summary
 from cde_exporter.cad.project_commands import (
     REASON_ANONYMOUS,
     REASON_NO_DEFINITION,
@@ -33,6 +33,7 @@ from cde_exporter.cad.project_commands import (
     _has_visible_content,
     _is_xref,
 )
+from cde_exporter.cad.reader import dxf_attr, is_unknown_entity
 from cde_exporter.cad.scale import OVERRIDE_UNITS, verify_drawing_units
 from cde_exporter.cad.solids import solid_footprint
 
@@ -116,9 +117,9 @@ class _Bounds:
             return result
         for entity in self.document.blocks[name]:
             kind = entity.dxftype()
-            if kind == "ATTDEF" or entity.dxf.get("invisible", 0):
-                continue
-            own = str(entity.dxf.get("layer", "0") or "0")
+            if kind == "ATTDEF" or is_unknown_entity(entity) or dxf_attr(entity, "invisible", 0):
+                continue  # las de tipos desconocidos no tienen caja (se avisan aparte)
+            own = str(dxf_attr(entity, "layer", "0") or "0")
             layer = inherited if own == "0" else own
             if kind == "INSERT":
                 child = self.definition(entity.dxf.name, layer, include_hidden, (*stack, name))
@@ -177,6 +178,10 @@ def _walk(document, insert):
     ctx.current_layout_properties.set_colors("#ffffff")
 
     def visit(entity, stack: tuple[str, ...], hidden_above: bool):
+        if is_unknown_entity(entity):
+            # Sin capa ni visibilidad (ezdxf fallaría al resolverla): no se dibuja.
+            yield entity, False, None, None
+            return
         visible = not hidden_above and ctx.resolve_visible(entity)
         hiding = None
         if not visible and not hidden_above and entity.dxftype() != "INSERT":
@@ -292,6 +297,7 @@ def build_inventory(
     include_layers: bool = True,
     progress: Progress = _noop_progress,
     check: Check = _noop_check,
+    source_copy=None,
 ) -> dict:
     """``blocks``, ``omitted``, ``layers``, ``modelspace_loose``, ``units`` y ``margin_mm``
     del documento (el resto de ``load``, como el DXF y el hash, lo añade el trabajador)."""
@@ -394,8 +400,54 @@ def build_inventory(
         "blocks": blocks,
         "omitted": omitted,
         "layers": layers,
-        "modelspace_loose": loose_summary(document),
+        "modelspace_loose": _loose(document, source_copy),
+        "unknown_entities": unknown_entity_summary(document),
     }
+
+
+def _loose(document, source_copy) -> list[dict]:
+    """Lo suelto del Model Space por capa y estado. Con la lectura selectiva
+    (``source_copy.selective``) no está en el documento: sale del resumen que se hizo al
+    copiar, con los vértices, los tipos y una caja aproximada."""
+    if source_copy is None or not getattr(source_copy, "selective", False):
+        return loose_summary(document)
+    states = {str(layer.dxf.name).casefold(): layer_state(layer) for layer in document.layers}
+    return [
+        {
+            "layer": item.layer,
+            "state": states.get(item.layer.casefold()) or STATE_VISIBLE,
+            "entities": item.entities,
+            "vertices": item.vertices,
+            "types": item.types,
+            "bounds_approx": None
+            if item.bounds is None
+            else {
+                "min": [round(item.bounds[0], 3), round(item.bounds[1], 3)],
+                "max": [round(item.bounds[2], 3), round(item.bounds[3], 3)],
+            },
+        }
+        for item in source_copy.loose
+    ]
+
+
+def unknown_entity_summary(document) -> list[dict]:
+    """Entidades de tipos que ezdxf no sabe leer, por tipo: sueltas en el Model Space y en las
+    definiciones de bloque (cada definición una vez). No se dibujan en ningún PDF."""
+    loose: Counter = Counter()
+    nested: Counter = Counter()
+    for entity in document.modelspace():
+        if is_unknown_entity(entity):
+            loose[entity.dxftype()] += 1
+    for block in document.blocks:
+        if block.is_any_layout:
+            continue  # el Model Space y el Paper Space no son definiciones de bloque
+        for entity in block:
+            if is_unknown_entity(entity):
+                nested[entity.dxftype()] += 1
+    return [
+        {"type": kind, "modelspace": loose[kind], "in_blocks": nested[kind]}
+        for kind in sorted(set(loose) | set(nested))
+    ]
 
 
 def _reference(
@@ -418,13 +470,17 @@ def _reference(
     )
     # Recorrido con las reglas del dibujo: cuentas, lo oculto, uso y colores por capa.
     kinds: Counter = Counter()
+    unknown: Counter = Counter()
     per_layer: dict[str, Counter] = defaultdict(Counter)
     entities = hidden_entities = 0
     for entity, visible, hiding, color in _walk(document, insert):
         if entity is insert:
             continue
-        entities += 1
         kind = entity.dxftype()
+        if is_unknown_entity(entity):
+            unknown[kind] += 1
+            continue
+        entities += 1
         kinds[kind] += 1
         if hiding is not None:
             hidden_entities += 1
@@ -473,6 +529,10 @@ def _reference(
             "images": kinds["IMAGE"],
         },
         "hidden_layer_entities": hidden_entities,
+        # De tipos que ezdxf no sabe leer (complementos): no se dibujan ni cuentan en la caja.
+        "unknown_entities": [
+            {"type": kind, "count": count} for kind, count in sorted(unknown.items())
+        ],
         "file_stem": candidate,
     }
 

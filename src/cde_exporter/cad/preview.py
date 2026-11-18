@@ -44,6 +44,7 @@ from cde_exporter.cad.exporters import (
     xobjects_enabled,
 )
 from cde_exporter.cad.hidden_layers import layer_state
+from cde_exporter.cad.reader import dxf_attr, unknown_entity_counts
 
 DEFAULT_LONG_SIDE_PX = 1500
 MIN_LONG_SIDE_PX = 64
@@ -89,7 +90,7 @@ class _PreviewFrontend(_StrictFrontend):
         self.on_entity(self.depth)
         if entity.dxftype() in NOT_DRAWN:
             original = getattr(entity, "source_of_copy", None) or entity
-            self.omitted[(entity.dxftype(), str(original.dxf.get("layer", "0") or "0"))] += 1
+            self.omitted[(entity.dxftype(), str(dxf_attr(original, "layer", "0") or "0"))] += 1
             return
         self.depth += 1
         try:
@@ -146,6 +147,10 @@ def draw_reference(
         )
     omitted: Counter = Counter({kind: 0 for kind in ALWAYS_REPORTED})
     for (kind, _layer), count in frontend.omitted.items():
+        omitted[kind] += count
+    # Tipos de complementos que ezdxf no lee, por definición de bloque (como el aviso de cada
+    # paquete): ezdxf ya los descarta al abrir los INSERT anidados.
+    for kind, count in unknown_entity_counts(document, insert.dxf.name).items():
         omitted[kind] += count
     progress("draw", 1.0, f"Dibujado «{insert.dxf.name}»")
     return backend.player(), dict(sorted(omitted.items()))

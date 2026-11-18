@@ -35,7 +35,7 @@ from cde_exporter.cad.font_config import (
     is_shx_request,
 )
 from cde_exporter.cad.models import CadProcessingError, invalid_data_reason
-from cde_exporter.cad.reader import read_dxf
+from cde_exporter.cad.reader import dxf_attr, is_unknown_entity, read_dxf
 
 _HATCH_POLICIES = {
     "normal": HatchPolicy.NORMAL,
@@ -125,6 +125,8 @@ def iter_detail_entities_with_visibility(document: Drawing, roots=None):
     ctx = RenderContext(document)
 
     def visit(entity, block_stack: tuple[str, ...], hidden_above: bool, weight: int):
+        if is_unknown_entity(entity):
+            return  # sin capa ni visibilidad: se omite y se avisa aparte (UNKNOWN_ENTITIES_*)
         visible = not hidden_above and ctx.resolve_visible(entity)
         hidden_layer = (
             _hiding_layer(ctx, entity)
@@ -423,7 +425,7 @@ def inspect_fidelity(
         )
         decision = decide(facts, context)
         kind = facts.kind
-        layer = str(entity.dxf.get("layer", "0") or "0")
+        layer = str(dxf_attr(entity, "layer", "0") or "0")
         entities[(kind, layer)] += 1
         if decision.status is EntityStatus.NOT_VISIBLE:
             hidden_total += 1

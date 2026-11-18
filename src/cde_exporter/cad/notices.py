@@ -53,6 +53,10 @@ class Notice:
 
 
 _UNITS_ADVICE = "Confirme las unidades del dibujo y, si las conoce, indíquelas con --units."
+UNKNOWN_ENTITIES_ADVICE = (
+    "Si deben salir en el PDF, conviértalas en AutoCAD en entidades normales (por ejemplo, con "
+    "EXPLODE o EXPORTTOAUTOCAD) y vuelva a guardar el DXF."
+)
 
 # Categoría y consejo de cada código de aviso del modelo (``ExtractedDetail.warnings``).
 WARNING_CODES: dict[str, tuple[NoticeCategory, str | None]] = {
@@ -116,6 +120,8 @@ WARNING_CODES: dict[str, tuple[NoticeCategory, str | None]] = {
         "entre entero.",
     ),
     "SOURCE_UNUSED_BLOCKS_SKIPPED": (NoticeCategory.ENTITIES, None),
+    "SOURCE_MODELSPACE_LOOSE_SKIPPED": (NoticeCategory.ENTITIES, None),
+    "UNKNOWN_ENTITIES_OMITTED": (NoticeCategory.ENTITIES, UNKNOWN_ENTITIES_ADVICE),
     "MODELSPACE_WITHOUT_BOUNDS": (
         NoticeCategory.ENTITIES,
         "Para incluirlas, exporte sin --window o amplíe la zona en el CAD.",

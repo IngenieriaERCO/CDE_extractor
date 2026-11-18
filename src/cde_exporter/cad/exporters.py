@@ -47,7 +47,12 @@ from cde_exporter.cad.entity_policy import (
     unsupported_hint,
 )
 from cde_exporter.cad.models import INVALID_DATA, CadProcessingError, invalid_data_reason
-from cde_exporter.cad.reader import ensure_layer_table_entries, read_dxf
+from cde_exporter.cad.reader import (
+    dxf_attr,
+    ensure_layer_table_entries,
+    is_unknown_entity,
+    read_dxf,
+)
 
 # Tiempo máximo para dibujar el patrón de un HATCH (el valor por defecto de ezdxf).
 HATCHING_TIMEOUT = 30.0
@@ -252,6 +257,9 @@ class _StrictFrontend(Frontend):
         # Profundidad de la entidad que se dibuja (0: el INSERT del Model Space), para el
         # avance y la cancelación (``run_hooks``).
         self.hook_depth = 0
+        # Entidades de tipos que ezdxf no sabe leer (de complementos), por tipo: no se dibujan
+        # (no tienen capa ni visibilidad, y ezdxf fallaría al resolverlas).
+        self.unknown: Counter[str] = Counter()
         if capture_text:
             self.pipeline.draw_text = self._capture_text(self.pipeline.draw_text)
 
@@ -284,6 +292,15 @@ class _StrictFrontend(Frontend):
             )
 
         return capture
+
+    def draw_entities(self, entities, *, filter_func=None) -> None:
+        def keep(entity) -> bool:
+            if is_unknown_entity(entity):
+                self.unknown[entity.dxftype()] += 1
+                return False
+            return filter_func is None or filter_func(entity)
+
+        super().draw_entities(entities, filter_func=keep)
 
     def draw_entity(self, entity, properties) -> None:
         run_hooks.entity(self.hook_depth)  # puede cancelar (DrawingCancelled)
@@ -402,7 +419,7 @@ class _StrictFrontend(Frontend):
             self.invisible += 1
             return
         original = getattr(entity, "source_of_copy", None) or entity
-        layer = str(original.dxf.get("layer", "0") or "0")
+        layer = str(dxf_attr(original, "layer", "0") or "0")
         invalid = msg.startswith(INVALID_DATA)
         if (msg == "unsupported" or invalid) and self.omit_unsupported:
             self.omitted[(entity.dxftype(), layer)] += 1

@@ -9,7 +9,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - Lee cada archivo antes de editarlo. Pide confirmación antes de cambios grandes.
 
 ## Verificación (siempre antes de dar algo por terminado)
-- `python -m pytest -q --tb=short` (referencia: 601 pruebas pasando).
+- `python -m pytest -q --tb=short` (referencia: 615 pruebas pasando).
 - `ruff check src tests`.
 - NO ejecutar `ruff format` sobre archivos existentes (solo en archivos nuevos).
 - NO usar `pytest -s` (las pruebas del aviso de escala esperarían entrada).
@@ -34,6 +34,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 ## Reglas del programa
 - Única entrada: DXF; se lee el Model Space.
 - DXF de 200 MB o más (`CDE_LARGE_DXF_MB`): las tres órdenes de exportación lo leen desde una copia temporal sin el contenido de los bloques sin usar, hecha por partes (`large_dxf.py`, dos pasadas, conservadora) en la carpeta de salida y borrada tras leerla (`block_commands.read_source_dxf`). Aviso `SOURCE_UNUSED_BLOCKS_SKIPPED` (info); el manifiesto guarda el hash del original.
+- Trabajador (`load`) y `--list --json` con DXF de 200 MB o más (`dxf_session.load_dxf`): la copia reducida se guarda en `<work-dir>/dxf-cache/<SHA-256>/` (3 como mucho; se reutiliza tras comprobar el SHA-256). Si la copia sin bloques sin usar mediría 500 MB o más (`CDE_SELECTIVE_DXF_MB`), la copia es selectiva (`large_dxf.write_selective`): del Model Space solo los INSERT con sus ATTRIB y el Paper Space; lo suelto se resume por capa con una caja aproximada (`modelspace_loose`); aviso `SOURCE_MODELSPACE_LOOSE_SKIPPED` (info). Antes de leer se estima la memoria (7 bytes por byte de DXF más 300 MB): si no cabe, `DxfTooLargeError` (`DXF_TOO_LARGE`). Las órdenes de exportación de la línea de órdenes no usan la lectura selectiva.
 - `cad extract` (ventana XY, publica `.dxf`/`.svg`/`.pdf`/`_fidelidad.txt` sin manifiesto) está en desuso: hace lo mismo, pero avisa por stderr y remite a `cad extract-modelspace`. Paso 2 pendiente (decisión de Luis Angel): convertirla en alias cuando se confirme que nadie usa sus archivos.
 - Salidas publicadas: PDF + TXT (informe con secciones A–G generado desde el modelo interno) + manifiesto `<prefijo>.manifest.json`, publicados en ese orden (el manifiesto el último: un PDF sin manifiesto es un paquete incompleto; `cad verify-package` lo comprueba). Si la extracción falla, no queda ningún archivo. Con `--all`, todo o nada: se preparan todas las referencias antes de publicar ninguna. `--detail-json` ya no existe (las pruebas usan el fixture `model_details` de `tests/conftest.py`).
 - Nunca modificar el DXF de origen.
@@ -54,6 +55,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - El TXT registra cada HATCH por tipo, patrón y escala con su tratamiento (conservado, relleno sólido, solo contorno u omitido) y el motivo.
 - Capas ocultas: `HIDDEN_LAYERS_CONTENT` (info, contenido del bloque en capa apagada o congelada), `MODELSPACE_HIDDEN_OVERLAP` (warning, entidades sueltas del Model Space en capa oculta sobre la zona del bloque) y `HIDDEN_LAYERS_INCLUDED` (info). `--include-hidden-layers [CAPAS]` las dibuja cambiando solo la copia de trabajo. Manifiesto en esquema 1.3 (la 1.1 añade `options.include_hidden_layers` y `selection`, la 1.2 `selection.clip`, la 1.3 `options.units`, `instancing`, `xobject`, `clip` y `exporter_version`; `validate_manifest` acepta las versiones menores anteriores sin esas claves: `manifest._ADDED_IN`).
 - Los objetos de Civil 3D requieren `EXPORTTOAUTOCAD` antes de guardar el DXF.
+- Entidades de tipos que ezdxf no sabe leer (de complementos: `VehicleTrackingPath`, `PLGRIDSYSTEM`, `GEOMAPIMAGE`…; ezdxf las guarda como `DXFTagStorage`, sin capa, color ni `invisible`): nunca tumban un `load`, una vista previa ni una exportación; se omiten con el aviso `UNKNOWN_ENTITIES_OMITTED` (warning, tipo y cantidad). Para leer un atributo de una entidad de cualquier tipo se usa `reader.dxf_attr(entity, clave, defecto)`: `entity.dxf.get(clave, defecto)` lanza `DXFAttributeError` si el tipo no admite el atributo. `reader.is_unknown_entity` las reconoce.
 - Los sólidos 3D (3DSOLID) se dibujan como huella en planta con `--solids footprint` o se omiten con `--omit-unsupported`; sin ninguna de las dos opciones, la extracción se detiene.
 - El ACIS de los 3DSOLID se lee con `acis_reader.load_bodies`, que admite el transform binario de AutoCAD 2018+ (PVcase) que ezdxf 1.4.4 no lee; los sólidos leídos así llevan el aviso `SOLIDS_ACIS_OWN_READER` (info). Un transform con escala ≠ 1 o deformación no se convierte (motivo en el TXT).
 - Al extraer, cada MULTILEADER copiado traduce sus handles una sola vez (`block_extractor._multileader_mapping_once`): ezdxf 1.4.4 lo hacía dos veces y el estilo del texto podía acabar apuntando a otra entidad.

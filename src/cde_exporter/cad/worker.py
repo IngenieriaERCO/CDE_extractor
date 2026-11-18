@@ -30,11 +30,17 @@ from pathlib import Path
 
 from cde_exporter import __version__
 from cde_exporter.cad import worker_protocol as protocol
-from cde_exporter.cad.dxf_session import LoadedDxf, clean_temporaries, load_dxf
+from cde_exporter.cad.dxf_session import (
+    DxfTooLargeError,
+    LoadedDxf,
+    clean_temporaries,
+    load_dxf,
+)
 from cde_exporter.cad.exporters import DrawingCancelled
 from cde_exporter.cad.inventory import build_inventory
 from cde_exporter.cad.manifest import SCHEMA_VERSION
 from cde_exporter.cad.models import CadProcessingError
+from cde_exporter.cad.notices import UNKNOWN_ENTITIES_ADVICE
 from cde_exporter.cad.preview import (
     DEFAULT_LONG_SIDE_PX,
     MAX_LONG_SIDE_PX,
@@ -44,9 +50,14 @@ from cde_exporter.cad.preview import (
     layers_tag,
     paint,
 )
+from cde_exporter.cad.reader import unknown_entities_message
 from cde_exporter.cad.scale import OVERRIDE_UNITS
 from cde_exporter.cad.worker_protocol import Request, WorkerError
 
+TOO_LARGE_ADVICE = (
+    "Cierre otros programas, o reduzca el DXF en AutoCAD (PURGE, borrar lo suelto que no "
+    "haga falta) y vuelva a cargarlo."
+)
 PROGRESS_INTERVAL = 0.25  # segundos entre eventos de avance (como mucho unos 4 por segundo)
 LOAD_STAGES = (("read", 0.6), ("hash", 0.05), ("blocks", 0.3), ("layers", 0.05))
 PREVIEW_STAGES = (("draw", 0.8), ("paint", 0.2))
@@ -102,6 +113,7 @@ class _Progress:
         self.stage = None
 
     def __call__(self, stage: str, fraction: float, text: str) -> None:
+        self.state.check()  # cancelar también durante las pasadas por partes de «load»
         self.state.stage = stage
         index = self.order.index(stage) if stage in self.order else 0
         done = sum(self.weights[name] for name in self.order[:index])
@@ -328,11 +340,13 @@ class Worker:
         progress = _Progress(self.output, request, LOAD_STAGES, self.state)
         try:
             loaded = load_dxf(source, self.work_dir, progress)
+        except DxfTooLargeError as failure:
+            raise WorkerError(protocol.DXF_TOO_LARGE, str(failure), TOO_LARGE_ADVICE) from failure
         except MemoryError as failure:
             raise WorkerError(
                 protocol.DXF_TOO_LARGE,
                 "No hay memoria suficiente para leer este DXF.",
-                "Cierre otros programas o reduzca el DXF (bloques y entidades sin usar).",
+                TOO_LARGE_ADVICE,
             ) from failure
         except (CadProcessingError, OSError, ValueError) as failure:
             raise WorkerError(
@@ -348,6 +362,7 @@ class Worker:
             include_layers=include_layers,
             progress=progress,
             check=self.state.check,
+            source_copy=loaded.pruned,
         )
         with self.state.lock:
             self.state.sessions += 1
@@ -540,6 +555,19 @@ def hidden_layer_selection(document, value) -> tuple[frozenset[str] | None, bool
 
 def load_response(loaded: LoadedDxf, inventory: dict) -> dict:
     """``data`` de ``load`` sin ``session`` (también es el JSON de ``--list --json``)."""
+    notices = list(loaded.notices)
+    unknown = inventory["unknown_entities"]
+    if unknown:
+        counts = {item["type"]: item["modelspace"] + item["in_blocks"] for item in unknown}
+        notices.append(
+            {
+                "code": "UNKNOWN_ENTITIES_OMITTED",
+                "severity": "warning",
+                "message": unknown_entities_message(counts)
+                + " Cada paquete dice cuántas tenía su bloque.",
+                "advice": UNKNOWN_ENTITIES_ADVICE,
+            }
+        )
     return {
         "dxf": loaded.dxf_json(),
         "units": inventory["units"],
@@ -548,7 +576,8 @@ def load_response(loaded: LoadedDxf, inventory: dict) -> dict:
         "omitted": inventory["omitted"],
         "layers": inventory["layers"],
         "modelspace_loose": inventory["modelspace_loose"],
-        "notices": loaded.notices,
+        "unknown_entities": unknown,
+        "notices": notices,
     }
 
 

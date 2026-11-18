@@ -131,9 +131,13 @@ Respuesta (`data`):
 }
 ```
 
-- `source_copy`: `null`, o los datos de la copia temporal si el DXF era grande (`source_bytes`, `copy_bytes`, `seconds`, `emptied_blocks`), como `resumen_proyecto.json`.
+- `source_copy`: `null`, o los datos de la copia reducida si el DXF era grande (200 MB o más): `mode` (`"unused_blocks"`: sin el contenido de los bloques sin usar; `"selective"`: además sin lo suelto del Model Space), `cached` (se tomó de la caché), `source_bytes`, `copy_bytes`, `seconds` (lo que tardó hacerla), `emptied_blocks` y `loose_entities` (entidades sueltas que la copia selectiva no lleva).
+- **Lectura selectiva:** si la copia sin bloques sin usar mediría 500 MB o más (variable `CDE_SELECTIVE_DXF_MB`), la copia guarda del Model Space solo los INSERT (con sus atributos) y todo el Paper Space. Los bloques, sus cajas y sus paquetes son los mismos; lo suelto solo se resume en `modelspace_loose`, que entonces lleva además `vertices`, `types` y `bounds_approx` (caja aproximada de los puntos guardados). Aviso `SOURCE_MODELSPACE_LOOSE_SKIPPED` (info) en `notices` y en cada paquete.
+- **Caché de copias:** la copia reducida se guarda en `work-dir\dxf-cache\<SHA-256 del DXF>\` (las 3 usadas más recientemente). Otro `load` del mismo DXF la encuentra por la huella y el tamaño, comprueba el SHA-256 completo (una lectura seguida, sin interpretar) y la reutiliza sin repetir las pasadas.
+- **Memoria:** antes de leer con ezdxf se estima la memoria (unos 7 bytes por byte de DXF o de copia, más 300 MB). Si el equipo no la tiene libre (memoria más archivo de paginación), `load` termina con `DXF_TOO_LARGE` y dice cuánta haría falta.
 - `omitted`: referencias que no se pueden exportar, con el mismo motivo que hoy da `extract-all-blocks` (anónimo, sin definición, XREF, sin nada visible).
 - `modelspace_loose`: entidades del Model Space fuera de cualquier bloque, por capa y estado (no se exportan con `export`; ver `extract-modelspace`).
+- `unknown_entities`: entidades de tipos que ezdxf no sabe leer (de complementos de AutoCAD, p. ej. `VehicleTrackingPath`, `PLGRIDSYSTEM`, `GEOMAPIMAGE`), por tipo: `{"type", "modelspace", "in_blocks"}` (sueltas en el Model Space y en las definiciones de bloque). No se dibujan en ningún PDF ni en la vista previa; si hay alguna, `notices` lleva el aviso `UNKNOWN_ENTITIES_OMITTED` (warning). Nunca hacen fallar `load`, `preview` ni `export`.
 
 ### 3.1 Cada bloque (`blocks[]`)
 
@@ -173,6 +177,7 @@ Una entrada por **referencia** (INSERT) exportable del Model Space, en el orden 
 - `units`: unidades **de esa referencia**, con la misma verificación que la exportación (incluye las del bloque y los indicios de escala del INSERT).
 - `contains`: lo que puede cambiar el resultado. `solids_3d` > 0 significa que la vista previa no los mostrará y la exportación los dibujará como huella (sección 5, opción `solids`).
 - `hidden_layer_entities`: entidades del bloque en capas apagadas o congeladas (no se dibujan salvo con `include_hidden_layers`).
+- `unknown_entities`: las de tipos desconocidos del bloque y sus anidados (cada definición una vez), `[{"type", "count"}]`; no cuentan en `entities` ni en la caja. El paquete exportado las declara con el aviso `UNKNOWN_ENTITIES_OMITTED`.
 - `file_stem`: nombre de paquete que se propone, ya válido según la sección 5.1 (con `_001`, `_002`… si hay varias referencias).
 
 ### 3.2 Cada capa (`layers[]`)
@@ -234,7 +239,7 @@ Respuesta (`data`):
 - `cad_to_px`: matriz afín `[a, b, c, d, e, f]` del marco único a píxeles: `px = a·x + c·y + e`, `py = b·x + d·y + f`. Siempre con **`b = c = 0`** (sin giro) y **`a = −d`** (la misma escala en X e Y; Y hacia abajo en la imagen).
 - **Píxeles:** origen en la esquina **superior izquierda**; el píxel (0, 0) ocupa de 0 a 1 en X y en Y (su centro está en (0,5; 0,5)).
 - **Imagen:** PNG con **fondo transparente** (canal alfa); el color 7 (blanco/negro) se dibuja en **negro**, como en el PDF.
-- `omitted`: lo que la vista previa no dibuja, por tipo (los 3DSOLID, por decisión; lo que ezdxf no sabe dibujar).
+- `omitted`: lo que la vista previa no dibuja, por tipo (los 3DSOLID, por decisión; lo que ezdxf no sabe dibujar, incluidos los tipos desconocidos de `unknown_entities`).
 - **Caché:** el PNG se guarda en `work-dir\previews\<huella del DXF>\<handle>_<px>_<capas>.png`, con un `.json` del mismo nombre que guarda el resto de la respuesta. `<capas>` es `visible`, `hidden-all` (con `["*"]`) o `hidden-` y 6 cifras del SHA-1 de las capas pedidas. Si ya existe con la misma clave (huella, handle, tamaño y capas ocultas pedidas), se devuelve sin dibujar (`cached: true`) y cuenta como usada ahora. Si la caché pasa de `--preview-cache-mb` (500 MB por defecto), se borran las imágenes usadas hace más tiempo (nunca la que se acaba de devolver). Una vista previa cancelada no deja nada en la caché.
 
 ## 5. `export` — exportar
@@ -389,7 +394,7 @@ Respuesta: `{"busy": true, "current": "c-3", "stage": "read", "session": "s-1", 
 | `NO_SESSION` | `preview` o `export` sin DXF cargado, o con un `session` que no es el actual |
 | `DXF_NOT_FOUND` | La ruta del DXF no existe o no se puede leer |
 | `DXF_INVALID` | El archivo no es un DXF que ezdxf pueda leer (incluye DXF dañados) |
-| `DXF_TOO_LARGE` | No hay memoria para leerlo ni con la copia sin bloques sin usar |
+| `DXF_TOO_LARGE` | No hay memoria para leerlo ni con la copia reducida (sección 3: el mensaje dice cuánta haría falta y cuánta hay libre) |
 | `DXF_CHANGED` | El tamaño o la fecha del DXF cambiaron desde `load` (sección 9) |
 | `BLOCK_NOT_FOUND` / `REFERENCE_NOT_FOUND` | No existe el bloque, o esa ocurrencia o handle |
 | `NOT_EXPORTABLE` | La referencia está en `omitted` (anónima, XREF…) |

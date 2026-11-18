@@ -41,6 +41,7 @@ from cde_exporter.cad.fidelity import (
     iter_detail_entities_with_visibility,
     missing_glyphs_message,
 )
+from cde_exporter.cad.reader import dxf_attr
 from cde_exporter.cad.scale import UnitVerification
 
 _URL_REFERENCE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
@@ -387,7 +388,7 @@ def build_extracted_detail(
         for index, item in enumerate(iter_detail_entities_with_visibility(document)):
             entity = item.entity
             entity_type = entity.dxftype()
-            layer = str(entity.dxf.get("layer", "0") or "0")
+            layer = str(dxf_attr(entity, "layer", "0") or "0")
             facts = entity_facts(
                 entity,
                 dispatch,

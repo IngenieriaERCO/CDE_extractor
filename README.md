@@ -151,3 +151,12 @@ origen no cambia: el manifiesto guarda su hash y el TXT lo dice en «A tener en 
 Un bloque se conserva si lo nombra o lo apunta cualquier cosa (otro bloque usado, una cota, un
 estilo, un objeto…). El umbral se cambia con la variable de entorno `CDE_LARGE_DXF_MB` (en
 PowerShell, `$env:CDE_LARGE_DXF_MB = "0"` la usa siempre).
+
+El trabajador del Componedor (`cde-exporter worker`) va un paso más allá con los DXF enormes
+(por ejemplo, uno de 2,9 GB con millones de vértices en curvas de nivel sueltas): si la copia
+sin bloques sin usar seguiría midiendo 500 MB o más (`CDE_SELECTIVE_DXF_MB`), lee una copia
+**selectiva** que del Model Space solo lleva los INSERT de los bloques. Los bloques y sus
+paquetes salen iguales; lo suelto solo se resume por capa. La copia se guarda en la carpeta de
+trabajo y la siguiente vez que se carga el mismo DXF no hay que rehacerla. Si aun así no cabe en
+memoria, el trabajador lo dice (cuánta memoria haría falta y cuánta hay) en lugar de bloquear el
+equipo.

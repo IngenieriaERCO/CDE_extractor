@@ -12,11 +12,18 @@ el nombre de un bloque (también una etiqueta o un texto de XDATA) cuenta como u
 espacios de trabajo (``*Model_Space``, ``*Paper_Space…``) y las referencias externas (XREF)
 siempre se conservan.
 
+Lectura selectiva (``write_selective``): si ni siquiera esa copia cabe en memoria (el DXF de
+2,74 GB con 9 millones de VERTEX en polilíneas sueltas), el Model Space de la copia guarda solo
+los INSERT (con sus ATTRIB y su SEQEND) y el Paper Space entero; lo suelto del Model Space se
+resume por capa (tipos, entidades, vértices y una caja aproximada) sin cargarlo. Sirve para
+listar y exportar bloques, que nunca dependen de lo suelto.
+
 Solo usa la biblioteca estándar (más ``detail_model`` para el aviso).
 """
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from collections import defaultdict
@@ -30,6 +37,12 @@ LARGE_DXF_ENV = "CDE_LARGE_DXF_MB"
 # entorno CDE_LARGE_DXF_MB; 0 = siempre).
 DEFAULT_LARGE_DXF_MB = 200.0
 SOURCE_PRUNED_CODE = "SOURCE_UNUSED_BLOCKS_SKIPPED"
+SELECTIVE_DXF_ENV = "CDE_SELECTIVE_DXF_MB"
+# Si la copia sin bloques sin usar mediría esto o más, se hace la copia selectiva (sin lo
+# suelto del Model Space). CDE_SELECTIVE_DXF_MB lo cambia (0 = siempre).
+DEFAULT_SELECTIVE_DXF_MB = 500.0
+SOURCE_LOOSE_CODE = "SOURCE_MODELSPACE_LOOSE_SKIPPED"
+PROGRESS_STEP_BYTES = 16 * 1024 * 1024
 
 _BINARY_SENTINEL = b"AutoCAD Binary DXF"
 # Códigos de grupo que guardan un handle (punteros y XDATA 1005) o un texto que puede ser el
@@ -50,13 +63,47 @@ class EmptiedBlock:
 
 
 @dataclass(frozen=True, slots=True)
+class LooseLayer:
+    """Lo suelto del Model Space de una capa que la copia selectiva no lleva."""
+
+    layer: str
+    entities: int
+    vertices: int
+    types: dict[str, int]
+    # Caja aproximada (xmin, ymin, xmax, ymax) de los puntos que guarda cada entidad: los
+    # vértices, los extremos, el centro ± el radio. En coordenadas del objeto (OCS) para lo
+    # que tiene extrusión distinta de la de planta. None si no tenía puntos.
+    bounds: tuple[float, float, float, float] | None
+
+
+@dataclass(frozen=True, slots=True)
 class PrunedSource:
-    """Resultado de la copia: tamaños, bloques vaciados y tiempo."""
+    """Resultado de la copia: tamaños, bloques vaciados y tiempo. Con ``selective``, la copia
+    tampoco lleva lo suelto del Model Space (``loose``, por capa). ``cached``: se tomó de la
+    caché de copias (el tiempo es el de cuando se hizo)."""
 
     source_bytes: int
     copy_bytes: int
     emptied: tuple[EmptiedBlock, ...]
     seconds: float
+    selective: bool = False
+    loose: tuple[LooseLayer, ...] = ()
+    cached: bool = False
+
+    @property
+    def loose_entities(self) -> int:
+        return sum(item.entities for item in self.loose)
+
+
+def selective_threshold_bytes() -> float:
+    """Tamaño de la copia sin bloques sin usar desde el que se hace la selectiva
+    (CDE_SELECTIVE_DXF_MB o 500 MB)."""
+    value = os.environ.get(SELECTIVE_DXF_ENV, "").strip()
+    try:
+        megabytes = float(value) if value else DEFAULT_SELECTIVE_DXF_MB
+    except ValueError:
+        megabytes = DEFAULT_SELECTIVE_DXF_MB
+    return max(megabytes, 0.0) * 1_000_000
 
 
 def large_threshold_bytes() -> float:
@@ -99,12 +146,13 @@ def _text(raw: bytes) -> str:
     return raw.strip().decode("utf-8", "replace")
 
 
-def unused_blocks(path: Path, digest=None) -> dict[str, tuple[str, int, int]]:
+def unused_blocks(path: Path, digest=None, progress=None) -> dict[str, tuple[str, int, int]]:
     """Bloques que nada usa (clave: nombre sin mayúsculas), con su nombre, las entidades y los
     bytes de su contenido. Primera pasada.
 
     Con ``digest`` (p. ej. ``hashlib.sha256()``), le suma todos los bytes leídos: así el hash
-    del archivo sale de esta misma pasada, sin volver a leerlo.
+    del archivo sale de esta misma pasada, sin volver a leerlo. ``progress(bytes_leídos)`` se
+    llama cada 16 MB (puede lanzar una excepción para cancelar).
     """
     section = None
     table = None
@@ -120,11 +168,17 @@ def unused_blocks(path: Path, digest=None) -> dict[str, tuple[str, int, int]]:
     refs: dict[str, set[str]] = defaultdict(set)  # contenedor -> nombres usados
     raw_small: dict[str, set[str]] = defaultdict(set)  # valores de HEADER y TABLES
 
+    read = next_report = 0
     with path.open("rb") as stream:
         for raw_code, raw_value in _pairs(stream):
             if digest is not None:
                 digest.update(raw_code)
                 digest.update(raw_value)
+            if progress is not None:
+                read += len(raw_code) + len(raw_value)
+                if read >= next_report:
+                    progress(read)
+                    next_report = read + PROGRESS_STEP_BYTES
             code = _code(raw_code)
             if code == 0:
                 value = _text(raw_value)
@@ -217,16 +271,22 @@ def unused_blocks(path: Path, digest=None) -> dict[str, tuple[str, int, int]]:
     }
 
 
-def write_without_blocks(source: Path, destination: Path, empty: set[str]) -> int:
+def write_without_blocks(source: Path, destination: Path, empty: set[str], progress=None) -> int:
     """Copia ``source`` a ``destination`` dejando vacíos los bloques de ``empty`` (sin
-    mayúsculas). Segunda pasada; devuelve los bytes escritos."""
+    mayúsculas). Segunda pasada; devuelve los bytes escritos. ``progress(bytes_leídos)`` se
+    llama cada 16 MB."""
     section = None
     in_header = False
     target = False
     skipping = False
-    written = 0
+    written = read = next_report = 0
     with source.open("rb") as reader, destination.open("wb") as writer:
         for raw_code, raw_value in _pairs(reader):
+            if progress is not None:
+                read += len(raw_code) + len(raw_value)
+                if read >= next_report:
+                    progress(read)
+                    next_report = read + PROGRESS_STEP_BYTES
             code = _code(raw_code)
             if code == 0:
                 value = _text(raw_value)
@@ -252,6 +312,201 @@ def write_without_blocks(source: Path, destination: Path, empty: set[str]) -> in
             writer.write(raw_value)
             written += len(raw_code) + len(raw_value)
     return written
+
+
+_FOLLOWERS = ("ATTRIB", "SEQEND", "VERTEX")  # van detrás de su INSERT o su POLYLINE
+# Códigos de punto X (10–18; su Y es el código + 10). Lo que no es un punto, por tipo.
+_X_CODES = frozenset(range(10, 19))
+_NOT_POINTS = {
+    "TEXT": frozenset({11}),  # punto de alineación: (0, 0) si el texto no se alinea
+    "MTEXT": frozenset({11}),  # dirección del eje X
+    "SPLINE": frozenset({12, 13}),  # tangentes de inicio y fin
+    "XLINE": frozenset({11}),  # dirección (la línea es infinita)
+    "RAY": frozenset({11}),
+    "HATCH": frozenset({11}),  # eje mayor de un borde elíptico (relativo a su centro)
+    "DIMENSION": frozenset({12}),  # punto de inserción del bloque de la cota (suele ser 0, 0)
+    "TOLERANCE": frozenset({11}),  # dirección
+    "MULTILEADER": frozenset({11, 12, 13}),  # direcciones y normales
+}
+# IMAGE y WIPEOUT: 10 es la esquina; 11 y 12, los vectores de un píxel en U y en V; 13, el
+# tamaño en píxeles; 14, el contorno de recorte en píxeles.
+_IMAGES = frozenset({"IMAGE", "WIPEOUT"})
+
+
+class _LooseEntity:
+    """Una entidad suelta del Model Space mientras se lee: tipo, capa, puntos y vértices."""
+
+    __slots__ = (
+        "kind", "layer", "xs", "ys", "pending", "radius", "axis", "vertices", "pairs", "vectors",
+    )
+
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+        self.layer = "0"
+        self.xs: list[float] = []
+        self.ys: list[float] = []
+        self.pending: dict[int, float] = {}
+        self.radius = 0.0
+        self.axis = [0.0, 0.0]
+        self.vertices = 0
+        self.pairs = 0  # pares 10/20 vistos (el primero de un HATCH es su elevación)
+        self.vectors: dict[int, list[float]] = {}  # IMAGE: 11, 12 y 13
+
+    def tag(self, code: int, raw: bytes) -> None:
+        if code == 8:
+            self.layer = _text(raw)
+        elif self.kind == "HATCH" and (code == 98 or self.pairs < 0):
+            # Tras el 98 vienen las semillas del rayado: puntos que AutoCAD no mueve con el
+            # HATCH (pueden quedar lejos). No cuentan para la caja.
+            self.pairs = -1
+        elif code == 40 and self.kind in ("CIRCLE", "ARC"):
+            self.radius = abs(_float(raw))
+        elif self.kind == "ELLIPSE" and code in (11, 21):
+            self.axis[0 if code == 11 else 1] = _float(raw)  # eje mayor, relativo al centro
+        elif self.kind in _IMAGES and code in (11, 12, 13, 14, 21, 22, 23, 24):
+            if code in (11, 12, 13):
+                self.vectors.setdefault(code, [0.0, 0.0])[0] = _float(raw)
+            elif code in (21, 22, 23):
+                self.vectors.setdefault(code - 10, [0.0, 0.0])[1] = _float(raw)
+        elif code in _X_CODES and code not in _NOT_POINTS.get(self.kind, ()):
+            self.pending[code] = _float(raw)
+        elif 20 <= code <= 28 and code - 10 in self.pending:
+            x, y = self.pending.pop(code - 10), _float(raw)
+            if code == 20:
+                self.pairs += 1
+                if self.kind == "LWPOLYLINE":
+                    self.vertices += 1
+                # Sin coordenadas reales: la cabecera de una POLYLINE (0, 0, elevación) y el
+                # primer punto de un HATCH (su elevación).
+                if self.kind == "POLYLINE" or (self.kind == "HATCH" and self.pairs == 1):
+                    return
+            if math.isfinite(x) and math.isfinite(y):
+                self.xs.append(x)
+                self.ys.append(y)
+
+    def box(self) -> tuple[float, float, float, float] | None:
+        if not self.xs:
+            return None
+        if self.kind in _IMAGES and {11, 12, 13} <= set(self.vectors):
+            (ux, uy), (vx, vy), (width, height) = (self.vectors[code] for code in (11, 12, 13))
+            x0, y0 = self.xs[0], self.ys[0]
+            for a, b in ((width, 0.0), (0.0, height), (width, height)):
+                self.xs.append(x0 + ux * a + vx * b)
+                self.ys.append(y0 + uy * a + vy * b)
+        grow = self.radius or math.hypot(*self.axis)
+        return (min(self.xs) - grow, min(self.ys) - grow, max(self.xs) + grow, max(self.ys) + grow)
+
+
+def _float(raw: bytes) -> float:
+    try:
+        return float(raw)
+    except ValueError:
+        return math.nan
+
+
+def _merge(old, box):
+    if old is None:
+        return box
+    return (min(old[0], box[0]), min(old[1], box[1]), max(old[2], box[2]), max(old[3], box[3]))
+
+
+def write_selective(
+    source: Path, destination: Path, empty: set[str], progress=None
+) -> tuple[int, tuple[LooseLayer, ...]]:
+    """Como ``write_without_blocks`` y, además, sin lo suelto del Model Space: de la sección
+    ENTITIES solo pasan los INSERT (con sus ATTRIB y SEQEND) y lo del Paper Space (código 67
+    = 1). Lo que no pasa se resume por capa. Devuelve los bytes escritos y el resumen.
+    ``progress(bytes_leídos)`` se llama cada 16 MB."""
+    section = None
+    in_header = target = skipping = False
+    written = read = next_report = 0
+    buffer: list[bytes] = []
+    kind = None
+    paper = False
+    parent_kept = False
+    parent_layer = "0"
+    current: _LooseEntity | None = None
+    layers: dict[str, list] = {}  # capa -> [entidades, vértices, tipos, caja]
+
+    def flush(writer) -> None:
+        nonlocal written, parent_kept, parent_layer
+        if not buffer:
+            return
+        if kind in _FOLLOWERS:
+            keep = parent_kept
+        else:
+            keep = paper or kind == "INSERT"
+            parent_kept = keep
+            parent_layer = current.layer
+        if keep:
+            data = b"".join(buffer)
+            writer.write(data)
+            written += len(data)
+        else:
+            layer = parent_layer if kind in _FOLLOWERS else current.layer
+            entry = layers.setdefault(layer, [0, 0, defaultdict(int), None])
+            if kind not in _FOLLOWERS:
+                entry[0] += 1
+                entry[2][kind] += 1
+            entry[1] += 1 if kind == "VERTEX" else current.vertices
+            box = current.box()
+            if box is not None:
+                entry[3] = _merge(entry[3], box)
+        buffer.clear()
+
+    with source.open("rb") as reader, destination.open("wb") as writer:
+        for raw_code, raw_value in _pairs(reader):
+            if progress is not None:
+                read += len(raw_code) + len(raw_value)
+                if read >= next_report:
+                    progress(read)
+                    next_report = read + PROGRESS_STEP_BYTES
+            code = _code(raw_code)
+            if code == 0:
+                value = _text(raw_value)
+                if section == "ENTITIES":
+                    flush(writer)
+                    if value != "ENDSEC":
+                        kind = value
+                        if kind not in _FOLLOWERS:
+                            paper = False
+                        current = _LooseEntity(kind)
+                        buffer.extend((raw_code, raw_value))
+                        continue
+                if value == "SECTION":
+                    section = "?"
+                elif value == "ENDSEC":
+                    section = None
+                if section == "BLOCKS" and value == "BLOCK":
+                    in_header, target, skipping = True, False, False
+                elif target and value == "ENDBLK":
+                    target = skipping = False
+                elif target:
+                    in_header, skipping = False, True
+                else:
+                    in_header = False
+            elif section == "ENTITIES" and buffer:
+                buffer.extend((raw_code, raw_value))
+                if code == 67 and kind not in _FOLLOWERS:
+                    paper = raw_value.strip() == b"1"
+                elif code is not None:
+                    current.tag(code, raw_value)
+                continue
+            elif section == "?" and code == 2:
+                section = _text(raw_value)
+            elif in_header and code == 2 and _text(raw_value).casefold() in empty:
+                target = True
+            if skipping:
+                continue
+            writer.write(raw_code)
+            writer.write(raw_value)
+            written += len(raw_code) + len(raw_value)
+        flush(writer)
+    loose = tuple(
+        LooseLayer(layer, entry[0], entry[1], dict(sorted(entry[2].items())), entry[3])
+        for layer, entry in sorted(layers.items(), key=lambda item: item[0].casefold())
+    )
+    return written, loose
 
 
 def prune_unused_blocks(source: Path, destination: Path, digest=None) -> PrunedSource:
@@ -291,3 +546,19 @@ def pruning_message(report: PrunedSource) -> str:
 
 def pruning_warning(report: PrunedSource) -> ExtractionWarning:
     return ExtractionWarning(SOURCE_PRUNED_CODE, Severity.INFO, pruning_message(report))
+
+
+def loose_skipped_message(report: PrunedSource) -> str:
+    """Aviso ``SOURCE_MODELSPACE_LOOSE_SKIPPED`` de la copia selectiva."""
+    count = report.loose_entities
+    vertices = sum(item.vertices for item in report.loose)
+    return (
+        f"El DXF de origen ({_megabytes(report.source_bytes)}) es tan grande que se leyó sin "
+        f"sus {count} entidades sueltas del Model Space (fuera de cualquier bloque; "
+        f"{vertices} vértices): los bloques no dependen de ellas y su dibujo es el mismo. No "
+        "se comprobó si alguna, en una capa apagada o congelada, cae sobre la zona del bloque."
+    )
+
+
+def loose_skipped_warning(report: PrunedSource) -> ExtractionWarning:
+    return ExtractionWarning(SOURCE_LOOSE_CODE, Severity.INFO, loose_skipped_message(report))

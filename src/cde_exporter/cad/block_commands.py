@@ -64,6 +64,7 @@ from cde_exporter.cad.hidden_layers import (
 )
 from cde_exporter.cad.large_dxf import (
     is_large,
+    loose_skipped_warning,
     prune_unused_blocks,
     pruning_message,
     pruning_warning,
@@ -90,7 +91,14 @@ from cde_exporter.cad.pdf_checks import (
     pdf_page_facts,
     validate_output_pdf,
 )
-from cde_exporter.cad.reader import InvalidEntity, entity_bounds, read_dxf, safe_extents
+from cde_exporter.cad.reader import (
+    InvalidEntity,
+    entity_bounds,
+    read_dxf,
+    safe_extents,
+    unknown_entities_message,
+    unknown_entity_counts,
+)
 from cde_exporter.cad.scale import (
     output_factor,
     parse_nominal_scale,
@@ -796,10 +804,32 @@ def _run_extract_block(
                 modelspace_hidden_overlap=overlap,
                 modelspace_selection=getattr(args, "modelspace_selection", None),
             )
-            if pruned is not None:
+            if pruned is not None and pruned.emptied:
                 detail = dataclasses.replace(
                     detail, warnings=(*detail.warnings, pruning_warning(pruned))
                 )
+            if pruned is not None and pruned.selective:
+                # Lectura selectiva del trabajador: sin lo suelto del Model Space.
+                detail = dataclasses.replace(
+                    detail, warnings=(*detail.warnings, loose_skipped_warning(pruned))
+                )
+            # Entidades de complementos que ezdxf no sabe leer: la extracción no las copia y no
+            # salen en el PDF; se dice cuáles y cuántas.
+            unknown = unknown_entity_counts(document, args.block_name)
+            if unknown:
+                detail = dataclasses.replace(
+                    detail,
+                    warnings=(
+                        *detail.warnings,
+                        ExtractionWarning(
+                            "UNKNOWN_ENTITIES_OMITTED",
+                            Severity.WARNING,
+                            unknown_entities_message(unknown),
+                        ),
+                    ),
+                )
+                sys.stdout.flush()
+                print(f"Aviso: {unknown_entities_message(unknown)}", file=sys.stderr)
             if footprints is not None:
                 detail = mark_footprint_solids(
                     detail,

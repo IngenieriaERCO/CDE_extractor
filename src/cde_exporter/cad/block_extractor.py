@@ -16,7 +16,7 @@ from ezdxf.document import Drawing
 from ezdxf.entities.mleader import MultiLeader
 
 from cde_exporter.cad.models import CadProcessingError
-from cde_exporter.cad.reader import entity_bounds, read_dxf
+from cde_exporter.cad.reader import entity_bounds, is_unknown_entity, read_dxf
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +218,8 @@ def _definition_has_unbounded(document: Drawing, name: str, visited: set[str]) -
         if entity.dxftype() == "INSERT":
             if _definition_has_unbounded(document, entity.dxf.name, visited):
                 return True
+        elif is_unknown_entity(entity):
+            continue  # de un complemento: no se copia ni se dibuja (UNKNOWN_ENTITIES_OMITTED)
         elif entity_bounds(entity) is None:
             return True
     return False

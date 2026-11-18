@@ -9,7 +9,7 @@ from pathlib import Path
 import ezdxf
 from ezdxf import bbox
 from ezdxf.document import Drawing
-from ezdxf.entities import DXFEntity
+from ezdxf.entities import DXFEntity, DXFTagStorage
 from ezdxf.math import BoundingBox
 from ezdxf.units import unit_name
 
@@ -69,6 +69,60 @@ class InvalidEntity:
     entity: object | None = None
 
 
+def is_unknown_entity(entity) -> bool:
+    """¿Es de un tipo que ezdxf no sabe leer? Son entidades de complementos de AutoCAD (p. ej.
+    VehicleTrackingPath, PLGRIDSYSTEM o GEOMAPIMAGE): ezdxf las guarda como ``DXFTagStorage``,
+    sin capa, color ni visibilidad, y no las puede dibujar ni medir. Se omiten con aviso."""
+    return isinstance(entity, DXFTagStorage)
+
+
+def dxf_attr(entity, key: str, default=None):
+    """Atributo DXF ``key`` de cualquier entidad, o ``default`` si ese tipo no lo tiene o no
+    se puede leer. (``entity.dxf.get(key, default)`` lanza ``DXFAttributeError`` si el tipo
+    no admite el atributo, como ``invisible`` en una entidad de un complemento.)"""
+    try:
+        if not entity.dxf.is_supported(key):
+            return default
+        value = entity.dxf.get(key, default)
+    except Exception:  # noqa: BLE001 - una entidad rara nunca detiene la orden
+        return default
+    return default if value is None else value
+
+
+def unknown_entity_counts(document: Drawing, block_name: str) -> dict[str, int]:
+    """Entidades de tipos desconocidos (``is_unknown_entity``) en la definición del bloque y
+    en las de sus bloques anidados (cada definición se cuenta una vez), por tipo."""
+    counts: Counter = Counter()
+    seen: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in seen or name not in document.blocks:
+            return
+        seen.add(name)
+        for entity in document.blocks[name]:
+            if is_unknown_entity(entity):
+                counts[entity.dxftype()] += 1
+            elif entity.dxftype() == "INSERT":
+                visit(entity.dxf.name)
+
+    visit(block_name)
+    return dict(sorted(counts.items()))
+
+
+def unknown_entities_message(counts: dict[str, int]) -> str:
+    """Aviso ``UNKNOWN_ENTITIES_OMITTED``: qué tipos y cuántas entidades se omitieron."""
+    total = sum(counts.values())
+    kinds = ", ".join(f"{kind} ({count})" for kind, count in counts.items())
+    noun = "entidad" if total == 1 else "entidades"
+    return (
+        f"Se omitió {total} {noun} de tipos que ezdxf no sabe leer (de complementos de "
+        f"AutoCAD): {kinds}. No salen en el PDF."
+        if total == 1
+        else f"Se omitieron {total} {noun} de tipos que ezdxf no sabe leer (de complementos de "
+        f"AutoCAD): {kinds}. No salen en el PDF."
+    )
+
+
 def _original(entity):
     """Entidad de la definición de la que procede una copia virtual (o la misma)."""
     return getattr(entity, "source_of_copy", None) or entity
@@ -124,7 +178,7 @@ def safe_extents(entities, *, block: str | None = None):
                     InvalidEntity(
                         entity_type=entity.dxftype(),
                         handle=original.dxf.get("handle"),
-                        layer=str(original.dxf.get("layer", "0") or "0"),
+                        layer=str(dxf_attr(original, "layer", "0") or "0"),
                         block=owner,
                         reason=f"{type(error).__name__}: {error}",
                         entity=original,

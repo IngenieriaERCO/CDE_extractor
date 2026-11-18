@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 
 from cde_exporter.cad import worker_protocol as protocol
-from cde_exporter.cad.dxf_session import load_dxf
+from cde_exporter.cad.dxf_session import DxfTooLargeError, load_dxf
 from cde_exporter.cad.inventory import build_inventory, page_size_mm
 from cde_exporter.cad.models import CadProcessingError
 from cde_exporter.cad.scale import parse_nominal_scale
@@ -47,7 +47,11 @@ def _document(args) -> dict:
     if not source.is_file():
         raise WorkerError(protocol.DXF_NOT_FOUND, f"No existe el DXF: {source}")
     try:
-        loaded = load_dxf(source, Path(tempfile.gettempdir()))
+        # Carpeta fija en los temporales del sistema: guarda la caché de copias reducidas
+        # de los DXF muy grandes entre una llamada y otra.
+        loaded = load_dxf(source, Path(tempfile.gettempdir()) / "cde-exporter")
+    except DxfTooLargeError as failure:
+        raise WorkerError(protocol.DXF_TOO_LARGE, str(failure)) from failure
     except MemoryError as failure:
         raise WorkerError(
             protocol.DXF_TOO_LARGE, "No hay memoria suficiente para leer este DXF."
@@ -59,6 +63,7 @@ def _document(args) -> dict:
         units=args.units,
         margin_mm=float(args.margin_mm),
         include_layers=not args.no_layers,
+        source_copy=loaded.pruned,
     )
     data = load_response(loaded, inventory)
     if args.scale is not None or args.scale_map:
