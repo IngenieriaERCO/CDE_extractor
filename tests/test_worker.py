@@ -61,6 +61,9 @@ def test_a_good_request_and_a_minor_version_are_accepted() -> None:
     request = parse_request(_line(id="c-1", command="load", data={"dxf": "C:/plano.dxf"}))
     assert (request.id, request.command, request.data) == ("c-1", "load", {"dxf": "C:/plano.dxf"})
     assert parse_request(b'{"protocol": "1.7", "id": "c-2", "command": "status"}').data == {}
+    # PowerShell pone una BOM al principio de lo que escribe en una tubería.
+    with_bom = b'\xef\xbb\xbf{"protocol": "1.0", "id": "c-3", "command": "status"}'
+    assert parse_request(with_bom).id == "c-3"
 
 
 def test_messages_are_one_utf8_line_without_escaped_accents() -> None:
@@ -249,9 +252,9 @@ def test_an_unexpected_failure_does_not_stop_the_worker(
     assert sink.wait("c-2", "result")["data"]["busy"] is False
 
 
-def test_preview_and_export_are_not_yet_available(running) -> None:
+def test_export_is_not_yet_available(running) -> None:
     sink, stdin = running
-    stdin.send(id="c-1", command="preview")
+    stdin.send(id="c-1", command="export")
     assert sink.wait("c-1", "error")["error"]["code"] == protocol.UNKNOWN_COMMAND
 
 

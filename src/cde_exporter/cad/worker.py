@@ -8,7 +8,8 @@ JSON por líneas (docs/protocolo_trabajador.md).
 - stdout solo lleva JSON en UTF-8 (``_Output``); lo que el exportador escribe en la terminal y el
   registro de las librerías van a stderr.
 
-Etapa 1 de la implementación: arranque, ``load``, ``status``, ``cancel`` y ``close``.
+Etapas hechas: 1 (arranque, ``load``, ``status``, ``cancel`` y ``close``) y 2 (``preview`` con
+caché).
 """
 
 from __future__ import annotations
@@ -30,18 +31,29 @@ from pathlib import Path
 from cde_exporter import __version__
 from cde_exporter.cad import worker_protocol as protocol
 from cde_exporter.cad.dxf_session import LoadedDxf, clean_temporaries, load_dxf
+from cde_exporter.cad.exporters import DrawingCancelled
 from cde_exporter.cad.inventory import build_inventory
 from cde_exporter.cad.manifest import SCHEMA_VERSION
 from cde_exporter.cad.models import CadProcessingError
+from cde_exporter.cad.preview import (
+    DEFAULT_LONG_SIDE_PX,
+    MAX_LONG_SIDE_PX,
+    MIN_LONG_SIDE_PX,
+    PreviewCache,
+    draw_reference,
+    layers_tag,
+    paint,
+)
 from cde_exporter.cad.scale import OVERRIDE_UNITS
 from cde_exporter.cad.worker_protocol import Request, WorkerError
 
 PROGRESS_INTERVAL = 0.25  # segundos entre eventos de avance (como mucho unos 4 por segundo)
 LOAD_STAGES = (("read", 0.6), ("hash", 0.05), ("blocks", 0.3), ("layers", 0.05))
+PREVIEW_STAGES = (("draw", 0.8), ("paint", 0.2))
 
 
-class Cancelled(Exception):
-    """El pedido en curso se canceló."""
+class Cancelled(DrawingCancelled):
+    """El pedido en curso se canceló (también dentro del dibujo de ezdxf)."""
 
 
 class _Output:
@@ -158,6 +170,7 @@ class Worker:
         self.preview_cache_mb = preview_cache_mb
         self.state = _State()
         self.queue: queue.Queue = queue.Queue()
+        self.previews = PreviewCache(work_dir / "previews", preview_cache_mb)
 
     # ------------------------------------------------------------------ hilo de stdin
     def read_requests(self, stream) -> None:
@@ -258,6 +271,8 @@ class Worker:
     def dispatch(self, request: Request) -> dict:
         if request.command == "load":
             return self.load(request)
+        if request.command == "preview":
+            return self.preview(request)
         raise WorkerError(
             protocol.UNKNOWN_COMMAND,
             f"La orden «{request.command}» todavía no está implementada en este trabajador.",
@@ -325,6 +340,166 @@ class Worker:
             session = _Session(f"s-{self.state.sessions}", loaded, units, float(margin), inventory)
             self.state.session = session
         return {"session": session.id, **load_response(loaded, inventory)}
+
+    # ------------------------------------------------------------------ preview
+    def session_for(self, request: Request) -> _Session:
+        """La sesión pedida, si es la actual y el DXF no cambió en disco."""
+        with self.state.lock:
+            session = self.state.session
+        wanted = request.data.get("session")
+        if session is None or wanted != session.id:
+            raise WorkerError(
+                protocol.NO_SESSION,
+                "No hay ningún DXF cargado."
+                if session is None
+                else f"La sesión «{wanted}» no es la actual («{session.id}»).",
+                "Envíe «load» y use el «session» que devuelve.",
+                {"session": wanted, "current": session.id if session else None},
+            )
+        if session.loaded.changed():
+            raise WorkerError(
+                protocol.DXF_CHANGED,
+                f"El DXF «{session.loaded.path.name}» cambió en disco desde «load».",
+                "Vuelva a cargarlo con «load».",
+                {"dxf": str(session.loaded.path)},
+            )
+        return session
+
+    def preview(self, request: Request) -> dict:
+        data = request.data
+        session = self.session_for(request)
+        block = find_reference(session.inventory, data)
+        long_side = data.get("long_side_px", DEFAULT_LONG_SIDE_PX)
+        if (
+            isinstance(long_side, bool)
+            or not isinstance(long_side, int)
+            or not MIN_LONG_SIDE_PX <= long_side <= MAX_LONG_SIDE_PX
+        ):
+            raise WorkerError(
+                protocol.BAD_REQUEST,
+                f"«long_side_px» debe ser un entero de {MIN_LONG_SIDE_PX} a {MAX_LONG_SIDE_PX}.",
+            )
+        document = session.loaded.document
+        hidden, all_layers = hidden_layer_selection(document, data.get("include_hidden_layers"))
+        tag = layers_tag(hidden, all_layers)
+        png, meta = self.previews.paths(session.loaded.fingerprint, block["handle"], long_side, tag)
+        started = time.perf_counter()
+        cached = self.previews.get(png, meta)
+        if cached is not None:
+            seconds = round(time.perf_counter() - started, 2)
+            return {**cached, "png": str(png), "cached": True, "seconds": seconds}
+        progress = _Progress(self.output, request, PREVIEW_STAGES, self.state)
+        insert = document.entitydb.get(block["handle"])
+        player, omitted = draw_reference(
+            document, insert, hidden_layers=hidden, progress=progress, check=self.state.check
+        )
+        self.state.check()
+        hint = block["size_cad"]
+        picture = paint(
+            player, long_side, self.state.check, progress, max(hint) if hint else None
+        )
+        self.state.check()
+        if all_layers:
+            requested = ["*"]
+        else:
+            requested = sorted(hidden) if hidden else None
+        result = {
+            "ref": block["ref"],
+            "handle": block["handle"],
+            "px": list(picture.image.size),
+            "bounds": None
+            if picture.bounds is None
+            else {
+                "min": [round(value, 6) for value in picture.bounds[0]],
+                "max": [round(value, 6) for value in picture.bounds[1]],
+            },
+            "cad_to_px": picture.cad_to_px,
+            "omitted": omitted,
+            "include_hidden_layers": requested,
+        }
+        self.previews.put(png, meta, picture.image, result)
+        self.previews.trim(keep=(png, meta))
+        seconds = round(time.perf_counter() - started, 2)
+        return {**result, "png": str(png), "cached": False, "seconds": seconds}
+
+
+def find_reference(inventory: dict, data: dict) -> dict:
+    """El bloque de ``inventory["blocks"]`` que nombra el pedido: ``ref``, o ``block`` con
+    ``occurrence`` o ``handle``."""
+    ref, name = data.get("ref"), data.get("block")
+    occurrence, handle = data.get("occurrence"), data.get("handle")
+    if ref is not None:
+        if not isinstance(ref, str) or "#" not in ref:
+            raise WorkerError(protocol.BAD_REQUEST, "«ref» debe ser «bloque#ocurrencia».")
+        name, _sep, number = ref.rpartition("#")
+        if not number.isdigit():
+            raise WorkerError(protocol.BAD_REQUEST, "«ref» debe ser «bloque#ocurrencia».")
+        occurrence = int(number)
+    elif not isinstance(name, str) or not name:
+        raise WorkerError(
+            protocol.BAD_REQUEST, "Falta «ref», o «block» con «occurrence» o «handle»."
+        )
+    elif handle is None and (isinstance(occurrence, bool) or not isinstance(occurrence, int)):
+        raise WorkerError(
+            protocol.BAD_REQUEST, "Con «block», indique «occurrence» (entero) o «handle»."
+        )
+
+    def matches(item: dict) -> bool:
+        if item["name"] != name:
+            return False
+        if handle is not None:
+            return str(item["handle"]).upper() == str(handle).upper()
+        return item["occurrence"] == occurrence
+
+    for item in inventory["blocks"]:
+        if matches(item):
+            return item
+    for item in inventory["omitted"]:
+        if matches(item):
+            raise WorkerError(
+                protocol.NOT_EXPORTABLE,
+                f"La referencia «{name}» no se exporta: {item['reason']}.",
+                details={"block": name, "handle": item["handle"], "reason": item["reason"]},
+            )
+    known = {item["name"] for item in inventory["blocks"]}
+    known |= {item["name"] for item in inventory["omitted"]}
+    if name not in known:
+        raise WorkerError(
+            protocol.BLOCK_NOT_FOUND,
+            f"No existe el bloque «{name}» en el DXF cargado.",
+            "Revise la lista de bloques que devolvió «load».",
+            {"block": name},
+        )
+    raise WorkerError(
+        protocol.REFERENCE_NOT_FOUND,
+        f"El bloque «{name}» no tiene esa referencia.",
+        "Revise «occurrence» o «handle» en la lista que devolvió «load».",
+        {"block": name, "occurrence": occurrence, "handle": handle},
+    )
+
+
+def hidden_layer_selection(document, value) -> tuple[frozenset[str] | None, bool]:
+    """``include_hidden_layers``: ``null``, ``["*"]`` (todas) o lista de capas. Devuelve
+    (capas sin mayúsculas o None, si eran todas). Una capa que no existe es ``BAD_REQUEST``."""
+    if value is None:
+        return None, False
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise WorkerError(
+            protocol.BAD_REQUEST,
+            '«include_hidden_layers» debe ser null, ["*"] o una lista de nombres de capa.',
+        )
+    existing = {str(layer.dxf.name).casefold() for layer in document.layers}
+    if value == ["*"]:
+        return frozenset(existing), True
+    unknown = sorted(item for item in value if item.strip().casefold() not in existing)
+    if unknown:
+        raise WorkerError(
+            protocol.BAD_REQUEST,
+            "Capas que no existen en el DXF: " + ", ".join(f"«{n}»" for n in unknown) + ".",
+            details={"layers": unknown},
+        )
+    names = frozenset(item.strip().casefold() for item in value if item.strip())
+    return (names or None), False
 
 
 def load_response(loaded: LoadedDxf, inventory: dict) -> dict:

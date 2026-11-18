@@ -207,30 +207,35 @@ Pedido:
 ```
 
 - En lugar de `ref` se puede dar `block` y `occurrence`, o `block` y `handle`.
+- `long_side_px`: entero de 64 a 8 000 (1 500 si no se da).
 - `include_hidden_layers`: como en `export` (`null`, `["*"]` o una lista de capas). Si se pide, la vista previa dibuja también esas capas ocultas.
 
-Qué hace: dibuja **solo esa referencia** con el motor del exportador en modo ligero (texto como rectángulos, rayados rellenos, sin tipos de línea; reutilización de bloques repetidos) y la pinta en una imagen PNG sin pasar por el PDF. **No dibuja los 3DSOLID** (decisión aceptada). Usa las `units` de `load`. Tiempos medidos con el prototipo: BLOQUE1 de GUAMO (156 749 entidades) unos 10 s; los bloques del DXF de 830 MB, menos de 9 s cada uno.
+Qué hace: dibuja **solo esa referencia** con el motor del exportador en modo ligero (texto como rectángulos, rayados rellenos, sin tipos de línea; reutilización de bloques repetidos) y la pinta en una imagen PNG sin pasar por el PDF. **No dibuja los 3DSOLID** (decisión aceptada). Se pinta en el orden de la grabación (el mismo que el PDF). Medido con la implementación: BLOQUE1 de GUAMO (156 749 entidades) 12,6 s (unos 9 s de dibujo y 3 de pintado); desde la caché, 0,01 s.
 
 Respuesta (`data`):
 
 ```json
 {
   "png": "C:\\ruta\\carpeta_de_trabajo\\previews\\8f0c…\\50CA_1500_visible.png",
+  "ref": "BLOQUE1#1",
+  "handle": "50CA",
   "px": [1069, 1500],
   "bounds": {"min": [899699.777, 937885.353], "max": [900656.957, 939235.372]},
   "cad_to_px": [1.0947, 0.0, 0.0, -1.0947, -984891.2, 1026714.6],
   "omitted": {"3DSOLID": 0, "REGION": 0},
+  "include_hidden_layers": null,
   "cached": false,
   "seconds": 10.0
 }
 ```
 
-- `bounds`: la caja, en el marco único (sección 2.1), que representa la imagen (la de lo dibujado; puede ser algo menor que la de `load`, por ejemplo porque no lleva los 3DSOLID).
+- `bounds`: la caja, en el marco único (sección 2.1), que representa la imagen (la de lo dibujado; puede ser algo menor que la de `load`, por ejemplo porque no lleva los 3DSOLID). Si no hay nada que dibujar (por ejemplo, un bloque solo con 3DSOLID), `bounds` y `cad_to_px` son `null` y el PNG es de 1 × 1 píxel transparente.
+- `include_hidden_layers`: las capas ocultas que se dibujaron (en minúsculas), `["*"]` o `null`.
 - `cad_to_px`: matriz afín `[a, b, c, d, e, f]` del marco único a píxeles: `px = a·x + c·y + e`, `py = b·x + d·y + f`. Siempre con **`b = c = 0`** (sin giro) y **`a = −d`** (la misma escala en X e Y; Y hacia abajo en la imagen).
 - **Píxeles:** origen en la esquina **superior izquierda**; el píxel (0, 0) ocupa de 0 a 1 en X y en Y (su centro está en (0,5; 0,5)).
 - **Imagen:** PNG con **fondo transparente** (canal alfa); el color 7 (blanco/negro) se dibuja en **negro**, como en el PDF.
 - `omitted`: lo que la vista previa no dibuja, por tipo (los 3DSOLID, por decisión; lo que ezdxf no sabe dibujar).
-- **Caché:** el PNG se guarda en `work-dir\previews\<huella del DXF>\<handle>_<px>_<capas>.png`, donde `<capas>` es `visible` o un resumen corto de `include_hidden_layers`. Si ya existe con la misma clave (huella, handle, tamaño y capas ocultas pedidas), se devuelve sin dibujar (`cached: true`). Si la caché pasa de `--preview-cache-mb` (500 MB por defecto), se borran las imágenes usadas hace más tiempo (nunca la que se acaba de devolver).
+- **Caché:** el PNG se guarda en `work-dir\previews\<huella del DXF>\<handle>_<px>_<capas>.png`, con un `.json` del mismo nombre que guarda el resto de la respuesta. `<capas>` es `visible`, `hidden-all` (con `["*"]`) o `hidden-` y 6 cifras del SHA-1 de las capas pedidas. Si ya existe con la misma clave (huella, handle, tamaño y capas ocultas pedidas), se devuelve sin dibujar (`cached: true`) y cuenta como usada ahora. Si la caché pasa de `--preview-cache-mb` (500 MB por defecto), se borran las imágenes usadas hace más tiempo (nunca la que se acaba de devolver). Una vista previa cancelada no deja nada en la caché.
 
 ## 5. `export` — exportar
 

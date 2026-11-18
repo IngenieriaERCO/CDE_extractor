@@ -133,8 +133,9 @@ directamente, sin pasar por un archivo.)
 
 `cde-exporter worker` es un proceso que el Componedor deja abierto: lee el DXF una vez y
 atiende pedidos en JSON, uno por línea. El formato está en `docs/protocolo_trabajador.md`. Por
-ahora atiende `load`, `status`, `cancel` y `close`; la vista previa y la exportación llegarán
-en las etapas siguientes.
+ahora atiende `load`, `status`, `cancel`, `close` y `preview` (vista previa PNG de un bloque,
+guardada en una caché de la carpeta de trabajo de 500 MB como mucho; se cambia con
+`--preview-cache-mb`). La exportación llegará en la etapa siguiente.
 
 ## DXF muy grandes
 

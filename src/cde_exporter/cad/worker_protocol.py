@@ -110,7 +110,10 @@ def progress(request_id: str, data: dict) -> dict:
 
 
 def parse_request(line: bytes) -> Request:
-    """Pedido de una línea de stdin; lanza ``WorkerError`` si no cumple el formato."""
+    """Pedido de una línea de stdin; lanza ``WorkerError`` si no cumple el formato.
+
+    Admite una BOM de UTF-8 al principio (la pone PowerShell al escribir en una tubería)."""
+    line = line.removeprefix(b"\xef\xbb\xbf")
     try:
         text = line.decode("utf-8")
     except UnicodeDecodeError as failure:

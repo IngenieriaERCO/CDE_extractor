@@ -77,6 +77,11 @@ _NOT_INSTANCEABLE = frozenset(
 XOBJECT_ENV = "CDE_XOBJECT"
 
 
+class DrawingCancelled(Exception):
+    """Quien dibuja pidió parar (el trabajador al cancelar). ``_StrictFrontend`` nunca la trata
+    como datos inválidos de la entidad: siempre llega hasta quien llamó."""
+
+
 def instancing_enabled() -> bool:
     return os.environ.get(INSTANCING_ENV, "").strip() not in {"0", "no", "false"}
 
@@ -286,8 +291,10 @@ class _StrictFrontend(Frontend):
         reported = len(self.skipped) + sum(self.omitted.values()) + self.invisible
         try:
             super().draw_entity(entity, properties)
-        except (MemoryError, TimeoutError):
-            raise  # agotamiento de recursos al dibujar rayados: se trata en export_vector_outputs
+        except (MemoryError, TimeoutError, DrawingCancelled):
+            # Cancelación, o agotamiento de recursos al dibujar rayados (se trata en
+            # export_vector_outputs).
+            raise
         except Exception as error:  # noqa: BLE001 - ezdxf puede lanzar cualquier error
             if start is not None:
                 del self._records[start:]
