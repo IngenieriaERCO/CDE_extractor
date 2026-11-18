@@ -64,16 +64,16 @@ def _document(args) -> dict:
     if args.scale is not None or args.scale_map:
         try:
             scales = _scales(args, data["blocks"])
-        except CadProcessingError as failure:
+            for block in data["blocks"]:
+                scale = scales.get(block["name"].casefold())
+                block["scale"] = scale
+                block["page_size_mm"] = (
+                    page_size_mm(block, parse_nominal_scale(scale), float(args.margin_mm))
+                    if scale is not None
+                    else None
+                )
+        except (CadProcessingError, ValueError) as failure:
             raise WorkerError(protocol.BAD_REQUEST, str(failure)) from failure
-        for block in data["blocks"]:
-            scale = scales.get(block["name"].casefold())
-            block["scale"] = scale
-            block["page_size_mm"] = (
-                page_size_mm(block, parse_nominal_scale(scale), float(args.margin_mm))
-                if scale is not None
-                else None
-            )
     return data
 
 

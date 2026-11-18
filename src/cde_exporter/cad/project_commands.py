@@ -432,7 +432,44 @@ def run_extract_all_blocks(args) -> int:
         print(f"FALLÓ {label}: {_short(reason)}", file=sys.stderr)
         failed.append({**_reference_row(package), "reason": reason})
     loose = loose_summary(document)
-    summary = {
+    summary = project_summary(
+        source,
+        published,
+        plan.omitted,
+        failed,
+        loose,
+        pruned,
+        default_scale=default_scale,
+        scale_map=Path(args.scale_map).name if args.scale_map else None,
+    )
+    _write_json_atomic(summary_path, summary)
+    _print_summary(source, plan, published, failed, summary_path, loose)
+    if failed:
+        sys.stdout.flush()
+        print(
+            f"Error CAD: {len(failed)} paquete(s) fallaron y no se publicaron; "
+            f"los demás sí (ver {SUMMARY_NAME}).",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+def project_summary(
+    source: Path,
+    published: list[dict],
+    omitted,
+    failed: list[dict],
+    loose: list[dict],
+    pruned,
+    *,
+    default_scale: str | None,
+    scale_map: str | None,
+) -> dict:
+    """Contenido de ``resumen_proyecto.json`` (también lo escribe el trabajador con
+    ``write_summary``). ``omitted``: ``OmittedItem``; ``published``: filas de
+    ``_package_row``."""
+    return {
         "document_type": SUMMARY_DOCUMENT_TYPE,
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "project": source.stem,
@@ -440,10 +477,10 @@ def run_extract_all_blocks(args) -> int:
         "exporter_version": __version__,
         "source_dxf": source.name,
         "default_scale": default_scale,
-        "scale_map": Path(args.scale_map).name if args.scale_map else None,
+        "scale_map": scale_map,
         "totals": {
             "packages": len(published),
-            "omitted": len(plan.omitted),
+            "omitted": len(omitted),
             "failed": len(failed),
             "hidden_layer_entities": sum(
                 row["entities"] for package in published for row in package["hidden_layers"]
@@ -461,7 +498,7 @@ def run_extract_all_blocks(args) -> int:
                 "total_occurrences": item.total_occurrences,
                 "reason": item.reason,
             }
-            for item in plan.omitted
+            for item in omitted
         ],
         "failed": failed,
         # Entidades del Model Space fuera de cualquier bloque, por capa y estado de la capa.
@@ -479,17 +516,6 @@ def run_extract_all_blocks(args) -> int:
             ],
         },
     }
-    _write_json_atomic(summary_path, summary)
-    _print_summary(source, plan, published, failed, summary_path, loose)
-    if failed:
-        sys.stdout.flush()
-        print(
-            f"Error CAD: {len(failed)} paquete(s) fallaron y no se publicaron; "
-            f"los demás sí (ver {SUMMARY_NAME}).",
-            file=sys.stderr,
-        )
-        return 1
-    return 0
 
 
 def _reference_row(package: PlannedPackage) -> dict:

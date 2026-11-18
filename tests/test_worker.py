@@ -252,10 +252,10 @@ def test_an_unexpected_failure_does_not_stop_the_worker(
     assert sink.wait("c-2", "result")["data"]["busy"] is False
 
 
-def test_export_is_not_yet_available(running) -> None:
+def test_export_without_load_is_no_session(running) -> None:
     sink, stdin = running
-    stdin.send(id="c-1", command="export")
-    assert sink.wait("c-1", "error")["error"]["code"] == protocol.UNKNOWN_COMMAND
+    stdin.send(id="c-1", command="export", data={"session": "s-1"})
+    assert sink.wait("c-1", "error")["error"]["code"] == protocol.NO_SESSION
 
 
 def test_bad_lines_are_answered_and_the_worker_goes_on(running) -> None:

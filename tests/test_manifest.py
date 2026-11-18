@@ -212,3 +212,27 @@ def test_manifests_1_0_without_the_keys_added_in_1_1_stay_valid(valid_manifest: 
     valid_manifest["schema_version"] = "1.0"
 
     assert validate_manifest(valid_manifest) == ()
+
+
+def test_manifests_1_2_without_the_options_added_in_1_3_stay_valid(valid_manifest: dict) -> None:
+    """Esquema 1.3: ``options`` lleva units, instancing, xobject, clip y exporter_version. Los
+    paquetes 1.0–1.2 ya publicados siguen siendo válidos sin ellas; un 1.3 sin ellas no."""
+    added = ("units", "instancing", "xobject", "clip", "exporter_version")
+    assert valid_manifest["schema_version"] == "1.3"
+    assert set(added) <= set(valid_manifest["options"])
+    for key in added:
+        del valid_manifest["options"][key]
+    problems = validate_manifest(valid_manifest)
+    assert all(any(f"options.{key}: falta la clave" in p for p in problems) for key in added)
+
+    for version in ("1.2", "1.1"):
+        valid_manifest["schema_version"] = version
+        assert validate_manifest(valid_manifest) == ()
+
+
+def test_options_1_3_have_their_types(valid_manifest: dict) -> None:
+    valid_manifest["options"]["instancing"] = "sí"
+    valid_manifest["options"]["clip"] = 1
+    problems = validate_manifest(valid_manifest)
+    assert any("options.instancing" in problem for problem in problems)
+    assert any("options.clip" in problem for problem in problems)

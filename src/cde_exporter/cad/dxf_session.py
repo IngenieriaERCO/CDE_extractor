@@ -41,6 +41,9 @@ class LoadedDxf:
     read_seconds: float
     source_copy: dict | None
     notices: list
+    # Informe de la copia sin bloques sin usar (``large_dxf.PrunedSource``) o None: cada
+    # paquete lo declara en su TXT y su manifiesto, como en la línea de órdenes.
+    pruned: object = None
 
     def changed(self) -> bool:
         """¿Cambió el archivo en disco desde que se leyó? (tamaño o fecha)"""
@@ -145,6 +148,7 @@ def load_dxf(path: Path, work_dir: Path, progress=None) -> LoadedDxf:
     started = time.perf_counter()
     source_copy = None
     notices: list = []
+    pruned = None
     if is_large(path):
         report("read", 0.0, f"Copia por partes sin bloques sin usar ({stat.st_size / 1e6:.0f} MB)")
         folder = make_temporary(work_dir)
@@ -157,7 +161,9 @@ def load_dxf(path: Path, work_dir: Path, progress=None) -> LoadedDxf:
             document = read_dxf(copy if pruned.emptied else path)
         finally:
             shutil.rmtree(folder, ignore_errors=True)
-        if pruned.emptied:
+        if not pruned.emptied:
+            pruned = None
+        else:
             source_copy = {
                 "source_bytes": pruned.source_bytes,
                 "copy_bytes": pruned.copy_bytes,
@@ -194,4 +200,5 @@ def load_dxf(path: Path, work_dir: Path, progress=None) -> LoadedDxf:
         read_seconds=read_seconds,
         source_copy=source_copy,
         notices=notices,
+        pruned=pruned,
     )

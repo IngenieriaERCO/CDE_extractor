@@ -39,6 +39,7 @@ from ezdxf.path import nesting
 from ezdxf.render import hatching
 from ezdxf.tools.pattern import scale_pattern
 
+from cde_exporter.cad import run_hooks
 from cde_exporter.cad.entity_policy import (
     GEOMETRY_FROM_DATA_TYPES,
     HATCH_MEMORY_REASON,
@@ -77,9 +78,8 @@ _NOT_INSTANCEABLE = frozenset(
 XOBJECT_ENV = "CDE_XOBJECT"
 
 
-class DrawingCancelled(Exception):
-    """Quien dibuja pidió parar (el trabajador al cancelar). ``_StrictFrontend`` nunca la trata
-    como datos inválidos de la entidad: siempre llega hasta quien llamó."""
+# Cancelar mientras se dibuja (definida en run_hooks; se reexporta aquí).
+DrawingCancelled = run_hooks.DrawingCancelled
 
 
 def instancing_enabled() -> bool:
@@ -249,6 +249,9 @@ class _StrictFrontend(Frontend):
         self._instances: dict[tuple, _Instance | None] = {}
         self._instanceable: dict[str, bool] = {}
         self.instances_reused = 0
+        # Profundidad de la entidad que se dibuja (0: el INSERT del Model Space), para el
+        # avance y la cancelación (``run_hooks``).
+        self.hook_depth = 0
         if capture_text:
             self.pipeline.draw_text = self._capture_text(self.pipeline.draw_text)
 
@@ -283,6 +286,14 @@ class _StrictFrontend(Frontend):
         return capture
 
     def draw_entity(self, entity, properties) -> None:
+        run_hooks.entity(self.hook_depth)  # puede cancelar (DrawingCancelled)
+        self.hook_depth += 1
+        try:
+            self._draw_entity_checked(entity, properties)
+        finally:
+            self.hook_depth -= 1
+
+    def _draw_entity_checked(self, entity, properties) -> None:
         # Una entidad que lanza un error al dibujarse se trata como no soportada por datos
         # inválidos; se deshacen los trazos (y el texto) que hubiera grabado para no dejarla a
         # medias.
@@ -1023,6 +1034,7 @@ def _draw_to_pdf(
         frontend.draw_layout(document.modelspace(), layout_properties=layout_properties)
     _raise_if_skipped(frontend, "PDF", suggest_solids_footprint)
     backend.text_runs = frontend.text_runs
+    run_hooks.stage("pdf")
     pdf_content = backend.get_pdf_bytes(page, settings=settings, render_box=render_box)
     if stats is not None:
         stats["invisible"] = frontend.invisible

@@ -13,6 +13,7 @@ from ezdxf.entities import DXFEntity
 from ezdxf.math import BoundingBox
 from ezdxf.units import unit_name
 
+from cde_exporter.cad import run_hooks
 from cde_exporter.cad.models import Bounds2D, CadProcessingError, CadWindow, DxfInspection
 
 UNBOUNDED_DIAGNOSTIC_TYPES = frozenset({"3DSOLID", "MTEXT", "POLYLINE", "REGION"})
@@ -73,6 +74,12 @@ def _original(entity):
     return getattr(entity, "source_of_copy", None) or entity
 
 
+def _with_entity_hook(items):
+    for entity in items:
+        run_hooks.entity(-1)
+        yield entity
+
+
 def safe_extents(entities, *, block: str | None = None):
     """Caja de ``entities`` que salta las entidades cuya medición lanza un error.
 
@@ -83,15 +90,24 @@ def safe_extents(entities, *, block: str | None = None):
     (p. ej. un override de DIMSTYLE que apunta a un XRECORD), por eso se captura todo.
     ``entities`` debe poder recorrerse dos veces (un layout o una lista).
     """
+    def checked(items):
+        # Entre entidad y entidad se puede cancelar (run_hooks); sin gancho, las mismas
+        # entidades sin envolver (ezdxf recibe el layout tal cual).
+        if not run_hooks.entity_hook_active():
+            return items
+        return _with_entity_hook(items)
+
     try:
-        return bbox.extents(entities), ()
+        return bbox.extents(checked(entities)), ()
+    except run_hooks.DrawingCancelled:
+        raise
     except Exception:  # noqa: BLE001 - se mide de nuevo entidad por entidad
         pass
     box = BoundingBox()
     invalid: list[InvalidEntity] = []
 
     def measure(items, owner: str | None) -> None:
-        for entity in items:
+        for entity in checked(items):
             try:
                 extents = bbox.extents([entity])
             except Exception as error:  # noqa: BLE001 - ver la docstring

@@ -31,7 +31,7 @@ from cde_exporter.cad.notices import (
 )
 
 DOCUMENT_TYPE = "cde-detail-manifest"
-SCHEMA_VERSION = "1.2"
+SCHEMA_VERSION = "1.3"
 # El manifiesto se publica junto al PDF como <prefijo>.manifest.json, el último de los tres.
 MANIFEST_SUFFIX = ".manifest.json"
 _MM_PER_POINT = 25.4 / 72
@@ -53,6 +53,14 @@ class RunOptions:
     margin_mm: float
     # --include-hidden-layers: None si no se usó, ("*",) para todas o los nombres pedidos.
     include_hidden_layers: tuple[str, ...] | None = None
+    # Esquema 1.3: todo lo que cambia el dibujo, junto. Unidades forzadas (--units) o None;
+    # reutilización de bloques repetidos y Form XObject (CDE_INSTANCING y CDE_XOBJECT); recorte
+    # a la zona de extract-modelspace (None si no es una selección del Model Space).
+    units: str | None = None
+    instancing: bool = True
+    xobject: bool = True
+    clip: bool | None = None
+    exporter_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,15 +213,16 @@ def build_manifest(
     pdf_file: str | Path,
     pdf: PdfFacts,
     options: RunOptions,
+    dxf_digest: tuple[str, int] | None = None,
 ) -> dict:
     """Manifiesto v1 del detalle finalizado (``detail.result`` presente).
 
     Lee ``source_dxf`` y ``pdf_file`` solo para su hash y tamaño; del DXF guarda el nombre,
-    nunca la ruta.
+    nunca la ruta. Con ``dxf_digest`` (SHA-256 y bytes ya calculados) no lee el DXF.
     """
     if detail.result is None:
         raise ValueError("El manifiesto necesita el detalle finalizado (con resultado)")
-    dxf_hash, dxf_bytes = _file_digest(Path(source_dxf))
+    dxf_hash, dxf_bytes = dxf_digest or _file_digest(Path(source_dxf))
     pdf_hash, pdf_bytes = _file_digest(Path(pdf_file))
     reference = detail.reference
     notices = collect_notices(detail)
@@ -326,6 +335,11 @@ def build_manifest(
                 if options.include_hidden_layers is None
                 else list(options.include_hidden_layers)
             ),
+            "units": options.units,
+            "instancing": options.instancing,
+            "xobject": options.xobject,
+            "clip": options.clip,
+            "exporter_version": options.exporter_version,
         },
     }
 
@@ -536,6 +550,11 @@ _SCHEMA = {
         "font_fallback": _Null(_Name()),
         "margin_mm": _NUMBER,
         "include_hidden_layers": _Null(_List(str)),
+        "units": _Null(str),
+        "instancing": bool,
+        "xobject": bool,
+        "clip": _Null(bool),
+        "exporter_version": _Null(str),
     },
 }
 
@@ -550,6 +569,11 @@ _ADDED_IN: dict[str, tuple[int, int]] = {
     "manifiesto.options.include_hidden_layers": (1, 1),
     "manifiesto.selection": (1, 1),
     "manifiesto.selection.clip": (1, 2),
+    "manifiesto.options.units": (1, 3),
+    "manifiesto.options.instancing": (1, 3),
+    "manifiesto.options.xobject": (1, 3),
+    "manifiesto.options.clip": (1, 3),
+    "manifiesto.options.exporter_version": (1, 3),
 }
 
 

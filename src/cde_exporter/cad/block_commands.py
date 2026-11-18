@@ -17,6 +17,7 @@ import ezdxf
 from ezdxf import units
 
 from cde_exporter import __version__
+from cde_exporter.cad import run_hooks
 from cde_exporter.cad.block_catalog import format_block_catalog, list_referenced_blocks
 from cde_exporter.cad.block_extractor import (
     BlockReference,
@@ -45,7 +46,8 @@ from cde_exporter.cad.detail_model import (
     mark_omitted_entities,
 )
 from cde_exporter.cad.detail_text import format_detail_report
-from cde_exporter.cad.exporters import export_vector_outputs
+from cde_exporter.cad.dxf_session import make_temporary
+from cde_exporter.cad.exporters import export_vector_outputs, instancing_enabled, xobjects_enabled
 from cde_exporter.cad.fidelity import (
     hidden_skip_events,
     iter_detail_entities,
@@ -467,7 +469,7 @@ def _staging_folder(parent: Path, staging: list[Path]):
     No se borra al salir del bloque, sino al terminar la orden (``run_extract_block``): con
     --all, los archivos de todas las referencias esperan ahí hasta publicarse juntos.
     """
-    folder = Path(tempfile.mkdtemp(dir=parent))
+    folder = make_temporary(parent)  # «.cde-tmp-…» con el PID que la creó
     staging.append(folder)
     yield str(folder)
 
@@ -549,6 +551,8 @@ def _run_extract_block(
     else:
         selection_method = SelectionMethod.AUTOMATIC
     block_units_code = int(block_definition.block_record.dxf.get("units", 0) or 0)
+    # Etapa «extract» (run_hooks): la caja del bloque, que puede tardar, y la extracción.
+    run_hooks.stage("extract")
     block_extents, source_invalid = safe_extents(block_definition, block=args.block_name)
     max_block_dimension = (
         max(
@@ -622,6 +626,7 @@ def _run_extract_block(
                         args.font_fallback,
                     )
                 )
+            run_hooks.stage("analyze")
             fidelity_report = write_fidelity_report(
                 temp_dxf,
                 temp_fidelity,
@@ -827,6 +832,7 @@ def _run_extract_block(
                 )
             if args.hatch_mode != "normal":
                 print(f"Rayados simplificados: modo --hatch-mode {args.hatch_mode}.")
+            run_hooks.stage("draw")
             try:
                 export_report = export_vector_outputs(
                     render_dxf,
@@ -899,6 +905,7 @@ def _run_extract_block(
                 if nominal_denominator is not None and export_report.drawn_size is not None
                 else None
             )
+            run_hooks.stage("checks")
             checks = validate_output_pdf(
                 temp_pdf, geometry_page_size, export_report.text_lines, drawing_scale
             )
@@ -1002,6 +1009,7 @@ def _run_extract_block(
     # Orden de publicación: PDF y TXT (y los intermedios de desarrollo) de todas las
     # referencias y, al final, los manifiestos. Un PDF sin su manifiesto es un paquete
     # incompleto (``manifest.verify_package``).
+    run_hooks.stage("publish")
     _publish_files([*staged_pairs, *staged_manifests], args.overwrite)
     for text, to_stderr in after_publish:
         if to_stderr:
@@ -1104,11 +1112,19 @@ def _hidden_layers(extracted_document, extracted_path: Path, reveal: frozenset[s
     return hidden_layer_counts(extracted_document), included
 
 
+class BlockingNoticesError(CadProcessingError):
+    """La extracción se detuvo por avisos críticos (``notices.BLOCKING_SEVERITIES``)."""
+
+    def __init__(self, notices) -> None:
+        super().__init__(blocking_message(notices))
+        self.notices = tuple(notices)
+
+
 def _raise_if_blocking(detail) -> None:
     """Sin archivos y código 1 si hay algún aviso crítico (``notices.BLOCKING_SEVERITIES``)."""
     notices = blocking_notices(detail)
     if notices:
-        raise CadProcessingError(blocking_message(notices))
+        raise BlockingNoticesError(notices)
 
 
 def _run_options(args) -> RunOptions:
@@ -1123,6 +1139,11 @@ def _run_options(args) -> RunOptions:
         font_fallback=args.font_fallback,
         margin_mm=args.margin_mm,
         include_hidden_layers=option_value(getattr(args, "include_hidden_layers", None)),
+        units=args.units,
+        instancing=instancing_enabled(),
+        xobject=xobjects_enabled(),
+        clip=getattr(getattr(args, "modelspace_selection", None), "clipped", None),
+        exporter_version=__version__,
     )
 
 
@@ -1137,6 +1158,8 @@ def _checked_manifest(source: Path, pdf: Path, detail, export_report, args) -> d
             page_count, page_size, export_report.drawn_bounds, export_report.cad_to_page_pt
         ),
         options=_run_options(args),
+        # El trabajador ya calculó el hash en «load»: no se vuelve a leer el DXF.
+        dxf_digest=getattr(args, "source_digest", None),
     )
     problems = validate_manifest(manifest)
     if problems:

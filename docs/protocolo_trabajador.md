@@ -2,7 +2,7 @@
 
 Este documento es para quien programe la integración del **Componedor** con el exportador. Es el contrato entre los dos programas: el Componedor lanza el trabajador como **comando externo** (no importa código del exportador), le envía pedidos y lee respuestas, siempre en JSON por líneas.
 
-Estado: **contrato aprobado por Luis Angel (2026-11-17)**, con las observaciones del agente del Componedor incorporadas (sección 14). Pendiente del visto bueno final para implementar. Nada de esto está implementado todavía.
+Estado: **contrato aprobado por Luis Angel (2026-11-17)**, con las observaciones del agente del Componedor incorporadas (sección 14). Implementado por etapas: 1 (arranque, `load`, `--list --json`) y 2 (`preview`) con visto bueno; 3 (`export`, avance, cancelar y manifiesto 1.3) hecha, pendiente de visto bueno; 4 (DXF pequeño de prueba para el Componedor) pendiente.
 
 Decisiones ya tomadas (Luis Angel, 2026-11-17):
 - Un proceso de trabajo persistente que **lee el DXF una sola vez** y atiende tres órdenes: cargar (`load`), vista previa (`preview`) y exportar (`export`), más cancelar (`cancel`).
@@ -29,7 +29,7 @@ cde-exporter worker --work-dir "C:\ruta\carpeta_de_trabajo" [--preview-cache-mb 
 ### 1.1 Temporales y publicación atómica
 
 - Cada paquete se prepara en una carpeta temporal y se publica **moviendo** los archivos a `output_dir` (manifiesto el último). Mover es atómico solo **dentro del mismo disco**.
-- Por eso los temporales de un `export` van en `work-dir` **si está en el mismo disco que `output_dir`**; si no, en `output_dir`, en una carpeta con el prefijo fijo **`.cde-tmp-`** (por ejemplo `.cde-tmp-3f9a1c`).
+- Por eso los temporales de cada trabajo de un `export` van **siempre en `output_dir`** (el mismo disco), en una carpeta con el prefijo fijo **`.cde-tmp-`** (por ejemplo `.cde-tmp-3f9a1c`) que se borra al terminar el trabajo, también si falla o se cancela. Los de `load` y de la vista previa van en `work-dir`.
 - **Limpieza:** al arrancar, el trabajador borra las carpetas `.cde-tmp-*` de `work-dir`; al empezar un `export`, las de `output_dir` que tengan ese prefijo y no sean de otro trabajador en marcha (cada carpeta lleva dentro un archivo con el PID que la creó). Nunca borra nada sin ese prefijo.
 - El Componedor puede ignorar cualquier archivo o carpeta de `output_dir` que empiece por `.cde-tmp-`.
 
@@ -310,7 +310,10 @@ Respuesta (`data`):
 }
 ```
 
-- `status`: `published`, `failed` o `cancelled` (no empezó o se interrumpió por `cancel`).
+- Cada trabajo lleva también `handle` (el de su INSERT). Sin `job`, se numeran `t1`, `t2`…; sin `package`, se usa el `file_stem` de `load`.
+- `status`: `published`, `failed` o `cancelled` (no empezó, se interrumpió por `cancel` o el DXF cambió).
+- `error` de un trabajo: `{"code", "message", "details"}`; con `CRITICAL_NOTICE`, `details.notices` es la lista de `{code, message}` de los avisos críticos.
+- Opciones por defecto (las de `extract-block`): `hatch_mode: "auto"`, `hatch_threshold: 50000`, `solids: null`, `omit_unsupported: false`, `text_layer: true`, `include_hidden_layers: null`, fuentes `null` (se usan las de la configuración `.env`, como en la línea de órdenes), `overwrite: false`, `write_summary: false`.
 - `notices`: los mismos avisos del manifiesto (lista única de avisos). La fuente de verdad del paquete sigue siendo **su manifiesto**: el Componedor debe validarlo como hoy.
 - El SHA-256 del DXF que va en cada manifiesto es el calculado en `load` (no se vuelve a leer el archivo por paquete).
 - Si el DXF cambió desde `load`, el pedido termina con el error `DXF_CHANGED` (sección 9).
@@ -324,7 +327,7 @@ Para que un paquete diga **todo lo que cambia su dibujo**, el `options` de su ma
 - `clip`: si `extract-modelspace` recortó a la zona (hoy en `selection.clip`);
 - `exporter_version`: la versión del exportador (hoy ya en `exporter.version`; se repite aquí).
 
-Es un cambio del manifiesto (**esquema 1.3**, solo añade claves; los 1.0–1.2 siguen siendo válidos con `manifest._ADDED_IN`). **Necesita el visto bueno de Luis Angel** antes de implementarse.
+Es un cambio del manifiesto (**esquema 1.3**, solo añade claves; los 1.0–1.2 siguen siendo válidos con `manifest._ADDED_IN`). Aprobado por Luis Angel (2026-11-17) e implementado con la etapa 3; también lo usan las órdenes de la línea de órdenes (`docs/manifiesto.md`). `clip` es `null` salvo en los paquetes de `extract-modelspace`.
 
 ## 6. Avance (`progress`)
 
@@ -342,7 +345,7 @@ Durante `load`, `preview` y `export` el trabajador envía eventos (como mucho un
   - `load`: `read` (incluye la copia de un DXF grande), `hash`, `blocks`, `layers`.
   - `preview`: `draw`, `paint`.
   - `export`, por trabajo: `extract`, `analyze` (fidelidad e inventario), `draw`, `pdf`, `checks`, `publish`.
-- En `draw` el porcentaje se calcula con las entidades dibujadas sobre el total del bloque; en las demás etapas, por etapa terminada.
+- En `draw` el porcentaje se calcula con las entidades del primer nivel del bloque ya dibujadas (cada INSERT anidado cuenta una, con todo su contenido); en las demás etapas, por etapa empezada. Pesos de cada etapa dentro de un trabajo: `extract` 10 %, `analyze` 10 %, `draw` 50 %, `pdf` 15 %, `checks` 10 %, `publish` 5 %.
 - `job`, `job_index` y `job_total` son `null` fuera de `export`.
 
 ## 7. `cancel` y `status`

@@ -8,8 +8,8 @@ JSON por líneas (docs/protocolo_trabajador.md).
 - stdout solo lleva JSON en UTF-8 (``_Output``); lo que el exportador escribe en la terminal y el
   registro de las librerías van a stderr.
 
-Etapas hechas: 1 (arranque, ``load``, ``status``, ``cancel`` y ``close``) y 2 (``preview`` con
-caché).
+Etapas hechas: 1 (arranque, ``load``, ``status``, ``cancel`` y ``close``), 2 (``preview`` con
+caché) y 3 (``export``, en ``worker_export``).
 """
 
 from __future__ import annotations
@@ -62,12 +62,23 @@ class _Output:
     def __init__(self, stream) -> None:
         self.stream = stream
         self.lock = threading.Lock()
+        # stdout cerrado (el Componedor terminó): ya no hay a quién responder; se avisa con
+        # ``on_close`` (el trabajador cancela lo que esté haciendo).
+        self.closed = threading.Event()
+        self.on_close = None
 
     def send(self, message: dict) -> None:
         data = protocol.encode(message)
         with self.lock:
-            self.stream.write(data)
-            self.stream.flush()
+            if self.closed.is_set():
+                return
+            try:
+                self.stream.write(data)
+                self.stream.flush()
+            except (OSError, ValueError):
+                self.closed.set()
+                if self.on_close is not None:
+                    self.on_close()
 
 
 @dataclass
@@ -169,6 +180,7 @@ class Worker:
         self.work_dir = work_dir
         self.preview_cache_mb = preview_cache_mb
         self.state = _State()
+        output.on_close = self.state.cancel.set
         self.queue: queue.Queue = queue.Queue()
         self.previews = PreviewCache(work_dir / "previews", preview_cache_mb)
 
@@ -237,7 +249,7 @@ class Worker:
     def run(self) -> None:
         while True:
             request = self.queue.get()
-            if request is None:
+            if request is None or self.output.closed.is_set():
                 return
             if request.command == "close":
                 self.output.send(protocol.result(request, {}))
@@ -273,6 +285,8 @@ class Worker:
             return self.load(request)
         if request.command == "preview":
             return self.preview(request)
+        if request.command == "export":
+            return self.export(request)
         raise WorkerError(
             protocol.UNKNOWN_COMMAND,
             f"La orden «{request.command}» todavía no está implementada en este trabajador.",
@@ -421,6 +435,28 @@ class Worker:
         self.previews.trim(keep=(png, meta))
         seconds = round(time.perf_counter() - started, 2)
         return {**result, "png": str(png), "cached": False, "seconds": seconds}
+
+
+    # ------------------------------------------------------------------ export
+    def export(self, request: Request) -> dict:
+        from cde_exporter.cad.worker_export import run_export
+
+        session = self.session_for(request)
+
+        def session_check() -> str | None:
+            if session.loaded.changed():
+                return f"El DXF «{session.loaded.path.name}» cambió en disco desde «load»."
+            return None
+
+        return run_export(
+            request,
+            session,
+            send=self.output.send,
+            state=self.state,
+            check=self.state.check,
+            cancelled_type=Cancelled,
+            session_check=session_check,
+        )
 
 
 def find_reference(inventory: dict, data: dict) -> dict:

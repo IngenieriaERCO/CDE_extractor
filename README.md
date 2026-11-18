@@ -132,10 +132,11 @@ cde-exporter cad extract-all-blocks "data\input\obra.dxf" --output-dir "data\out
 directamente, sin pasar por un archivo.)
 
 `cde-exporter worker` es un proceso que el Componedor deja abierto: lee el DXF una vez y
-atiende pedidos en JSON, uno por línea. El formato está en `docs/protocolo_trabajador.md`. Por
-ahora atiende `load`, `status`, `cancel`, `close` y `preview` (vista previa PNG de un bloque,
+atiende pedidos en JSON, uno por línea. El formato está en `docs/protocolo_trabajador.md`.
+Atiende `load`, `status`, `cancel`, `close`, `preview` (vista previa PNG de un bloque,
 guardada en una caché de la carpeta de trabajo de 500 MB como mucho; se cambia con
-`--preview-cache-mb`). La exportación llegará en la etapa siguiente.
+`--preview-cache-mb`) y `export` (varios paquetes, cada uno con su escala y su nombre, con el
+mismo resultado que `cad extract-block`, sin volver a leer el DXF; se puede cancelar).
 
 ## DXF muy grandes
 

@@ -1,4 +1,4 @@
-# Manifiesto de detalle (`cde-detail-manifest`, esquema 1.2)
+# Manifiesto de detalle (`cde-detail-manifest`, esquema 1.3)
 
 Este documento es para quien programe el **componedor de PDF** (la plancha A1). El manifiesto es el contrato técnico de cada detalle extraído: con él se puede identificar, validar y colocar el PDF sin volver a leer el DXF de origen.
 
@@ -45,6 +45,7 @@ def cad_to_page_mm(x, y):          # coordenadas del Model Space -> mm de págin
 - `schema_version` versiona este contrato. Un cambio de la versión menor (`1.1`) solo añade información; un cambio de la mayor (`2.0`) puede romper a quien lo lea.
 - `1.1` (2026-11-11) añade `options.include_hidden_layers`, `selection` (paquetes de `cad extract-modelspace`) y los avisos de capas ocultas (`HIDDEN_LAYERS_CONTENT`, `HIDDEN_LAYERS_INCLUDED`, `MODELSPACE_HIDDEN_OVERLAP`) y del Model Space (`MODELSPACE_NOT_COPIED`, `MODELSPACE_ZERO_LENGTH`, `MODELSPACE_WITHOUT_BOUNDS`). Un lector de la `1.0` puede leerlo si ignora las claves que no conoce (comprobado con el componedor el 2026-11-12: integridad y coherencia pasan).
 - `1.2` (2026-11-12) añade `selection.clip` (recorte a la zona) y los avisos `MODELSPACE_CLIPPED` (info) y `MODELSPACE_NOT_CLIPPED` (warning).
+- `1.3` (2026-11-18, aprobada por Luis Angel) añade a `options` todo lo que cambia el dibujo, junto: `units`, `instancing`, `xobject`, `clip` y `exporter_version`. Los manifiestos `1.0`–`1.2` siguen siendo válidos sin esas claves.
 - `model_version` es la versión del modelo interno del detalle (hoy `"2"`). Es un dato de trazabilidad: el componedor no debería depender de ella.
 
 ## Campos
@@ -54,7 +55,7 @@ def cad_to_page_mm(x, y):          # coordenadas del Model Space -> mm de págin
 | Campo | Tipo | Significado |
 |---|---|---|
 | `document_type` | texto | Siempre `"cde-detail-manifest"`. |
-| `schema_version` | texto | Versión de este esquema (`"1.2"`). |
+| `schema_version` | texto | Versión de este esquema (`"1.3"`). |
 | `model_version` | texto | Versión del modelo interno (`"2"`). |
 | `generated_at` | texto o null | Fecha y hora de la extracción (ISO 8601 con zona horaria). |
 
@@ -161,6 +162,13 @@ Desde la 1.1. `null` si se exportó un bloque (`cad extract-block`). En un paque
 
 Las opciones con las que se ejecutó la extracción: `hatch_mode`, `hatch_threshold`, `solids` (`footprint` o null), `omit_unsupported`, `text_layer`, `font_substitutions`, `font_folder` y `font_fallback` (estos tres, como nombres de archivo o null), `margin_mm` e `include_hidden_layers` (desde la 1.1: null si no se usó la opción, `["*"]` para todas las capas ocultas o la lista de capas pedidas).
 
+Desde la 1.3, además:
+- `units`: las unidades forzadas con `--units` (o en `load` del trabajador), o null. Es el mismo valor que `units.user_override`.
+- `instancing`: si se reutilizó el dibujo de los INSERT repetidos (false con `CDE_INSTANCING=0`).
+- `xobject`: si los bloques reutilizados van en el PDF como Form XObject (false con `CDE_XOBJECT=0` o sin reutilización).
+- `clip`: en un paquete de `cad extract-modelspace`, si se recortó a la zona (false con `--no-clip` o sin zona); null en los demás.
+- `exporter_version`: la versión del exportador (la misma que `exporter.version`).
+
 ## Validación del manifiesto
 
 `validate_manifest(datos)` devuelve una tupla de errores (vacía si es válido). No usa `jsonschema`: el esquema está declarado en el propio módulo y exige todas las claves, sin claves de más. Además comprueba:
@@ -188,7 +196,7 @@ Termina con código 0 («Paquete completo y coherente») o con código 1 y la li
 ```json
 {
   "document_type": "cde-detail-manifest",
-  "schema_version": "1.2",
+  "schema_version": "1.3",
   "model_version": "2",
   "source": {"dxf_name": "prueba_erco_perfil.dxf", "dxf_sha256": "1f1726e9…c07b38ed", "dxf_bytes": 58025354, "block_name": "Perfil_K0010"},
   "scale": {"requested": "1:50", "denominator": 50.0, "factor_mm_per_cad_unit": 20.0, "physical_scale_guaranteed": true, "physical_scale_reason": null},
