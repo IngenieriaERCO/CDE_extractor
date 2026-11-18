@@ -20,12 +20,16 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - NO borrar nunca: las carpetas `data/input/referencia/` y `data/output/referencia/` completas, `data/input/.gitkeep`, `data/output/.gitkeep` y `Pruebas/fonts/`. Lo demás de `data/input` y `data/output` se puede borrar (son pruebas sueltas que se regeneran).
 
 ## Git
+- Desde el 2026-11-18 (reorganización de Alan): se trabaja en la rama `dev`; `main` está protegida.
+  - Nunca hacer push a `main`.
+  - Antes de cualquier push, revisar `git remote -v` y la rama actual (`git branch --show-current`).
+  - No hacer push sin la orden expresa de Luis Angel.
 - Añadir archivos por nombre; nunca `git add .`.
 - No hacer commit ni push sin que Luis Angel lo pida.
 - Un commit por fase terminada; antes, solo si Luis Angel lo pide. Los ajustes menores se agrupan en el commit de la fase en curso.
 - Mensajes en español: "Fase N: ..." o "Ajuste Fase N (x): ...".
 - `core.autocrlf` = `input`; los archivos van en LF.
-- Repo privado `IngenieriaERCO/CDE_manager`. `data/input` y `data/output` están ignorados: son datos confidenciales de ERCO, no se suben.
+- Repo privado `IngenieriaERCO/CDE_manager`, renombrado el 2026-11-18: responde `https://github.com/IngenieriaERCO/CDE_Extractor.git` (con guion bajo; GitHub no distingue mayúsculas; con guion, `cde-extractor`, no existe). El remoto local aún apunta al nombre antiguo, que GitHub redirige; no se cambia hasta que Luis Angel lo diga. El Componedor está en `IngenieriaERCO/CDE_Composer`. `data/input` y `data/output` están ignorados: son datos confidenciales de ERCO, no se suben.
 
 ## Reglas del programa
 - Única entrada: DXF; se lee el Model Space.
