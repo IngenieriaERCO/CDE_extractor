@@ -9,7 +9,7 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - Lee cada archivo antes de editarlo. Pide confirmación antes de cambios grandes.
 
 ## Verificación (siempre antes de dar algo por terminado)
-- `python -m pytest -q --tb=short` (referencia: 615 pruebas pasando).
+- `python -m pytest -q --tb=short` (referencia: 626 pruebas pasando).
 - `ruff check src tests`.
 - NO ejecutar `ruff format` sobre archivos existentes (solo en archivos nuevos).
 - NO usar `pytest -s` (las pruebas del aviso de escala esperarían entrada).
@@ -55,6 +55,8 @@ Proyecto de Luis Angel (práctica profesional en ERCO, Medellín). Extrae un blo
 - El TXT registra cada HATCH por tipo, patrón y escala con su tratamiento (conservado, relleno sólido, solo contorno u omitido) y el motivo.
 - Capas ocultas: `HIDDEN_LAYERS_CONTENT` (info, contenido del bloque en capa apagada o congelada), `MODELSPACE_HIDDEN_OVERLAP` (warning, entidades sueltas del Model Space en capa oculta sobre la zona del bloque) y `HIDDEN_LAYERS_INCLUDED` (info). `--include-hidden-layers [CAPAS]` las dibuja cambiando solo la copia de trabajo. Manifiesto en esquema 1.3 (la 1.1 añade `options.include_hidden_layers` y `selection`, la 1.2 `selection.clip`, la 1.3 `options.units`, `instancing`, `xobject`, `clip` y `exporter_version`; `validate_manifest` acepta las versiones menores anteriores sin esas claves: `manifest._ADDED_IN`).
 - Los objetos de Civil 3D requieren `EXPORTTOAUTOCAD` antes de guardar el DXF.
+- Bloques anónimos en el trabajador (`inventory.py`): se ofrecen los `*U` del Model Space con 100 entidades visibles o más (`CDE_ANON_MIN_ENTITIES`; la opción `anonymous_min_entities` de `load` manda sobre ella), con `anonymous: true` y `label` = capa + handle del INSERT (`I1.M1.PV1_12900`), que también es su `file_stem`. Los menores van a `omitted` con `anonymous: true`. AutoCAD renumera los `*U` al guardar: el `ref` solo vale en la sesión; entre sesiones se identifican por el handle del INSERT (`preview` y `export` aceptan solo `handle`: `worker.find_reference`). `extract-all-blocks` de la línea de órdenes sigue omitiendo todos los anónimos.
+- `--output-prefix` puede llevar puntos (`I1.M1.PV1_12900`): solo se rechazan las extensiones de salida (`block_commands.OUTPUT_EXTENSIONS`) y las extensiones se añaden con `block_commands.with_extension`, nunca con `with_suffix`.
 - Entidades de tipos que ezdxf no sabe leer (de complementos: `VehicleTrackingPath`, `PLGRIDSYSTEM`, `GEOMAPIMAGE`…; ezdxf las guarda como `DXFTagStorage`, sin capa, color ni `invisible`): nunca tumban un `load`, una vista previa ni una exportación; se omiten con el aviso `UNKNOWN_ENTITIES_OMITTED` (warning, tipo y cantidad). Para leer un atributo de una entidad de cualquier tipo se usa `reader.dxf_attr(entity, clave, defecto)`: `entity.dxf.get(clave, defecto)` lanza `DXFAttributeError` si el tipo no admite el atributo. `reader.is_unknown_entity` las reconoce.
 - Los sólidos 3D (3DSOLID) se dibujan como huella en planta con `--solids footprint` o se omiten con `--omit-unsupported`; sin ninguna de las dos opciones, la extracción se detiene.
 - El ACIS de los 3DSOLID se lee con `acis_reader.load_bodies`, que admite el transform binario de AutoCAD 2018+ (PVcase) que ezdxf 1.4.4 no lee; los sólidos leídos así llevan el aviso `SOLIDS_ACIS_OWN_READER` (info). Un transform con escala ≠ 1 o deformación no se convierte (motivo en el TXT).

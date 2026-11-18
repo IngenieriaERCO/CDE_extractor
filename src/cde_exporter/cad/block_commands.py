@@ -482,17 +482,31 @@ def _staging_folder(parent: Path, staging: list[Path]):
     yield str(folder)
 
 
+# Extensiones que no puede llevar --output-prefix (las de lo que se publica). Un punto en el
+# nombre (p. ej. «I1.M1.PV1_12900», el nombre de un bloque anónimo) no es una extensión.
+OUTPUT_EXTENSIONS = frozenset({".pdf", ".txt", ".dxf", ".svg", ".json"})
+
+
+def has_output_extension(prefix: Path) -> bool:
+    return prefix.suffix.lower() in OUTPUT_EXTENSIONS
+
+
+def with_extension(prefix: Path, extension: str) -> Path:
+    """``prefix`` + ``extension`` (``with_suffix`` cortaría lo que va tras el último punto)."""
+    return prefix.with_name(prefix.name + extension)
+
+
 def _outputs(prefix: Path, ref, all_references: bool, keep: bool) -> dict[str, Path]:
     """Archivos que publica una referencia: PDF, TXT, manifiesto y, en desarrollo, DXF y SVG."""
     order_prefix = prefix.with_name(f"{prefix.name}_{ref.order:03d}") if all_references else prefix
     outputs = {
-        "pdf": order_prefix.with_suffix(".pdf"),
-        "txt": order_prefix.with_suffix(".txt"),
-        "manifest": order_prefix.with_name(f"{order_prefix.name}{MANIFEST_SUFFIX}"),
+        "pdf": with_extension(order_prefix, ".pdf"),
+        "txt": with_extension(order_prefix, ".txt"),
+        "manifest": with_extension(order_prefix, MANIFEST_SUFFIX),
     }
     if keep:
-        outputs["dxf"] = order_prefix.with_suffix(".dxf")
-        outputs["svg"] = order_prefix.with_suffix(".svg")
+        outputs["dxf"] = with_extension(order_prefix, ".dxf")
+        outputs["svg"] = with_extension(order_prefix, ".svg")
     return outputs
 
 
@@ -514,7 +528,7 @@ def _run_extract_block(
     if args.scale is not None and args.scale_factor is not None:
         raise CadProcessingError("No combines --scale con --scale-factor")
     nominal_denominator = parse_nominal_scale(args.scale) if args.scale is not None else None
-    if prefix.suffix:
+    if has_output_extension(prefix):
         raise CadProcessingError("--output-prefix debe ser una ruta base sin extensión")
     if args.all and (args.handle is not None or args.occurrence is not None):
         raise CadProcessingError("--all no se combina con --occurrence ni --handle")
@@ -601,8 +615,8 @@ def _run_extract_block(
         pdf_destination = destinations["pdf"]
         txt_destination = destinations["txt"]
         manifest_destination = destinations["manifest"]
-        dxf_output = order_prefix.with_suffix(".dxf")
-        svg_output = order_prefix.with_suffix(".svg")
+        dxf_output = with_extension(order_prefix, ".dxf")
+        svg_output = with_extension(order_prefix, ".svg")
         prefix.parent.mkdir(parents=True, exist_ok=True)
         # La carpeta de trabajo dura hasta el final de la orden (se borra en run_extract_block).
         with _staging_folder(prefix.parent, staging) as temp_name:

@@ -354,7 +354,7 @@ def _print_list(
 
 def run_extract_modelspace(args) -> int:
     source = Path(args.drawing)
-    if Path(args.output_prefix).suffix:
+    if block_commands.has_output_extension(Path(args.output_prefix)):
         raise CadProcessingError("--output-prefix debe ser una ruta base sin extensión")
     document, pruned = block_commands.read_source_dxf(source, Path(args.output_prefix).parent)
     layers, exclude = _patterns(args.layers), _patterns(args.exclude_layers)

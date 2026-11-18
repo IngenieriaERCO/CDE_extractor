@@ -92,12 +92,14 @@ Pedido:
 
 ```json
 {"protocol": "1.0", "id": "c-1", "command": "load",
- "data": {"dxf": "C:\\obras\\GUAMO_prueba.dxf", "units": null, "margin_mm": 5.0, "include_layers": true}}
+ "data": {"dxf": "C:\\obras\\GUAMO_prueba.dxf", "units": null, "margin_mm": 5.0, "include_layers": true,
+          "anonymous_min_entities": null}}
 ```
 
 - `units`: `null` (usar `$INSUNITS`) o `mm`, `cm`, `m`, `in`, `ft` (como `--units`). **Vale para toda la sesión:** la vista previa y la exportación usan estas unidades.
 - `margin_mm`: margen de página (por defecto 5). **Vale para toda la sesión**: es el que usará `export` y el que entra en el tamaño de página que calcula el Componedor.
 - `include_layers` (opcional, por defecto `true`): con `false` no se calcula la tabla de capas (`layers` es `[]`), lo que ahorra 1–2 s en bloques muy grandes.
+- `anonymous_min_entities` (opcional, entero ≥ 0 o `null`): entidades visibles que necesita un bloque anónimo `*U` del Model Space para ofrecerse en `blocks` (ver «Bloques anónimos» en la sección 3.1). Si viene, **manda sobre la variable `CDE_ANON_MIN_ENTITIES`**; con `null` o sin la clave, vale la variable o, sin ella, 100. Otro valor (negativo, decimal, texto, `true`) da `BAD_REQUEST`. La respuesta devuelve el umbral usado en `anonymous_min_entities`.
 
 Qué hace: lee el DXF **una vez** (con la copia temporal sin bloques sin usar si pasa de 200 MB, como hoy), calcula la huella y el SHA-256 (sección 10), la lista de bloques y la tabla de capas. Tiempos medidos con los prototipos: GUAMO_prueba.dxf (6,8 MB) unos 3 s; PRUEBAEXPORTADORSUPERFICIES.dxf (830 MB) unos 100–110 s, casi todo leer.
 
@@ -122,6 +124,7 @@ Respuesta (`data`):
     "status": "declaradas en el DXF y coherentes", "verified": true, "warnings": []
   },
   "margin_mm": 5.0,
+  "anonymous_min_entities": 100,
   "blocks": [ { "...": "ver 3.1" } ],
   "omitted": [ {"name": "*U1095", "occurrence": 1, "total_occurrences": 1, "handle": "9A4EE5",
                 "reason": "bloque anónimo (lo crea AutoCAD para cotas, rayados o bloques dinámicos)"} ],
@@ -135,7 +138,7 @@ Respuesta (`data`):
 - **Lectura selectiva:** si la copia sin bloques sin usar mediría 500 MB o más (variable `CDE_SELECTIVE_DXF_MB`), la copia guarda del Model Space solo los INSERT (con sus atributos) y todo el Paper Space. Los bloques, sus cajas y sus paquetes son los mismos; lo suelto solo se resume en `modelspace_loose`, que entonces lleva además `vertices`, `types` y `bounds_approx` (caja aproximada de los puntos guardados). Aviso `SOURCE_MODELSPACE_LOOSE_SKIPPED` (info) en `notices` y en cada paquete.
 - **Caché de copias:** la copia reducida se guarda en `work-dir\dxf-cache\<SHA-256 del DXF>\` (las 3 usadas más recientemente). Otro `load` del mismo DXF la encuentra por la huella y el tamaño, comprueba el SHA-256 completo (una lectura seguida, sin interpretar) y la reutiliza sin repetir las pasadas.
 - **Memoria:** antes de leer con ezdxf se estima la memoria (unos 7 bytes por byte de DXF o de copia, más 300 MB). Si el equipo no la tiene libre (memoria más archivo de paginación), `load` termina con `DXF_TOO_LARGE` y dice cuánta haría falta.
-- `omitted`: referencias que no se pueden exportar, con el mismo motivo que hoy da `extract-all-blocks` (anónimo, sin definición, XREF, sin nada visible).
+- `omitted`: referencias que no se pueden exportar, con su motivo (anónimo, sin definición, XREF, sin nada visible). Los `*U` pequeños (ver «Bloques anónimos» en la sección 3.1) llevan además `anonymous: true` y `visible_entities`.
 - `modelspace_loose`: entidades del Model Space fuera de cualquier bloque, por capa y estado (no se exportan con `export`; ver `extract-modelspace`).
 - `unknown_entities`: entidades de tipos que ezdxf no sabe leer (de complementos de AutoCAD, p. ej. `VehicleTrackingPath`, `PLGRIDSYSTEM`, `GEOMAPIMAGE`), por tipo: `{"type", "modelspace", "in_blocks"}` (sueltas en el Model Space y en las definiciones de bloque). No se dibujan en ningún PDF ni en la vista previa; si hay alguna, `notices` lleva el aviso `UNKNOWN_ENTITIES_OMITTED` (warning). Nunca hacen fallar `load`, `preview` ni `export`.
 
@@ -165,6 +168,11 @@ Una entrada por **referencia** (INSERT) exportable del Model Space, en el orden 
 ```
 
 - `ref`: identificador estable de la referencia dentro de la sesión (`nombre#ocurrencia`). Se puede usar en `preview` y `export` en lugar de nombre y ocurrencia.
+- `anonymous`: `true` si es un bloque anónimo `*U` del Model Space que se ofrece para exportar (el Componedor los muestra aparte); `false` en los demás.
+- `label`: nombre para mostrar. En los bloques con nombre, el nombre; en los anónimos, la capa y el handle del INSERT (`I1.M1.PV1_12900`), porque AutoCAD renumera los `*U` al guardar y el handle no cambia.
+- `visible_entities`: entidades que se dibujan (sin las ocultas ni los INSERT anidados).
+- **Bloques anónimos:** se ofrecen los `*U` insertados en el Model Space que dibujan **100 entidades visibles o más** (variable `CDE_ANON_MIN_ENTITIES` o `anonymous_min_entities` de `load`, que manda); por ejemplo, las mesas de paneles de PVcase o las tablas de Civil 3D. Los menores (etiquetas, piezas de Civil 3D, a miles) van a `omitted`. Los `*D`, `*X`, `*A`… nunca se ofrecen. Medido: PRGD 3 de 3 (las mesas), Plano_completo 1 de 3 319, Perfil 6 de 648. Se exportan con su `ref` (`*U76#1`) como cualquier otro bloque; el paquete se llama como `label` y el manifiesto guarda el nombre `*U` y el handle.
+- **Identificar un `*U` entre sesiones:** el `ref` (`*U76#1`) solo vale dentro de la sesión, porque AutoCAD renumera los `*U` al guardar (`*U76` puede pasar a ser `*U80`). Lo que no cambia es el **handle del INSERT**: para volver a encontrar el mismo bloque tras otro `load`, el Componedor debe guardar el `handle` y pedirlo con `handle` solo (sin `block`) en `preview` y `export`. El `label` y el `file_stem` salen de la capa y el handle, así que el paquete se llama igual aunque cambie el número.
 - `handle`: el del INSERT en el DXF de origen; **nunca `null`**.
 - `bounds`: caja en el marco único (sección 2.1), **calculada por definición** (decisión aceptada), de lo que **se dibujará al exportar**:
   - **incluye la huella de los 3DSOLID** (la que dibuja la exportación con `solids: "footprint"`), aunque la vista previa no los muestre;
@@ -178,7 +186,7 @@ Una entrada por **referencia** (INSERT) exportable del Model Space, en el orden 
 - `contains`: lo que puede cambiar el resultado. `solids_3d` > 0 significa que la vista previa no los mostrará y la exportación los dibujará como huella (sección 5, opción `solids`).
 - `hidden_layer_entities`: entidades del bloque en capas apagadas o congeladas (no se dibujan salvo con `include_hidden_layers`).
 - `unknown_entities`: las de tipos desconocidos del bloque y sus anidados (cada definición una vez), `[{"type", "count"}]`; no cuentan en `entities` ni en la caja. El paquete exportado las declara con el aviso `UNKNOWN_ENTITIES_OMITTED`.
-- `file_stem`: nombre de paquete que se propone, ya válido según la sección 5.1 (con `_001`, `_002`… si hay varias referencias).
+- `file_stem`: nombre de paquete que se propone, ya válido según la sección 5.1 (con `_001`, `_002`… si hay varias referencias; en los anónimos, `label`).
 
 ### 3.2 Cada capa (`layers[]`)
 
@@ -211,7 +219,7 @@ Pedido:
  "data": {"session": "s-1", "ref": "BLOQUE1#1", "long_side_px": 1500, "include_hidden_layers": null}}
 ```
 
-- En lugar de `ref` se puede dar `block` y `occurrence`, o `block` y `handle`.
+- En lugar de `ref` se puede dar `block` y `occurrence`, `block` y `handle`, o **solo `handle`** (el del INSERT, sin distinguir mayúsculas; sirve aunque el nombre del bloque haya cambiado, como los `*U` renumerados). Con solo `handle`: si es de una referencia de `omitted`, `NOT_EXPORTABLE`; si no existe, `REFERENCE_NOT_FOUND`; si el DXF lo tiene repetido, `BAD_REQUEST` con los `refs` en `details`.
 - `long_side_px`: entero de 64 a 8 000 (1 500 si no se da).
 - `include_hidden_layers`: como en `export` (`null`, `["*"]` o una lista de capas). Si se pide, la vista previa dibuja también esas capas ocultas.
 
@@ -264,7 +272,7 @@ Pedido:
  }}
 ```
 
-- `jobs[]`: cada trabajo dice **qué** referencia (`ref`, o `block` + `occurrence`, o `block` + `handle`), **a qué escala** y **con qué nombre de paquete** (`package`, sección 5.1). Se publican `<package>.pdf`, `.txt` y `.manifest.json` en `output_dir`. Cada trabajo tiene su propia escala: se pueden repetir bloques y ocurrencias a escalas distintas con paquetes distintos.
+- `jobs[]`: cada trabajo dice **qué** referencia (`ref`, o `block` + `occurrence`, o `block` + `handle`, o solo `handle`, como en `preview`), **a qué escala** y **con qué nombre de paquete** (`package`, sección 5.1). Se publican `<package>.pdf`, `.txt` y `.manifest.json` en `output_dir`. Cada trabajo tiene su propia escala: se pueden repetir bloques y ocurrencias a escalas distintas con paquetes distintos.
 - `options`: comunes a todos los trabajos; los mismos significados y valores por defecto que las opciones de `extract-block` (`solids: "footprint"` y `omit_unsupported: true` son los recomendados para que salga todo).
 - **`units` y `margin_mm` son los de `load`.** No hace falta enviarlos; si se envían en `options` con un valor **distinto** del de `load`, el pedido termina con `BAD_REQUEST` (para cambiarlos, hay que volver a hacer `load`).
 - **Antes de empezar** se comprueba todo: que cada referencia existe, que las escalas son válidas, que cada `package` cumple la sección 5.1, que no hay dos trabajos con el mismo `package`, que ningún archivo de salida pisa el DXF y que no existen ya (salvo `overwrite: true`). Si algo falla, error y **no se exporta nada**.

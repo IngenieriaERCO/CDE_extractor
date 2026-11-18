@@ -328,6 +328,16 @@ class Worker:
         include_layers = data.get("include_layers", True)
         if not isinstance(include_layers, bool):
             raise WorkerError(protocol.BAD_REQUEST, "«include_layers» debe ser true o false.")
+        # Umbral de los «*U» ofrecidos: si viene, manda sobre CDE_ANON_MIN_ENTITIES.
+        anonymous_min = data.get("anonymous_min_entities")
+        if anonymous_min is not None and (
+            isinstance(anonymous_min, bool)
+            or not isinstance(anonymous_min, int)
+            or anonymous_min < 0
+        ):
+            raise WorkerError(
+                protocol.BAD_REQUEST, "«anonymous_min_entities» debe ser un entero ≥ 0 o null."
+            )
         source = Path(path)
         if not source.is_file():
             raise WorkerError(
@@ -363,6 +373,7 @@ class Worker:
             progress=progress,
             check=self.state.check,
             source_copy=loaded.pruned,
+            anonymous_min_entities=anonymous_min,
         )
         with self.state.lock:
             self.state.sessions += 1
@@ -475,10 +486,13 @@ class Worker:
 
 
 def find_reference(inventory: dict, data: dict) -> dict:
-    """El bloque de ``inventory["blocks"]`` que nombra el pedido: ``ref``, o ``block`` con
-    ``occurrence`` o ``handle``."""
+    """El bloque de ``inventory["blocks"]`` que nombra el pedido: ``ref``, ``block`` con
+    ``occurrence`` o ``handle``, o solo ``handle`` (el del INSERT, que no cambia aunque AutoCAD
+    renumere un «*U» al guardar)."""
     ref, name = data.get("ref"), data.get("block")
     occurrence, handle = data.get("occurrence"), data.get("handle")
+    if ref is None and name is None and handle is not None:
+        return _find_by_handle(inventory, handle)
     if ref is not None:
         if not isinstance(ref, str) or "#" not in ref:
             raise WorkerError(protocol.BAD_REQUEST, "«ref» debe ser «bloque#ocurrencia».")
@@ -488,7 +502,7 @@ def find_reference(inventory: dict, data: dict) -> dict:
         occurrence = int(number)
     elif not isinstance(name, str) or not name:
         raise WorkerError(
-            protocol.BAD_REQUEST, "Falta «ref», o «block» con «occurrence» o «handle»."
+            protocol.BAD_REQUEST, "Falta «ref», «handle», o «block» con «occurrence» o «handle»."
         )
     elif handle is None and (isinstance(occurrence, bool) or not isinstance(occurrence, int)):
         raise WorkerError(
@@ -526,6 +540,36 @@ def find_reference(inventory: dict, data: dict) -> dict:
         f"El bloque «{name}» no tiene esa referencia.",
         "Revise «occurrence» o «handle» en la lista que devolvió «load».",
         {"block": name, "occurrence": occurrence, "handle": handle},
+    )
+
+
+def _find_by_handle(inventory: dict, handle) -> dict:
+    """La referencia cuyo INSERT tiene ``handle``, sea cual sea el nombre de su bloque."""
+    if not isinstance(handle, str) or not handle.strip():
+        raise WorkerError(protocol.BAD_REQUEST, "«handle» debe ser un texto (handle del INSERT).")
+    wanted = handle.strip().upper()
+    found = [item for item in inventory["blocks"] if str(item["handle"]).upper() == wanted]
+    if len(found) > 1:
+        raise WorkerError(
+            protocol.BAD_REQUEST,
+            f"El handle «{handle}» está repetido en el DXF.",
+            "Use «ref» de la lista que devolvió «load».",
+            {"handle": handle, "refs": [item["ref"] for item in found]},
+        )
+    if found:
+        return found[0]
+    for item in inventory["omitted"]:
+        if str(item["handle"]).upper() == wanted:
+            raise WorkerError(
+                protocol.NOT_EXPORTABLE,
+                f"La referencia «{item['name']}» no se exporta: {item['reason']}.",
+                details={"block": item["name"], "handle": item["handle"], "reason": item["reason"]},
+            )
+    raise WorkerError(
+        protocol.REFERENCE_NOT_FOUND,
+        f"No hay ninguna referencia del Model Space con el handle «{handle}».",
+        "Revise la lista de bloques que devolvió «load».",
+        {"handle": handle},
     )
 
 
@@ -572,6 +616,7 @@ def load_response(loaded: LoadedDxf, inventory: dict) -> dict:
         "dxf": loaded.dxf_json(),
         "units": inventory["units"],
         "margin_mm": inventory["margin_mm"],
+        "anonymous_min_entities": inventory["anonymous_min_entities"],
         "blocks": inventory["blocks"],
         "omitted": inventory["omitted"],
         "layers": inventory["layers"],

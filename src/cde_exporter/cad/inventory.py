@@ -13,6 +13,7 @@ Da, sin exportar nada (docs/protocolo_trabajador.md, sección 3):
 from __future__ import annotations
 
 import math
+import os
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -23,6 +24,7 @@ from ezdxf.addons.drawing.properties import Properties, layer_key
 from ezdxf.colors import aci2rgb
 from ezdxf.math import BoundingBox
 
+from cde_exporter.cad.fidelity import iter_detail_entities_with_visibility
 from cde_exporter.cad.file_names import package_name
 from cde_exporter.cad.hidden_layers import STATE_VISIBLE, layer_state, loose_summary
 from cde_exporter.cad.project_commands import (
@@ -38,6 +40,43 @@ from cde_exporter.cad.scale import OVERRIDE_UNITS, verify_drawing_units
 from cde_exporter.cad.solids import solid_footprint
 
 TEXT_TYPES = frozenset({"TEXT", "MTEXT", "ATTRIB"})
+# Bloques anónimos «*U» del Model Space que se ofrecen para exportar: los que dibujan al menos
+# tantas entidades visibles (las mesas de PVcase, tablas de Civil 3D…). Los menores (etiquetas,
+# cotas, piezas de Civil 3D, a miles) siguen en «omitted».
+ANON_MIN_ENV = "CDE_ANON_MIN_ENTITIES"
+DEFAULT_ANON_MIN_ENTITIES = 100
+
+
+def anon_min_entities() -> int:
+    """Entidades visibles que necesita un «*U» del Model Space para ofrecerse
+    (CDE_ANON_MIN_ENTITIES o 100)."""
+    value = os.environ.get(ANON_MIN_ENV, "").strip()
+    try:
+        return max(0, int(value)) if value else DEFAULT_ANON_MIN_ENTITIES
+    except ValueError:
+        return DEFAULT_ANON_MIN_ENTITIES
+
+
+def _is_offered_anonymous(name: str) -> bool:
+    return name.upper().startswith("*U")
+
+
+def _visible_count(document, insert) -> int:
+    """Entidades que dibujaría ``insert`` (sin contar los INSERT anidados)."""
+    return sum(
+        1
+        for item in iter_detail_entities_with_visibility(document, roots=[insert])
+        if item.visible and item.entity.dxftype() != "INSERT"
+    )
+
+
+def _anonymous_reason(minimum: int) -> str:
+    return (
+        f"bloque anónimo «*U» con menos de {minimum} entidades visibles (etiquetas, cotas o "
+        f"piezas de Civil 3D; umbral {ANON_MIN_ENV} o «anonymous_min_entities» de «load»)"
+    )
+
+
 _ANGLE_TOLERANCE = 1e-9
 
 # Avance: (etapa, fracción 0–1 de la etapa, mensaje); cancelación: lanza si se pidió.
@@ -298,9 +337,19 @@ def build_inventory(
     progress: Progress = _noop_progress,
     check: Check = _noop_check,
     source_copy=None,
+    anonymous_min_entities: int | None = None,
 ) -> dict:
     """``blocks``, ``omitted``, ``layers``, ``modelspace_loose``, ``units`` y ``margin_mm``
-    del documento (el resto de ``load``, como el DXF y el hash, lo añade el trabajador)."""
+    del documento (el resto de ``load``, como el DXF y el hash, lo añade el trabajador).
+
+    ``anonymous_min_entities``: umbral de los «*U» ofrecidos; si es ``None``, el de
+    ``CDE_ANON_MIN_ENTITIES`` (o 100)."""
+    if anonymous_min_entities is not None and (
+        isinstance(anonymous_min_entities, bool)
+        or not isinstance(anonymous_min_entities, int)
+        or anonymous_min_entities < 0
+    ):
+        raise ValueError(f"Umbral de anónimos no válido: {anonymous_min_entities}")
     if units is not None and units not in OVERRIDE_UNITS:
         raise ValueError(f"Unidades no válidas: {units}")
     inserts: dict[str, list] = defaultdict(list)
@@ -316,21 +365,26 @@ def build_inventory(
     total = sum(len(entities) for entities in inserts.values()) or 1
     done = 0
 
-    def omit(name, entity, occurrence, count, reason) -> None:
-        omitted.append(
-            {
-                "name": name,
-                "occurrence": occurrence,
-                "total_occurrences": count,
-                "handle": str(entity.dxf.handle),
-                "reason": reason,
-            }
-        )
+    minimum = anon_min_entities() if anonymous_min_entities is None else anonymous_min_entities
+
+    def omit(name, entity, occurrence, count, reason, visible=None) -> None:
+        item = {
+            "name": name,
+            "occurrence": occurrence,
+            "total_occurrences": count,
+            "handle": str(entity.dxf.handle),
+            "reason": reason,
+        }
+        if visible is not None:
+            item["anonymous"] = True
+            item["visible_entities"] = visible
+        omitted.append(item)
 
     for name, entities in inserts.items():
         count = len(entities)
         reason = None
-        if name.startswith("*"):
+        anonymous = _is_offered_anonymous(name) and name in document.blocks
+        if name.startswith("*") and not anonymous:
             reason = REASON_ANONYMOUS
         elif name not in document.blocks:
             reason = REASON_NO_DEFINITION
@@ -344,7 +398,12 @@ def build_inventory(
             if reason is not None:
                 omit(name, insert, occurrence, count, reason)
                 continue
-            if not _has_visible_content(document, insert):
+            if anonymous:
+                visible = _visible_count(document, insert)
+                if visible < max(minimum, 1):
+                    omit(name, insert, occurrence, count, _anonymous_reason(minimum), visible)
+                    continue
+            elif not _has_visible_content(document, insert):
                 omit(name, insert, occurrence, count, REASON_NOTHING_VISIBLE)
                 continue
             blocks.append(
@@ -360,6 +419,7 @@ def build_inventory(
                     used_stems,
                     usage,
                     colors,
+                    anonymous,
                 )
             )
     layers = []
@@ -397,6 +457,7 @@ def build_inventory(
     return {
         "units": _units(document, units),
         "margin_mm": margin_mm,
+        "anonymous_min_entities": minimum,
         "blocks": blocks,
         "omitted": omitted,
         "layers": layers,
@@ -451,7 +512,18 @@ def unknown_entity_summary(document) -> list[dict]:
 
 
 def _reference(
-    document, insert, name, occurrence, count, base, bounds, units, used_stems, usage, colors
+    document,
+    insert,
+    name,
+    occurrence,
+    count,
+    base,
+    bounds,
+    units,
+    used_stems,
+    usage,
+    colors,
+    anonymous=False,
 ) -> dict:
     box, exact, hidden = bounds.reference(insert, include_hidden=False)
     with_hidden = None
@@ -472,7 +544,7 @@ def _reference(
     kinds: Counter = Counter()
     unknown: Counter = Counter()
     per_layer: dict[str, Counter] = defaultdict(Counter)
-    entities = hidden_entities = 0
+    entities = hidden_entities = visible_entities = 0
     for entity, visible, hiding, color in _walk(document, insert):
         if entity is insert:
             continue
@@ -481,6 +553,8 @@ def _reference(
             unknown[kind] += 1
             continue
         entities += 1
+        if visible and kind != "INSERT":
+            visible_entities += 1
         kinds[kind] += 1
         if hiding is not None:
             hidden_entities += 1
@@ -493,7 +567,14 @@ def _reference(
     ref = f"{name}#{occurrence}"
     for layer, types in per_layer.items():
         usage[layer.casefold()].append({"ref": ref, "types": dict(types.most_common())})
-    stem = base if count == 1 else f"{base}_{occurrence:03d}"
+    insert_layer = str(insert.dxf.get("layer", "0") or "0")
+    # Un «*U» no tiene un nombre útil (AutoCAD lo renumera al guardar): se nombra por la capa y
+    # el handle de su INSERT, que no cambian.
+    label = f"{insert_layer}_{insert.dxf.handle}" if anonymous else name
+    if anonymous:
+        stem = package_name(label)
+    else:
+        stem = base if count == 1 else f"{base}_{occurrence:03d}"
     candidate, suffix = stem, 2
     while candidate.casefold() in used_stems:
         candidate, suffix = f"{stem}_{suffix}", suffix + 1
@@ -501,10 +582,14 @@ def _reference(
     return {
         "ref": ref,
         "name": name,
+        # Bloque anónimo «*U» del Model Space (el Componedor los muestra aparte) y su nombre
+        # legible; en los demás, «label» es el nombre del bloque.
+        "anonymous": anonymous,
+        "label": label,
         "handle": str(insert.dxf.handle),
         "occurrence": occurrence,
         "total_occurrences": count,
-        "layer": str(insert.dxf.get("layer", "0") or "0"),
+        "layer": insert_layer,
         "insert": {
             "point": [round(float(value), 6) for value in insert.dxf.insert],
             "rotation_deg": float(insert.dxf.get("rotation", 0.0)),
@@ -520,6 +605,7 @@ def _reference(
         "size_m": size_m,
         "units": reference_units,
         "entities": entities,
+        "visible_entities": visible_entities,
         "contains": {
             "solids_3d": kinds["3DSOLID"],
             "regions": kinds["REGION"],

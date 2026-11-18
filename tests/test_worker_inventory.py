@@ -20,7 +20,7 @@ from cde_exporter.cad.dxf_session import (
     make_temporary,
 )
 from cde_exporter.cad.file_names import PACKAGE_NAME_MAX, is_package_name, package_name
-from cde_exporter.cad.inventory import build_inventory, page_size_mm
+from cde_exporter.cad.inventory import _anonymous_reason, build_inventory, page_size_mm
 from cde_exporter.cad.large_dxf import LARGE_DXF_ENV
 from cde_exporter.cad.project_commands import (
     REASON_ANONYMOUS,
@@ -204,6 +204,9 @@ def test_references_that_are_not_exported_are_listed_with_their_reason() -> None
     anonymous = document.blocks.new_anonymous_block("U")
     anonymous.add_line((0, 0), (1, 1))
     modelspace.add_blockref(anonymous.name, (0, 0))
+    dimension = document.blocks.new_anonymous_block("D")
+    dimension.add_line((0, 0), (1, 1))
+    modelspace.add_blockref(dimension.name, (0, 0))
     modelspace.add_blockref("NO_EXISTE", (0, 0))
 
     inventory = build_inventory(document)
@@ -212,9 +215,12 @@ def test_references_that_are_not_exported_are_listed_with_their_reason() -> None
     reasons = {item["name"]: item["reason"] for item in inventory["omitted"]}
     assert reasons == {
         "VACIO": REASON_NOTHING_VISIBLE,
-        anonymous.name: REASON_ANONYMOUS,
+        anonymous.name: _anonymous_reason(100),  # un «*U» de 1 entidad: menos de 100
+        dimension.name: REASON_ANONYMOUS,  # los «*D», «*X»… nunca se ofrecen
         "NO_EXISTE": REASON_NO_DEFINITION,
     }
+    small = next(item for item in inventory["omitted"] if item["name"] == anonymous.name)
+    assert small["anonymous"] is True and small["visible_entities"] == 1
     assert all(item["handle"] for item in inventory["omitted"])
 
 
