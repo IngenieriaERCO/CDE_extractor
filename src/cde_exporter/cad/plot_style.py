@@ -69,6 +69,8 @@ class PlotStyleTable:
     name: str  # nombre del archivo (nunca la ruta)
     sha256: str
     pens: tuple[PenStyle, ...]  # índice = ACI; el 0 no se usa
+    # La descripción guardada en la CTB (p. ej. «Derivada del PDF de AutoCAD…»): va en el aviso.
+    description: str = ""
 
     def describe(self) -> dict:
         """Lo que se guarda en el manifiesto."""
@@ -123,7 +125,30 @@ def load_plot_style(path: str | Path) -> PlotStyleTable:
         raise CadProcessingError(
             f"La tabla de estilos «{source.name}» está dañada o no se puede leer: {error}"
         ) from error
-    return PlotStyleTable(source.name, hashlib.sha256(raw).hexdigest(), tuple(pens))
+    return PlotStyleTable(
+        source.name,
+        hashlib.sha256(raw).hexdigest(),
+        tuple(pens),
+        str(table.description or "").strip(),
+    )
+
+
+def write_ctb(colors: dict[int, tuple[int, int, int]], path: str | Path, description: str) -> Path:
+    """Escribe una CTB con ``colors`` (ACI → color impreso) y «color del objeto» en los demás
+    ACI (también en los medidos cuyo color es el de la paleta). Grosores: los del objeto.
+    La lee ``load_plot_style`` (y AutoCAD)."""
+    table = acadctb.new_ctb()
+    table.description = description
+    for aci, rgb in sorted(colors.items()):
+        if not 1 <= aci <= 255:
+            raise ValueError(f"ACI fuera de rango: {aci}")
+        palette = (0, 0, 0) if aci == 7 else tuple(aci2rgb(aci))  # el 7 se imprime negro
+        if tuple(rgb) != palette:
+            table[aci].color = tuple(int(value) for value in rgb)
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    table.save(destination)
+    return destination
 
 
 def _hex(rgb: tuple[int, int, int]) -> str:

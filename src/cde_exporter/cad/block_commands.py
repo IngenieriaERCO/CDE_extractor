@@ -1213,6 +1213,7 @@ def plot_style_message(table: PlotStyleTable) -> str:
         f"Colores y grosores según la tabla de impresión «{table.name}» (SHA-256 "
         f"{table.sha256[:12]}…), como al imprimir en AutoCAD; las entidades de color "
         "verdadero (RGB) conservan su color."
+        + (f" Descripción de la tabla: «{table.description}»." if table.description else "")
     )
 
 
