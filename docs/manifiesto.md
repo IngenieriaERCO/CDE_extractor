@@ -1,4 +1,4 @@
-# Manifiesto de detalle (`cde-detail-manifest`, esquema 1.3)
+# Manifiesto de detalle (`cde-detail-manifest`, esquema 1.4)
 
 Este documento es para quien programe el **componedor de PDF** (la plancha A1). El manifiesto es el contrato técnico de cada detalle extraído: con él se puede identificar, validar y colocar el PDF sin volver a leer el DXF de origen.
 
@@ -46,6 +46,7 @@ def cad_to_page_mm(x, y):          # coordenadas del Model Space -> mm de págin
 - `1.1` (2026-11-11) añade `options.include_hidden_layers`, `selection` (paquetes de `cad extract-modelspace`) y los avisos de capas ocultas (`HIDDEN_LAYERS_CONTENT`, `HIDDEN_LAYERS_INCLUDED`, `MODELSPACE_HIDDEN_OVERLAP`) y del Model Space (`MODELSPACE_NOT_COPIED`, `MODELSPACE_ZERO_LENGTH`, `MODELSPACE_WITHOUT_BOUNDS`). Un lector de la `1.0` puede leerlo si ignora las claves que no conoce (comprobado con el componedor el 2026-11-12: integridad y coherencia pasan).
 - `1.2` (2026-11-12) añade `selection.clip` (recorte a la zona) y los avisos `MODELSPACE_CLIPPED` (info) y `MODELSPACE_NOT_CLIPPED` (warning).
 - `1.3` (2026-11-18, aprobada por Luis Angel) añade a `options` todo lo que cambia el dibujo, junto: `units`, `instancing`, `xobject`, `clip` y `exporter_version`. Los manifiestos `1.0`–`1.2` siguen siendo válidos sin esas claves.
+- `1.4` (2026-11-19) añade a `options` `plot_style` y `print_transparency` (`--plot-style` y `--no-print-transparency`) y los avisos `PLOT_STYLE_APPLIED` y `HATCH_TRANSPARENT_OMITTED` (info). Sin esas opciones valen `null` y `true` y el dibujo no cambia. Los manifiestos `1.0`–`1.3` siguen siendo válidos sin esas claves.
 - `model_version` es la versión del modelo interno del detalle (hoy `"2"`). Es un dato de trazabilidad: el componedor no debería depender de ella.
 
 ## Campos
@@ -55,7 +56,7 @@ def cad_to_page_mm(x, y):          # coordenadas del Model Space -> mm de págin
 | Campo | Tipo | Significado |
 |---|---|---|
 | `document_type` | texto | Siempre `"cde-detail-manifest"`. |
-| `schema_version` | texto | Versión de este esquema (`"1.3"`). |
+| `schema_version` | texto | Versión de este esquema (`"1.4"`). |
 | `model_version` | texto | Versión del modelo interno (`"2"`). |
 | `generated_at` | texto o null | Fecha y hora de la extracción (ISO 8601 con zona horaria). |
 
@@ -169,6 +170,10 @@ Desde la 1.3, además:
 - `clip`: en un paquete de `cad extract-modelspace`, si se recortó a la zona (false con `--no-clip` o sin zona); null en los demás.
 - `exporter_version`: la versión del exportador (la misma que `exporter.version`).
 
+Desde la 1.4, además:
+- `plot_style`: la tabla de estilos de impresión con que se dibujó (`--plot-style`): `{"name": nombre del archivo .ctb, "sha256": SHA-256 del archivo}`, o null. Con ella, los colores y grosores de las entidades con color ACI son los de la tabla, no los del dibujo (los de color verdadero no cambian).
+- `print_transparency`: false con `--no-print-transparency`: los HATCH con transparencia del 80 % o más no se dibujaron (cuántos y en qué capas, en el aviso `HATCH_TRANSPARENT_OMITTED` y en `entities.hatches`).
+
 ## Validación del manifiesto
 
 `validate_manifest(datos)` devuelve una tupla de errores (vacía si es válido). No usa `jsonschema`: el esquema está declarado en el propio módulo y exige todas las claves, sin claves de más. Además comprueba:
@@ -196,7 +201,7 @@ Termina con código 0 («Paquete completo y coherente») o con código 1 y la li
 ```json
 {
   "document_type": "cde-detail-manifest",
-  "schema_version": "1.3",
+  "schema_version": "1.4",
   "model_version": "2",
   "source": {"dxf_name": "prueba_erco_perfil.dxf", "dxf_sha256": "1f1726e9…c07b38ed", "dxf_bytes": 58025354, "block_name": "Perfil_K0010"},
   "scale": {"requested": "1:50", "denominator": 50.0, "factor_mm_per_cad_unit": 20.0, "physical_scale_guaranteed": true, "physical_scale_reason": null},

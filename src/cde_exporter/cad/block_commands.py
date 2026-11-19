@@ -44,6 +44,7 @@ from cde_exporter.cad.detail_model import (
     mark_degraded_hatches,
     mark_footprint_solids,
     mark_omitted_entities,
+    mark_transparent_hatches,
 )
 from cde_exporter.cad.detail_text import format_detail_report
 from cde_exporter.cad.dxf_session import make_temporary
@@ -91,6 +92,7 @@ from cde_exporter.cad.pdf_checks import (
     pdf_page_facts,
     validate_output_pdf,
 )
+from cde_exporter.cad.plot_style import PlotStyleTable, load_plot_style
 from cde_exporter.cad.reader import (
     InvalidEntity,
     entity_bounds,
@@ -532,6 +534,8 @@ def _run_extract_block(
         raise CadProcessingError("--output-prefix debe ser una ruta base sin extensión")
     if args.all and (args.handle is not None or args.occurrence is not None):
         raise CadProcessingError("--all no se combina con --occurrence ni --handle")
+    # Tabla de estilos de impresión (--plot-style): se lee una vez, antes de dibujar nada.
+    plot_table = plot_style_table(args)
     pruned = getattr(args, "source_pruning", None)
     if document is None:
         document, pruned = read_source_dxf(source, prefix.parent)
@@ -896,6 +900,8 @@ def _run_extract_block(
                     draw_svg=keep,
                     text_layer=not args.no_text_layer,
                     render_box=page_window,
+                    plot_style=plot_table,
+                    print_transparency=print_transparency(args),
                 )
             except CadProcessingError as error:
                 if footprints is None or not footprints.failures:
@@ -905,6 +911,20 @@ def _run_extract_block(
                     f"{_failure_text(footprints)}."
                 ) from error
             detail = mark_omitted_entities(detail, export_report.omitted)
+            if export_report.transparent:
+                detail = mark_transparent_hatches(
+                    detail, _degraded_rows(extracted_document, export_report.transparent)
+                )
+            if plot_table is not None:
+                detail = dataclasses.replace(
+                    detail,
+                    warnings=(
+                        *detail.warnings,
+                        ExtractionWarning(
+                            "PLOT_STYLE_APPLIED", Severity.INFO, plot_style_message(plot_table)
+                        ),
+                    ),
+                )
             # Conciliación en tiempo de ejecución: lo que ezdxf descartó por no ser visible
             # debe coincidir con lo que el inventario clasificó como tal en lo que se dibuja.
             expected_hidden = hidden_skip_events(render_document)
@@ -1171,6 +1191,31 @@ def _raise_if_blocking(detail) -> None:
         raise BlockingNoticesError(notices)
 
 
+def plot_style_table(args) -> PlotStyleTable | None:
+    """La CTB de ``--plot-style`` (leída una vez y guardada en ``args``), o None."""
+    cached = getattr(args, "plot_style_table", None)
+    if cached is not None:
+        return cached
+    path = getattr(args, "plot_style", None)
+    if not path:
+        return None
+    table = load_plot_style(path)
+    args.plot_style_table = table
+    return table
+
+
+def print_transparency(args) -> bool:
+    return not getattr(args, "no_print_transparency", False)
+
+
+def plot_style_message(table: PlotStyleTable) -> str:
+    return (
+        f"Colores y grosores según la tabla de impresión «{table.name}» (SHA-256 "
+        f"{table.sha256[:12]}…), como al imprimir en AutoCAD; las entidades de color "
+        "verdadero (RGB) conservan su color."
+    )
+
+
 def _run_options(args) -> RunOptions:
     return RunOptions(
         hatch_mode=args.hatch_mode,
@@ -1188,6 +1233,8 @@ def _run_options(args) -> RunOptions:
         xobject=xobjects_enabled(),
         clip=getattr(getattr(args, "modelspace_selection", None), "clipped", None),
         exporter_version=__version__,
+        plot_style=None if plot_style_table(args) is None else plot_style_table(args).describe(),
+        print_transparency=print_transparency(args),
     )
 
 

@@ -31,7 +31,7 @@ from cde_exporter.cad.notices import (
 )
 
 DOCUMENT_TYPE = "cde-detail-manifest"
-SCHEMA_VERSION = "1.3"
+SCHEMA_VERSION = "1.4"
 # El manifiesto se publica junto al PDF como <prefijo>.manifest.json, el último de los tres.
 MANIFEST_SUFFIX = ".manifest.json"
 _MM_PER_POINT = 25.4 / 72
@@ -61,6 +61,10 @@ class RunOptions:
     xobject: bool = True
     clip: bool | None = None
     exporter_version: str | None = None
+    # Esquema 1.4: tabla de estilos de impresión (--plot-style: {"name", "sha256"}) o None, y
+    # si se imprimió la transparencia de los rellenos (--no-print-transparency la quita).
+    plot_style: dict | None = None
+    print_transparency: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,6 +344,15 @@ def build_manifest(
             "xobject": options.xobject,
             "clip": options.clip,
             "exporter_version": options.exporter_version,
+            "plot_style": (
+                None
+                if options.plot_style is None
+                else {
+                    "name": file_name(options.plot_style["name"]),
+                    "sha256": options.plot_style["sha256"],
+                }
+            ),
+            "print_transparency": options.print_transparency,
         },
     }
 
@@ -555,6 +568,8 @@ _SCHEMA = {
         "xobject": bool,
         "clip": _Null(bool),
         "exporter_version": _Null(str),
+        "plot_style": _Null({"name": _Name(), "sha256": _Hash()}),
+        "print_transparency": bool,
     },
 }
 
@@ -574,6 +589,8 @@ _ADDED_IN: dict[str, tuple[int, int]] = {
     "manifiesto.options.xobject": (1, 3),
     "manifiesto.options.clip": (1, 3),
     "manifiesto.options.exporter_version": (1, 3),
+    "manifiesto.options.plot_style": (1, 4),
+    "manifiesto.options.print_transparency": (1, 4),
 }
 
 

@@ -27,6 +27,7 @@ from cde_exporter.cad.hidden_layers import ALL_LAYERS, loose_summary
 from cde_exporter.cad.manifest import MANIFEST_SUFFIX
 from cde_exporter.cad.models import CadProcessingError
 from cde_exporter.cad.pdf_checks import PdfValidationError
+from cde_exporter.cad.plot_style import load_plot_style
 from cde_exporter.cad.project_commands import (
     SUMMARY_NAME,
     OmittedItem,
@@ -63,6 +64,9 @@ DEFAULT_OPTIONS = {
     "font_fallback": None,
     "overwrite": False,
     "write_summary": False,
+    # Tabla de estilos de impresión (.ctb) y transparencia de los rellenos (plot_style.py).
+    "plot_style": None,
+    "print_transparency": True,
 }
 
 
@@ -110,7 +114,13 @@ def _options(data: dict, session) -> dict:
         raise _bad("«hatch_threshold» debe ser un entero ≥ 0.")
     if options["solids"] not in (None, "footprint"):
         raise _bad('«solids» debe ser null o "footprint".')
-    for key in ("omit_unsupported", "text_layer", "overwrite", "write_summary"):
+    for key in (
+        "omit_unsupported",
+        "text_layer",
+        "overwrite",
+        "write_summary",
+        "print_transparency",
+    ):
         if not isinstance(options[key], bool):
             raise _bad(f"«{key}» debe ser true o false.")
     for key in ("font_substitutions", "font_folder", "font_fallback"):
@@ -124,6 +134,7 @@ def _options(data: dict, session) -> dict:
             raise _bad(f"No existe el archivo de «{key}»: {value}", option=key)
         if key == "font_folder" and not path.is_dir():
             raise _bad(f"No existe la carpeta de «{key}»: {value}", option=key)
+    options["plot_style_table"] = plot_style_option(options["plot_style"])
     layers = options["include_hidden_layers"]
     if layers is not None:
         if (
@@ -144,6 +155,20 @@ def _options(data: dict, session) -> dict:
                 layers=unknown,
             )
     return options
+
+
+def plot_style_option(value):
+    """La CTB de «plot_style» ya leída (None si no se pidió); BAD_REQUEST si no vale."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise _bad("«plot_style» debe ser null o la ruta de una tabla .ctb.")
+    if not Path(value).is_file():
+        raise _bad(f"No existe el archivo de «plot_style»: {value}", option="plot_style")
+    try:
+        return load_plot_style(value)
+    except CadProcessingError as error:
+        raise _bad(str(error), option="plot_style") from error
 
 
 def _outputs(output_dir: Path, package: str) -> list[Path]:
@@ -285,6 +310,9 @@ def _block_args(session, job: _Job, output_dir: Path, options: dict):
     )
     args.font_fallback = options["font_fallback"] or settings.font_fallback
     args.overwrite = options["overwrite"]
+    args.plot_style = options["plot_style"]
+    args.plot_style_table = options["plot_style_table"]
+    args.no_print_transparency = not options["print_transparency"]
     args.include_hidden_layers = (
         None if layers is None else (ALL_LAYERS if ALL_LAYERS in layers else ",".join(layers))
     )

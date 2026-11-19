@@ -194,7 +194,7 @@ def test_export_publishes_packages_with_manifest_1_3(running, tmp_path: Path) ->
     )
     first = data["jobs"][0]
     manifest = json.loads(Path(first["package"]["manifest"]).read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == SCHEMA_VERSION == "1.3"
+    assert manifest["schema_version"] == SCHEMA_VERSION == "1.4"
     assert validate_manifest(manifest) == ()
     assert verify_package(first["package"]["pdf"]) == ()
     assert manifest["source"]["dxf_sha256"] == loaded["dxf"]["sha256"]

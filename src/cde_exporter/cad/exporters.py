@@ -47,6 +47,12 @@ from cde_exporter.cad.entity_policy import (
     unsupported_hint,
 )
 from cde_exporter.cad.models import INVALID_DATA, CadProcessingError, invalid_data_reason
+from cde_exporter.cad.plot_style import (
+    PlotStyleTable,
+    apply_plot_style,
+    is_high_transparency,
+    transparency,
+)
 from cde_exporter.cad.reader import (
     dxf_attr,
     ensure_layer_table_entries,
@@ -138,6 +144,9 @@ class _Instance:
 
     records: list
     invisible: int
+    # HATCH transparentes que no se dibujaron (--no-print-transparency): se cuentan en cada
+    # INSERT que reutiliza la grabación.
+    transparent: tuple = ()
 
 
 class InstanceRecord(DataRecord):
@@ -227,7 +236,13 @@ class _StrictFrontend(Frontend):
     """
 
     def __init__(
-        self, *args, omit_unsupported: bool = False, capture_text: bool = False, **kwargs
+        self,
+        *args,
+        omit_unsupported: bool = False,
+        capture_text: bool = False,
+        plot_style: PlotStyleTable | None = None,
+        print_transparency: bool = True,
+        **kwargs,
     ) -> None:
         self.skipped: list[str] = []
         # Con ``capture_text``, cada línea de texto dibujada (para la capa de texto del PDF).
@@ -260,8 +275,21 @@ class _StrictFrontend(Frontend):
         # Entidades de tipos que ezdxf no sabe leer (de complementos), por tipo: no se dibujan
         # (no tienen capa ni visibilidad, y ezdxf fallaría al resolverlas).
         self.unknown: Counter[str] = Counter()
+        # Tabla de estilos de impresión (--plot-style) y transparencia de los rellenos
+        # (--no-print-transparency); sin ellas, el dibujo es el de siempre (plot_style.py).
+        self.plot_style = plot_style
+        self.print_transparency = print_transparency
+        # HATCH con transparencia alta no dibujados: (tipo, capa, handle, patrón, escala, %).
+        self.transparent: list[tuple[str, str, str, str, float, int]] = []
+        if plot_style is not None:
+            self.push_property_override_function(self._apply_plot_style)
         if capture_text:
             self.pipeline.draw_text = self._capture_text(self.pipeline.draw_text)
+
+    def _apply_plot_style(self, entity, properties) -> None:
+        apply_plot_style(
+            self.plot_style, properties, self.ctx.current_layout_properties.default_color
+        )
 
     def _capture_text(self, draw_text):
         """Envuelve ``pipeline.draw_text`` (TEXT, MTEXT, ATTRIB y texto de cotas pasan por él)."""
@@ -354,6 +382,7 @@ class _StrictFrontend(Frontend):
             len(self.degraded), len(self.messages),
         )
         invisible, start = self.invisible, len(self._records)
+        transparent = len(self.transparent)
         super().draw_composite_entity(entity, properties)
         after = (
             len(self.skipped), sum(self.omitted.values()), len(self.text_runs),
@@ -368,7 +397,9 @@ class _StrictFrontend(Frontend):
         records = [copy.deepcopy(record) for record in self._records[start:]]
         for record in records:
             record.transform_inplace(inverse)
-        self._instances[key] = _Instance(records, self.invisible - invisible)
+        self._instances[key] = _Instance(
+            records, self.invisible - invisible, tuple(self.transparent[transparent:])
+        )
 
     def _instance_key(self, entity, properties) -> tuple | None:
         """Clave de los INSERT que se dibujan igual; None si este no se puede reutilizar."""
@@ -404,6 +435,7 @@ class _StrictFrontend(Frontend):
             marker.handle = handle
             self._records.append(marker)
             self.invisible += cached.invisible
+            self.transparent.extend(cached.transparent)
             self.instances_reused += 1
             return
         for record in cached.records:
@@ -412,6 +444,7 @@ class _StrictFrontend(Frontend):
             placed.handle = handle
             self._records.append(placed)
         self.invisible += cached.invisible
+        self.transparent.extend(cached.transparent)
         self.instances_reused += 1
 
     def skip_entity(self, entity, msg: str) -> None:
@@ -434,6 +467,11 @@ class _StrictFrontend(Frontend):
         self.messages.append(message)
 
     def draw_hatch_entity(self, entity, properties, *, loops=None) -> None:
+        if not self.print_transparency and is_high_transparency(properties.color):
+            # Sin imprimir la transparencia, una veladura casi invisible no se dibuja
+            # (dibujada opaca taparía lo que tiene debajo); se declara en el TXT.
+            self._note_transparent(entity, properties)
+            return
         restore_hatch_pattern(entity)
         estimate = _estimate_hatch_segments(entity) if self.auto_hatch_threshold is not None else 0
         # ezdxf desplaza el origen de las líneas del patrón una cantidad aleatoria muy pequeña;
@@ -493,6 +531,20 @@ class _StrictFrontend(Frontend):
                 str(original.dxf.get("pattern_name", "") or ""),
                 float(original.dxf.get("pattern_scale", 1.0)),
                 reason,
+            )
+        )
+
+
+    def _note_transparent(self, entity, properties) -> None:
+        original = getattr(entity, "source_of_copy", None) or entity
+        self.transparent.append(
+            (
+                entity.dxftype(),
+                str(original.dxf.get("layer", "0") or "0"),
+                _original_handle(entity),
+                str(original.dxf.get("pattern_name", "") or ""),
+                float(original.dxf.get("pattern_scale", 1.0)),
+                round(transparency(properties.color) * 100),
             )
         )
 
@@ -700,6 +752,9 @@ class ExportReport:
     # Relación CAD -> página del PDF en puntos, origen arriba a la izquierda e Y hacia abajo:
     # (a, b, c, d, e, f) con X = a·x + c·y + e e Y = b·x + d·y + f.
     cad_to_page_pt: tuple[float, float, float, float, float, float] | None = None
+    # HATCH con transparencia alta que no se dibujaron (--no-print-transparency):
+    # (tipo, capa, handle, patrón, escala, transparencia en %).
+    transparent: tuple[tuple[str, str, str, str, float, int], ...] = ()
 
 
 def affine_2d(matrix: Matrix44) -> tuple[float, float, float, float, float, float]:
@@ -991,6 +1046,8 @@ def _draw_to_svg(
     suggest_solids_footprint: bool = False,
     stats: dict | None = None,
     render_box: BoundingBox2d | None = None,
+    plot_style: PlotStyleTable | None = None,
+    print_transparency: bool = True,
 ) -> tuple[str, tuple[str, ...], tuple[tuple[str, str, int], ...]]:
     backend = svg_backend.SVGBackend()
     layout_properties = LayoutProperties.from_layout(document.modelspace())
@@ -1000,6 +1057,8 @@ def _draw_to_svg(
         backend,
         config=_drawing_configuration(hatch_mode),
         omit_unsupported=omit_unsupported,
+        plot_style=plot_style,
+        print_transparency=print_transparency,
     )
     frontend.auto_hatch_threshold = hatch_threshold if hatch_mode == "auto" else None
     output = io.StringIO()
@@ -1009,6 +1068,7 @@ def _draw_to_svg(
     _raise_if_skipped(frontend, "SVG", suggest_solids_footprint)
     if stats is not None:
         stats["degraded"] = tuple(frontend.degraded)
+        stats["transparent"] = tuple(frontend.transparent)
     return (
         backend.get_string(page, settings=settings, render_box=render_box),
         _frontend_messages(frontend),
@@ -1027,6 +1087,8 @@ def _draw_to_pdf(
     stats: dict | None = None,
     text_layer: bool = False,
     render_box: BoundingBox2d | None = None,
+    plot_style: PlotStyleTable | None = None,
+    print_transparency: bool = True,
 ) -> tuple[bytes, tuple[str, ...], tuple[tuple[str, str, int], ...]]:
     backend = _PdfBackend()
     layout_properties = LayoutProperties.from_layout(document.modelspace())
@@ -1037,6 +1099,8 @@ def _draw_to_pdf(
         config=_drawing_configuration(hatch_mode),
         omit_unsupported=omit_unsupported,
         capture_text=text_layer,
+        plot_style=plot_style,
+        print_transparency=print_transparency,
     )
     frontend.xobjects = frontend.instancing and xobjects_enabled()
     frontend.auto_hatch_threshold = hatch_threshold if hatch_mode == "auto" else None
@@ -1056,6 +1120,7 @@ def _draw_to_pdf(
     if stats is not None:
         stats["invisible"] = frontend.invisible
         stats["degraded"] = tuple(frontend.degraded)
+        stats["transparent"] = tuple(frontend.transparent)
         stats["text_lines"] = tuple(run.text.strip() for run in frontend.text_runs)
         stats["drawn_size"] = backend.drawn_size
         stats["drawn_bounds"] = backend.drawn_bounds
@@ -1153,6 +1218,8 @@ def export_vector_outputs(
     draw_svg: bool = True,
     text_layer: bool = True,
     render_box: tuple[float, float, float, float] | None = None,
+    plot_style: PlotStyleTable | None = None,
+    print_transparency: bool = True,
 ) -> ExportReport:
     """Crea SVG/PDF vectoriales ajustados o con escala y página explícitas.
 
@@ -1165,6 +1232,9 @@ def export_vector_outputs(
 
     Con ``text_layer`` el PDF lleva, encima del texto dibujado como trazados, una capa de
     texto invisible que se puede buscar, seleccionar y copiar. El SVG no cambia.
+
+    ``plot_style`` (una CTB leída con ``plot_style.load_plot_style``) y
+    ``print_transparency`` solo cambian el dibujo si se piden (``plot_style.py``).
     """
     source_path = Path(source)
     svg_destination = Path(svg_path)
@@ -1238,6 +1308,7 @@ def export_vector_outputs(
     try:
         svg_content, svg_warnings, svg_omitted, svg_element_count = None, (), None, 0
         svg_degraded: tuple = ()
+        svg_transparent: tuple = ()
         if draw_svg:
             svg_content, svg_warnings, svg_omitted = _draw_to_svg(
                 document,
@@ -1249,9 +1320,12 @@ def export_vector_outputs(
                 suggest_solids_footprint,
                 stats=stats,
                 render_box=box,
+                plot_style=plot_style,
+                print_transparency=print_transparency,
             )
             svg_element_count = _validate_svg(svg_content)
             svg_degraded = stats.get("degraded", ())
+            svg_transparent = stats.get("transparent", ())
         pdf_content, pdf_warnings, pdf_omitted = _draw_to_pdf(
             document,
             page,
@@ -1263,6 +1337,8 @@ def export_vector_outputs(
             stats=stats,
             text_layer=text_layer,
             render_box=box,
+            plot_style=plot_style,
+            print_transparency=print_transparency,
         )
         if draw_svg and svg_omitted != pdf_omitted:
             raise CadProcessingError(
@@ -1272,6 +1348,11 @@ def export_vector_outputs(
         if draw_svg and svg_degraded != stats.get("degraded", ()):
             raise CadProcessingError(
                 "El SVG y el PDF no coinciden en los HATCH rellenados por tiempo o memoria; "
+                "no se generaron archivos."
+            )
+        if draw_svg and svg_transparent != stats.get("transparent", ()):
+            raise CadProcessingError(
+                "El SVG y el PDF no coinciden en los HATCH transparentes no dibujados; "
                 "no se generaron archivos."
             )
         if exact_page_size and page_size_mm is not None:
@@ -1318,4 +1399,5 @@ def export_vector_outputs(
         drawn_size=stats.get("drawn_size"),
         drawn_bounds=stats.get("drawn_bounds"),
         cad_to_page_pt=stats.get("cad_to_page_pt"),
+        transparent=stats.get("transparent", ()),
     )

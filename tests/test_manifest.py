@@ -218,7 +218,7 @@ def test_manifests_1_2_without_the_options_added_in_1_3_stay_valid(valid_manifes
     """Esquema 1.3: ``options`` lleva units, instancing, xobject, clip y exporter_version. Los
     paquetes 1.0–1.2 ya publicados siguen siendo válidos sin ellas; un 1.3 sin ellas no."""
     added = ("units", "instancing", "xobject", "clip", "exporter_version")
-    assert valid_manifest["schema_version"] == "1.3"
+    assert valid_manifest["schema_version"] == SCHEMA_VERSION
     assert set(added) <= set(valid_manifest["options"])
     for key in added:
         del valid_manifest["options"][key]
@@ -236,3 +236,29 @@ def test_options_1_3_have_their_types(valid_manifest: dict) -> None:
     problems = validate_manifest(valid_manifest)
     assert any("options.instancing" in problem for problem in problems)
     assert any("options.clip" in problem for problem in problems)
+
+
+def test_manifests_1_3_without_the_options_added_in_1_4_stay_valid(valid_manifest: dict) -> None:
+    """Esquema 1.4: ``options`` lleva plot_style y print_transparency (--plot-style y
+    --no-print-transparency). Un 1.3 ya publicado es válido sin ellas; un 1.4 sin ellas no."""
+    added = ("plot_style", "print_transparency")
+    assert valid_manifest["schema_version"] == "1.4"
+    assert valid_manifest["options"]["plot_style"] is None
+    assert valid_manifest["options"]["print_transparency"] is True
+    for key in added:
+        del valid_manifest["options"][key]
+    problems = validate_manifest(valid_manifest)
+    assert all(any(f"options.{key}: falta la clave" in p for p in problems) for key in added)
+
+    valid_manifest["schema_version"] = "1.3"
+    assert validate_manifest(valid_manifest) == ()
+
+
+def test_the_plot_style_is_a_file_name_and_a_hash(valid_manifest: dict) -> None:
+    valid_manifest["options"]["plot_style"] = {"name": "CTB_ERCO_V2.ctb", "sha256": "a" * 64}
+    assert validate_manifest(valid_manifest) == ()
+
+    valid_manifest["options"]["plot_style"] = {"name": "carpeta/x.ctb", "sha256": "no"}
+    problems = validate_manifest(valid_manifest)
+    assert any("plot_style.name" in p for p in problems)
+    assert any("plot_style.sha256" in p for p in problems)

@@ -47,6 +47,7 @@ from cde_exporter.cad.preview import (
     MIN_LONG_SIDE_PX,
     PreviewCache,
     draw_reference,
+    drawing_tag,
     layers_tag,
     paint,
 )
@@ -421,17 +422,41 @@ class Worker:
             )
         document = session.loaded.document
         hidden, all_layers = hidden_layer_selection(document, data.get("include_hidden_layers"))
-        tag = layers_tag(hidden, all_layers)
+        from cde_exporter.cad.worker_export import plot_style_option
+
+        plot_style = plot_style_option(data.get("plot_style"))  # BAD_REQUEST si no vale
+        print_transparency = data.get("print_transparency", True)
+        if not isinstance(print_transparency, bool):
+            raise WorkerError(
+                protocol.BAD_REQUEST, "«print_transparency» debe ser true o false."
+            )
+        tag = drawing_tag(layers_tag(hidden, all_layers), plot_style, print_transparency)
+        drawing = {
+            "plot_style": None if plot_style is None else plot_style.describe(),
+            "print_transparency": print_transparency,
+        }
         png, meta = self.previews.paths(session.loaded.fingerprint, block["handle"], long_side, tag)
         started = time.perf_counter()
         cached = self.previews.get(png, meta)
         if cached is not None:
             seconds = round(time.perf_counter() - started, 2)
-            return {**cached, "png": str(png), "cached": True, "seconds": seconds}
+            return {
+                **cached,
+                **drawing,
+                "png": str(png),
+                "cached": True,
+                "seconds": seconds,
+            }
         progress = _Progress(self.output, request, PREVIEW_STAGES, self.state)
         insert = document.entitydb.get(block["handle"])
         player, omitted = draw_reference(
-            document, insert, hidden_layers=hidden, progress=progress, check=self.state.check
+            document,
+            insert,
+            hidden_layers=hidden,
+            progress=progress,
+            check=self.state.check,
+            plot_style=plot_style,
+            print_transparency=print_transparency,
         )
         self.state.check()
         hint = block["size_cad"]
@@ -456,6 +481,7 @@ class Worker:
             "cad_to_px": picture.cad_to_px,
             "omitted": omitted,
             "include_hidden_layers": requested,
+            **drawing,
         }
         self.previews.put(png, meta, picture.image, result)
         self.previews.trim(keep=(png, meta))

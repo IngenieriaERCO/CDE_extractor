@@ -508,7 +508,10 @@ def mark_degraded_hatches(
 
 
 def _degrade_hatch_summary(
-    summary: HatchSummary | None, degraded: tuple[tuple[int, str | None, str, str, float, str], ...]
+    summary: HatchSummary | None,
+    degraded: tuple[tuple[int, str | None, str, str, float, str], ...],
+    operation: str = SOLID_INSTEAD_OF_PATTERN,
+    one_line_each: bool = True,
 ) -> HatchSummary | None:
     if summary is None:
         return None
@@ -539,6 +542,7 @@ def _degrade_hatch_summary(
                 position
                 for position, other in enumerate(groups)
                 if other.action == "simplified"
+                and other.operation == operation
                 and other.pattern == pattern
                 and other.kind == group.kind
                 and other.reason == reason
@@ -549,21 +553,129 @@ def _degrade_hatch_summary(
         )
         if same is None:
             groups.append(
-                HatchGroup(
-                    group.kind, pattern, scale, 1, "simplified", SOLID_INSTEAD_OF_PATTERN, reason
-                )
+                HatchGroup(group.kind, pattern, scale, 1, "simplified", operation, reason)
             )
         else:
             groups[same] = dataclasses.replace(groups[same], count=groups[same].count + 1)
-        details.append(
-            HatchDetail(layer, pattern, scale, "simplified", f"{reason}.", SOLID_INSTEAD_OF_PATTERN)
-        )
+        if one_line_each:
+            details.append(
+                HatchDetail(layer, pattern, scale, "simplified", f"{reason}.", operation)
+            )
         simplified += 1
     return dataclasses.replace(
         summary,
         simplified=min(simplified, summary.total),
         groups=tuple(groups),
         details=tuple(details),
+    )
+
+
+TRANSPARENT_NOT_PRINTED = "no se dibuja (transparencia sin imprimir)"
+
+
+def transparent_reason(percent: int) -> str:
+    return f"transparencia del {percent} % con --no-print-transparency"
+
+
+def transparent_hatches_message(
+    rows: tuple[tuple[int, str | None, str, str, float, int], ...],
+) -> str:
+    """Aviso de los HATCH transparentes que no se imprimieron, agrupados por capa."""
+    by_layer: dict[tuple[str, int], int] = {}
+    for _index, _handle, layer, _pattern, _scale, percent in rows:
+        by_layer[(layer, percent)] = by_layer.get((layer, percent), 0) + 1
+    items = [
+        f"capa {layer}, transparencia {percent} % ({count})"
+        for (layer, percent), count in sorted(by_layer.items())[:_DEGRADED_GROUP_LIMIT]
+    ]
+    hidden = len(by_layer) - _DEGRADED_GROUP_LIMIT
+    if hidden > 0:
+        items.append(f"… y {hidden} {'grupo' if hidden == 1 else 'grupos'} más")
+    total = len(rows)
+    head = (
+        "No se dibujó 1 HATCH con transparencia alta"
+        if total == 1
+        else f"No se dibujaron {total} HATCH con transparencia alta"
+    )
+    return f"{head} (--no-print-transparency): {'; '.join(items)}."
+
+
+def mark_transparent_hatches(
+    detail: ExtractedDetail, rows: tuple[tuple[int, str | None, str, str, float, int], ...]
+) -> ExtractedDetail:
+    """Marca como ``simplified`` («no se dibuja») los HATCH conservados que no se
+    imprimieron por su transparencia alta (``--no-print-transparency``).
+
+    ``rows`` contiene (índice en el inventario, handle, capa, patrón, escala, transparencia
+    en %). Se actualizan el inventario, las disposiciones, el resumen de HATCH y se añade
+    el aviso ``HATCH_TRANSPARENT_OMITTED`` (info: lo pidió el usuario).
+    """
+    if not isinstance(detail, ExtractedDetail):
+        raise TypeError("detail debe ser un ExtractedDetail")
+    if detail.result is not None:
+        raise ValueError("El detalle ya fue finalizado")
+    if not rows:
+        return detail
+    moved: dict[tuple[str, str], int] = {}
+    for _index, _handle, layer, _pattern, _scale, _percent in rows:
+        moved[("HATCH", layer)] = moved.get(("HATCH", layer), 0) + 1
+    available = {
+        (row.entity_type, row.layer): row.count
+        for row in detail.inventory
+        if row.status is EntityStatus.CONSERVED
+    }
+    warnings = []
+    for key, count in sorted(moved.items()):
+        if available.get(key, 0) < count:
+            warnings.append(
+                ExtractionWarning(
+                    "FIDELITY_RECONCILIATION",
+                    Severity.WARNING,
+                    f"No coincide la conciliación de HATCH transparentes no dibujados (capa "
+                    f"{key[1]}: renderizador {count}, modelo {available.get(key, 0)} "
+                    "conservados).",
+                )
+            )
+            moved[key] = available.get(key, 0)
+    dispositions = list(detail.dispositions)
+    taken: dict[tuple[str, str], int] = {}
+    for index, handle, layer, _pattern, _scale, percent in rows:
+        key = ("HATCH", layer)
+        if taken.get(key, 0) >= moved.get(key, 0):
+            continue
+        taken[key] = taken.get(key, 0) + 1
+        dispositions.append(
+            EntityDisposition(
+                index,
+                handle,
+                "HATCH",
+                layer,
+                EntityStatus.SIMPLIFIED,
+                f"HATCH no dibujado: {transparent_reason(percent)}.",
+            )
+        )
+    dispositions.sort(key=lambda item: item.index)
+    warnings.insert(
+        0,
+        ExtractionWarning(
+            "HATCH_TRANSPARENT_OMITTED", Severity.INFO, transparent_hatches_message(rows)
+        ),
+    )
+    as_degraded = tuple(
+        (index, handle, layer, pattern, scale, transparent_reason(percent))
+        for index, handle, layer, pattern, scale, percent in rows
+    )
+    return dataclasses.replace(
+        detail,
+        inventory=tuple(
+            _move_rows(detail.inventory, moved, EntityStatus.CONSERVED, EntityStatus.SIMPLIFIED)
+        ),
+        dispositions=tuple(dispositions),
+        # Sin una línea por HATCH (una planta de PVcase tiene miles): basta su grupo.
+        hatches=_degrade_hatch_summary(
+            detail.hatches, as_degraded, TRANSPARENT_NOT_PRINTED, one_line_each=False
+        ),
+        warnings=(*detail.warnings, *warnings),
     )
 
 

@@ -229,12 +229,14 @@ Pedido:
 
 ```json
 {"protocol": "1.0", "id": "c-2", "command": "preview",
- "data": {"session": "s-1", "ref": "BLOQUE1#1", "long_side_px": 1500, "include_hidden_layers": null}}
+ "data": {"session": "s-1", "ref": "BLOQUE1#1", "long_side_px": 1500, "include_hidden_layers": null,
+          "plot_style": null, "print_transparency": true}}
 ```
 
 - En lugar de `ref` se puede dar `block` y `occurrence`, `block` y `handle`, o **solo `handle`** (el del INSERT, sin distinguir mayúsculas; sirve aunque el nombre del bloque haya cambiado, como los `*U` renumerados). Con solo `handle`: si es de una referencia de `omitted`, `NOT_EXPORTABLE`; si no existe, `REFERENCE_NOT_FOUND`; si el DXF lo tiene repetido, `BAD_REQUEST` con los `refs` en `details`.
 - `long_side_px`: entero de 64 a 8 000 (1 500 si no se da).
 - `include_hidden_layers`: como en `export` (`null`, `["*"]` o una lista de capas). Si se pide, la vista previa dibuja también esas capas ocultas.
+- `plot_style` y `print_transparency`: como en `export` (sección 5), para que la vista previa se vea como el paquete. La respuesta los devuelve: `plot_style` es `null` o `{"name", "sha256"}` de la CTB, y `print_transparency` el valor usado.
 
 Qué hace: dibuja **solo esa referencia** con el motor del exportador en modo ligero (texto como rectángulos, rayados rellenos, sin tipos de línea; reutilización de bloques repetidos) y la pinta en una imagen PNG sin pasar por el PDF. **No dibuja los 3DSOLID** (decisión aceptada). Se pinta en el orden de la grabación (el mismo que el PDF). Medido con la implementación: BLOQUE1 de GUAMO (156 749 entidades) 12,6 s (unos 9 s de dibujo y 3 de pintado); desde la caché, 0,01 s.
 
@@ -261,7 +263,7 @@ Respuesta (`data`):
 - **Píxeles:** origen en la esquina **superior izquierda**; el píxel (0, 0) ocupa de 0 a 1 en X y en Y (su centro está en (0,5; 0,5)).
 - **Imagen:** PNG con **fondo transparente** (canal alfa); el color 7 (blanco/negro) se dibuja en **negro**, como en el PDF.
 - `omitted`: lo que la vista previa no dibuja, por tipo (los 3DSOLID, por decisión; lo que ezdxf no sabe dibujar, incluidos los tipos desconocidos de `unknown_entities`).
-- **Caché:** el PNG se guarda en `work-dir\previews\<huella del DXF>\<handle>_<px>_<capas>.png`, con un `.json` del mismo nombre que guarda el resto de la respuesta. `<capas>` es `visible`, `hidden-all` (con `["*"]`) o `hidden-` y 6 cifras del SHA-1 de las capas pedidas. Si ya existe con la misma clave (huella, handle, tamaño y capas ocultas pedidas), se devuelve sin dibujar (`cached: true`) y cuenta como usada ahora. Si la caché pasa de `--preview-cache-mb` (500 MB por defecto), se borran las imágenes usadas hace más tiempo (nunca la que se acaba de devolver). Una vista previa cancelada no deja nada en la caché.
+- **Caché:** el PNG se guarda en `work-dir\previews\<huella del DXF>\<handle>_<px>_<capas>.png`, con un `.json` del mismo nombre que guarda el resto de la respuesta. `<capas>` es `visible`, `hidden-all` (con `["*"]`) o `hidden-` y 6 cifras del SHA-1 de las capas pedidas; con `plot_style` se le añade `_p` y 6 cifras del SHA-256 de la CTB, y con `print_transparency: false`, `_t` (sin ellas, el nombre de siempre: las vistas previas ya guardadas siguen valiendo). Si ya existe con la misma clave (huella, handle, tamaño y capas ocultas pedidas), se devuelve sin dibujar (`cached: true`) y cuenta como usada ahora. Si la caché pasa de `--preview-cache-mb` (500 MB por defecto), se borran las imágenes usadas hace más tiempo (nunca la que se acaba de devolver). Una vista previa cancelada no deja nada en la caché.
 
 ## 5. `export` — exportar
 
@@ -280,13 +282,20 @@ Pedido:
      "hatch_mode": "auto", "hatch_threshold": 50000,
      "solids": "footprint", "omit_unsupported": true, "text_layer": true,
      "include_hidden_layers": null, "font_substitutions": null, "font_folder": null,
-     "font_fallback": null, "overwrite": false, "write_summary": false
+     "font_fallback": null, "overwrite": false, "write_summary": false,
+     "plot_style": null, "print_transparency": true
    }
  }}
 ```
 
 - `jobs[]`: cada trabajo dice **qué** referencia (`ref`, o `block` + `occurrence`, o `block` + `handle`, o solo `handle`, como en `preview`), **a qué escala** y **con qué nombre de paquete** (`package`, sección 5.1). Se publican `<package>.pdf`, `.txt` y `.manifest.json` en `output_dir`. Cada trabajo tiene su propia escala: se pueden repetir bloques y ocurrencias a escalas distintas con paquetes distintos.
 - `options`: comunes a todos los trabajos; los mismos significados y valores por defecto que las opciones de `extract-block` (`solids: "footprint"` y `omit_unsupported: true` son los recomendados para que salga todo).
+- `plot_style` (opcional, `null` por defecto): ruta de una **tabla de estilos de impresión por color de AutoCAD (`.ctb`)**, como `--plot-style` de la línea de órdenes. Si viene, el dibujo usa sus colores, escala de grises, tramado y grosores, como al imprimir una presentación en AutoCAD:
+  - se aplica a cada entidad según su **ACI resuelto** (PorCapa y PorBloque ya aplicados);
+  - las entidades de **color verdadero (RGB)** conservan su color y su grosor;
+  - la transparencia de la entidad no cambia;
+  - las tablas con nombre (`.stb`) no se admiten. Un archivo que no existe o no es una CTB da `BAD_REQUEST` antes de dibujar nada.
+- `print_transparency` (opcional, `true` por defecto): con `false` (como `--no-print-transparency`), los **HATCH con transparencia del 80 % o más** no se dibujan (veladuras casi invisibles, como el relleno al 90 % de los paneles de PVcase, que el PDF de AutoCAD de PRGD tampoco lleva). El resto se dibuja igual que hoy. El TXT lo declara (aviso `HATCH_TRANSPARENT_OMITTED`, info).
 - **`units` y `margin_mm` son los de `load`.** No hace falta enviarlos; si se envían en `options` con un valor **distinto** del de `load`, el pedido termina con `BAD_REQUEST` (para cambiarlos, hay que volver a hacer `load`).
 - **Antes de empezar** se comprueba todo: que cada referencia existe, que las escalas son válidas, que cada `package` cumple la sección 5.1, que no hay dos trabajos con el mismo `package`, que ningún archivo de salida pisa el DXF y que no existen ya (salvo `overwrite: true`). Si algo falla, error y **no se exporta nada**.
 - Los trabajos se hacen **en orden**, sobre el DXF ya cargado (sin releerlo). Si uno falla, los demás siguen (como `extract-all-blocks`); el que falla no deja archivos.
@@ -339,7 +348,7 @@ Respuesta (`data`):
 - Cada trabajo lleva también `handle` (el de su INSERT). Sin `job`, se numeran `t1`, `t2`…; sin `package`, se usa el `file_stem` de `load`.
 - `status`: `published`, `failed` o `cancelled` (no empezó, se interrumpió por `cancel` o el DXF cambió).
 - `error` de un trabajo: `{"code", "message", "details"}`; con `CRITICAL_NOTICE`, `details.notices` es la lista de `{code, message}` de los avisos críticos.
-- Opciones por defecto (las de `extract-block`): `hatch_mode: "auto"`, `hatch_threshold: 50000`, `solids: null`, `omit_unsupported: false`, `text_layer: true`, `include_hidden_layers: null`, fuentes `null` (se usan las de la configuración `.env`, como en la línea de órdenes), `overwrite: false`, `write_summary: false`.
+- Opciones por defecto (las de `extract-block`): `hatch_mode: "auto"`, `hatch_threshold: 50000`, `solids: null`, `omit_unsupported: false`, `text_layer: true`, `include_hidden_layers: null`, fuentes `null` (se usan las de la configuración `.env`, como en la línea de órdenes), `overwrite: false`, `write_summary: false`, `plot_style: null`, `print_transparency: true`.
 - `notices`: los mismos avisos del manifiesto (lista única de avisos). La fuente de verdad del paquete sigue siendo **su manifiesto**: el Componedor debe validarlo como hoy.
 - El SHA-256 del DXF que va en cada manifiesto es el calculado en `load` (no se vuelve a leer el archivo por paquete).
 - Si el DXF cambió desde `load`, el pedido termina con el error `DXF_CHANGED` (sección 9).
@@ -354,6 +363,8 @@ Para que un paquete diga **todo lo que cambia su dibujo**, el `options` de su ma
 - `exporter_version`: la versión del exportador (hoy ya en `exporter.version`; se repite aquí).
 
 Es un cambio del manifiesto (**esquema 1.3**, solo añade claves; los 1.0–1.2 siguen siendo válidos con `manifest._ADDED_IN`). Aprobado por Luis Angel (2026-11-17) e implementado con la etapa 3; también lo usan las órdenes de la línea de órdenes (`docs/manifiesto.md`). `clip` es `null` salvo en los paquetes de `extract-modelspace`.
+
+**Esquema 1.4** (2026-11-19): añade a `options` `plot_style` (`null` o `{"name": nombre del archivo .ctb, "sha256": su hash}`) y `print_transparency` (`true` salvo con `print_transparency: false`). Sin esas opciones valen `null` y `true`, y el dibujo es el mismo que con la 1.3. Los 1.0–1.3 siguen siendo válidos.
 
 ## 6. Avance (`progress`)
 

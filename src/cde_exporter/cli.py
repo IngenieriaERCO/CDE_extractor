@@ -56,6 +56,24 @@ def _add_include_hidden(command) -> None:
     )
 
 
+def _add_plot_options(command) -> None:
+    """--plot-style y --no-print-transparency (cad/plot_style.py): solo cambian el dibujo si
+    se piden."""
+    command.add_argument(
+        "--plot-style",
+        metavar="CTB",
+        default=None,
+        help="Imprime con los colores y grosores de una tabla de estilos por color de AutoCAD "
+        "(.ctb), como el trazado de una presentación",
+    )
+    command.add_argument(
+        "--no-print-transparency",
+        action="store_true",
+        help="No imprime la transparencia: los HATCH con transparencia del 80 %% o más no se "
+        "dibujan (se declaran en el TXT)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cde-exporter",
@@ -150,6 +168,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-text-layer", action="store_true", help=_NO_TEXT_LAYER_HELP
     )
     _add_include_hidden(block_extract_command)
+    _add_plot_options(block_extract_command)
 
     project_command = cad_subcommands.add_parser(
         "extract-all-blocks",
@@ -213,6 +232,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     project_command.add_argument("--no-text-layer", action="store_true", help=_NO_TEXT_LAYER_HELP)
     _add_include_hidden(project_command)
+    _add_plot_options(project_command)
 
     modelspace_command = cad_subcommands.add_parser(
         "extract-modelspace",
@@ -290,6 +310,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-text-layer", action="store_true", help=_NO_TEXT_LAYER_HELP
     )
     _add_include_hidden(modelspace_command)
+    _add_plot_options(modelspace_command)
 
     verify_command = cad_subcommands.add_parser(
         "verify-package",

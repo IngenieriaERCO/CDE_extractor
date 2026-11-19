@@ -108,6 +108,15 @@ WARNING_CODES: dict[str, tuple[NoticeCategory, str | None]] = {
         "--include-hidden-layers.",
     ),
     "HIDDEN_LAYERS_INCLUDED": (NoticeCategory.ENTITIES, None),
+    # --plot-style y --no-print-transparency (plot_style.py): los pidió el usuario (info).
+    "PLOT_STYLE_APPLIED": (
+        NoticeCategory.RENDERER,
+        "Los colores y grosores son los de la tabla de impresión, no los del dibujo.",
+    ),
+    "HATCH_TRANSPARENT_OMITTED": (
+        NoticeCategory.HATCH,
+        "Sin --no-print-transparency se dibujan con su transparencia.",
+    ),
     "MODELSPACE_NOT_COPIED": (
         NoticeCategory.ENTITIES,
         "Revise en el CAD si esas entidades son necesarias en el PDF.",

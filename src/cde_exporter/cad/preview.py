@@ -119,6 +119,8 @@ def draw_reference(
     hidden_layers: frozenset[str] | None = None,
     progress: Progress = _noop_progress,
     check: Check = _noop_check,
+    plot_style=None,
+    print_transparency: bool = True,
 ):
     """Graba el dibujo de ``insert`` (y nada más del Model Space). Devuelve (player, omitidas
     por tipo)."""
@@ -137,7 +139,14 @@ def draw_reference(
     _show_hidden_layers(ctx, document, hidden_layers)
     properties = LayoutProperties.from_layout(document.modelspace())
     properties.set_colors("#ffffff")
-    frontend = _PreviewFrontend(ctx, backend, config=_configuration(), on_entity=on_entity)
+    frontend = _PreviewFrontend(
+        ctx,
+        backend,
+        config=_configuration(),
+        on_entity=on_entity,
+        plot_style=plot_style,
+        print_transparency=print_transparency,
+    )
     frontend.xobjects = frontend.instancing and xobjects_enabled()
     with contextlib.redirect_stdout(io.StringIO()):
         frontend.draw_layout(
@@ -361,6 +370,18 @@ def layers_tag(hidden_layers: frozenset[str] | None, all_layers: bool) -> str:
         return "hidden-all"
     digest = hashlib.sha1("\n".join(sorted(hidden_layers)).encode("utf-8")).hexdigest()
     return f"hidden-{digest[:6]}"
+
+
+def drawing_tag(layers: str, plot_style=None, print_transparency: bool = True) -> str:
+    """Etiqueta de caché: la de las capas más la CTB y la transparencia si se piden
+    (sin ellas, la de siempre: las vistas previas ya guardadas siguen valiendo). Corta a
+    propósito: la ruta completa del PNG no puede pasar de 260 caracteres en Windows."""
+    tag = layers
+    if plot_style is not None:
+        tag += f"_p{plot_style.sha256[:6]}"
+    if not print_transparency:
+        tag += "_t"
+    return tag
 
 
 class PreviewCache:
