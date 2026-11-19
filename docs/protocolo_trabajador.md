@@ -117,7 +117,13 @@ Respuesta (`data`):
     "sha256": "4b1d…",
     "dxf_version": "AC1032",
     "read_seconds": 1.5,
-    "source_copy": null
+    "source_copy": null,
+    "crs": {
+      "source": "GEODATA", "format": "xml", "id": "MAGNA.Columbia-Bogota",
+      "name": "MAGNA.Columbia-Bogota", "description": "MAGNA-SIRGAS / Colombia Bogota zone",
+      "authority": "EPSG, V6.11.2, 3116 [Instituto Geografico Agustin Caduzzi (I]",
+      "epsg": 3116, "epsg_from": "alias"
+    }
   },
   "units": {
     "declared_code": 6, "name": "m", "millimeters_per_unit": 1000.0,
@@ -138,6 +144,13 @@ Respuesta (`data`):
 - **Lectura selectiva:** si la copia sin bloques sin usar mediría 500 MB o más (variable `CDE_SELECTIVE_DXF_MB`), la copia guarda del Model Space solo los INSERT (con sus atributos) y todo el Paper Space. Los bloques, sus cajas y sus paquetes son los mismos; lo suelto solo se resume en `modelspace_loose`, que entonces lleva además `vertices`, `types` y `bounds_approx` (caja aproximada de los puntos guardados). Aviso `SOURCE_MODELSPACE_LOOSE_SKIPPED` (info) en `notices` y en cada paquete.
 - **Caché de copias:** la copia reducida se guarda en `work-dir\dxf-cache\<SHA-256 del DXF>\` (las 3 usadas más recientemente). Otro `load` del mismo DXF la encuentra por la huella y el tamaño, comprueba el SHA-256 completo (una lectura seguida, sin interpretar) y la reutiliza sin repetir las pasadas.
 - **Memoria:** antes de leer con ezdxf se estima la memoria (unos 7 bytes por byte de DXF o de copia, más 300 MB). Si el equipo no la tiene libre (memoria más archivo de paginación), `load` termina con `DXF_TOO_LARGE` y dice cuánta haría falta.
+- `dxf.crs`: el sistema de coordenadas que declara el **GEODATA** del Model Space, **copiado sin interpretar**; `null` si el DXF no tiene GEODATA. El trabajador no comprueba que los campos coincidan entre sí ni contra ninguna base de datos de sistemas: el Componedor decide qué hacer con ellos.
+  - `source`: siempre `"GEODATA"`.
+  - `format`: `"xml"` (el XML de Autodesk que escribe AutoCAD/Civil 3D), `"wkt"` o `"unknown"` (texto que no es ninguno de los dos; entonces el resto va en `null`).
+  - `id`, `name`, `description`, `authority`: los del sistema tal como vienen (en WKT, `name` es el primer nombre y `authority` la última `AUTHORITY`, como `EPSG:3115`; `id` y `description` van en `null`). Lo que falte, `null`.
+  - `epsg`: el código EPSG que trae el GEODATA, un entero o `null`. Sale de un `Alias` con `Namespace` «EPSG Code» del propio sistema (`epsg_from: "alias"`) o, si no lo hay, del número de `authority` cuando empieza por «EPSG» (`epsg_from: "authority"`).
+  - **Puede no coincidir con el nombre:** PRGD y el DXF de 830 MB dicen «Colombia CTM12» / «MAGNA_Colombia CTM12», pero su autoridad trae `3115` (`epsg: 3115`, `epsg_from: "authority"`). Se devuelve tal cual.
+  - Leerlo no suma tiempo apreciable: menos de 0,5 ms (medido en PRGD, 14 s de `load`, y en el de 830 MB, 144 s). También funciona con la copia selectiva de los DXF muy grandes, que conserva el GEODATA.
 - `omitted`: referencias que no se pueden exportar, con su motivo (anónimo, sin definición, XREF, sin nada visible). Los `*U` pequeños (ver «Bloques anónimos» en la sección 3.1) llevan además `anonymous: true` y `visible_entities`.
 - `modelspace_loose`: entidades del Model Space fuera de cualquier bloque, por capa y estado (no se exportan con `export`; ver `extract-modelspace`).
 - `unknown_entities`: entidades de tipos que ezdxf no sabe leer (de complementos de AutoCAD, p. ej. `VehicleTrackingPath`, `PLGRIDSYSTEM`, `GEOMAPIMAGE`), por tipo: `{"type", "modelspace", "in_blocks"}` (sueltas en el Model Space y en las definiciones de bloque). No se dibujan en ningún PDF ni en la vista previa; si hay alguna, `notices` lleva el aviso `UNKNOWN_ENTITIES_OMITTED` (warning). Nunca hacen fallar `load`, `preview` ni `export`.

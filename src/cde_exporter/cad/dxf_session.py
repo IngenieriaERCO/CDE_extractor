@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from cde_exporter.cad.crs import document_crs
 from cde_exporter.cad.large_dxf import (
     EmptiedBlock,
     LooseLayer,
@@ -64,6 +65,8 @@ class LoadedDxf:
     # Informe de la copia sin bloques sin usar (``large_dxf.PrunedSource``) o None: cada
     # paquete lo declara en su TXT y su manifiesto, como en la línea de órdenes.
     pruned: object = None
+    # Sistema de coordenadas del GEODATA, sin interpretar (``crs.document_crs``), o None.
+    crs: dict | None = None
 
     def changed(self) -> bool:
         """¿Cambió el archivo en disco desde que se leyó? (tamaño o fecha)"""
@@ -84,6 +87,7 @@ class LoadedDxf:
             "dxf_version": self.dxf_version,
             "read_seconds": round(self.read_seconds, 1),
             "source_copy": self.source_copy,
+            "crs": self.crs,
         }
 
 
@@ -442,4 +446,5 @@ def load_dxf(path: Path, work_dir: Path, progress=None) -> LoadedDxf:
         source_copy=source_copy,
         notices=notices,
         pruned=pruned,
+        crs=document_crs(document),
     )
