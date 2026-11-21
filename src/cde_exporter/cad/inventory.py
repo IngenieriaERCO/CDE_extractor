@@ -127,7 +127,16 @@ class _Bounds:
         return layer.casefold() in self.hidden_layers
 
     def _solid(self, solid) -> tuple[float, float, float, float] | None:
-        handle = str(solid.dxf.get("handle") or id(solid))
+        handle = str(solid.dxf.get("handle") or "")
+        if not handle:
+            # Sin handle (entidad virtual) no se guarda en caché: su ``id`` podría pasar a otro
+            # sólido cuando este se libere.
+            try:
+                hull, _z, _half, _own = solid_footprint(solid)
+            except Exception:  # noqa: BLE001 - un sólido que no se puede leer no cuenta
+                return None
+            xs, ys = [p[0] for p in hull], [p[1] for p in hull]
+            return (min(xs), min(ys), max(xs), max(ys))
         if handle not in self.solids:
             try:
                 hull, _z, _half, _own = solid_footprint(solid)

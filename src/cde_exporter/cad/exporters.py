@@ -173,6 +173,19 @@ class InstanceRecord(DataRecord):
     def transform_inplace(self, m: Matrix44) -> None:
         self.matrix = Matrix44.chain(self.matrix, m)
 
+    def __deepcopy__(self, memo) -> InstanceRecord:
+        """Copia la marca (matriz, handle y propiedades) pero comparte su ``_Instance``.
+
+        La grabación de un bloque no cambia una vez hecha: copiarla con cada marca duplicaba el
+        contenido y daba a cada copia una identidad nueva, de modo que el PDF ya no podía
+        reconocer el mismo bloque (y la vista previa tampoco).
+        """
+        clone = InstanceRecord(self.instance, self.matrix.copy())
+        clone.property_hash = self.property_hash
+        clone.handle = self.handle
+        memo[id(self)] = clone
+        return clone
+
     def expanded(self) -> list:
         """Los registros del bloque colocados (para lo que no sabe de marcas)."""
         placed = []
@@ -835,6 +848,9 @@ class _ExactPageRenderBackend(pdf_backend.PyMuPdfRenderBackend):
         marca escribe ``q <matriz> cm /Fm Do Q``: la matriz lleva del primer dibujo a este (solo
         giro, traslación o simetría: la escala es la misma por la clave de la reutilización).
         """
+        # Clave: la identidad de la grabación del bloque. El valor guarda también esa grabación,
+        # para que siga viva y Python no pueda dar su ``id`` a otro objeto (si se liberase, otro
+        # bloque podía recibir este XObject: mesas FV con el color de otra capa).
         forms = self.__dict__.setdefault("forms", {})
         shape = self.content_shape
         key = id(marker.instance)
@@ -861,9 +877,9 @@ class _ExactPageRenderBackend(pdf_backend.PyMuPdfRenderBackend):
             _add_page_xobject(self.doc, self.page.xref, name, xref)
             inverse = marker.matrix.copy()
             inverse.inverse()
-            form = (name, xref, inverse)
+            form = (name, xref, inverse, marker.instance)
             forms[key] = form
-        name, _xref, inverse = form
+        name, _xref, inverse, _instance = form
         # De la página (arriba a la izquierda) del primer dibujo a la de esta marca, y al espacio
         # PDF de la forma (``pctm``: PDF -> página; ``ipctm``: página -> PDF).
         relative = Matrix44.chain(inverse, marker.matrix)
@@ -888,7 +904,7 @@ class _ExactPageRenderBackend(pdf_backend.PyMuPdfRenderBackend):
         kind, value = self.doc.xref_get_key(self.page.xref, "Resources")
         if kind == "null":
             return
-        for _name, xref, _inverse in forms.values():
+        for _name, xref, _inverse, _instance in forms.values():
             self.doc.xref_set_key(xref, "Resources", value)
 
     def set_background(self, color) -> None:

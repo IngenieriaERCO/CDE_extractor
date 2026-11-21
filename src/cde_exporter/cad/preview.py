@@ -268,7 +268,8 @@ def paint(
     # 1. Cada conjunto de figuras con su colocación (los bloques reutilizados, una vez por marca)
     #    y sus puntos en coordenadas CAD (el marco único).
     placed: list[tuple[_Geometry, np.ndarray]] = []
-    instances: dict[int, list] = {}
+    # Clave: la identidad de la grabación; el valor la guarda para que su ``id`` no se reutilice.
+    instances: dict[int, tuple[object, list]] = {}
 
     def place(parts: list, matrix: np.ndarray | None) -> None:
         for part in parts:
@@ -277,9 +278,9 @@ def paint(
                 placed.append((part, points[:, :2]))
                 continue
             key = id(part.instance)
-            inner = instances.get(key)
-            if inner is None:
-                inner = instances[key] = collect(part.instance.records)
+            if key not in instances:
+                instances[key] = (part.instance, collect(part.instance.records))
+            inner = instances[key][1]
             local = np.array(part.matrix.get_2d_transformation()).reshape(3, 3)
             place(inner, local if matrix is None else local @ matrix)
             if len(placed) % 500 == 0:

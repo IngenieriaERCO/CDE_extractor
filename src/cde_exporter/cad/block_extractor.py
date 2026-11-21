@@ -123,12 +123,13 @@ def _multileader_mapping_once() -> Iterator[None]:
     el estilo del texto acaba apuntando a otra entidad (p. ej. un 3DSOLID).
     """
     original = MultiLeader.map_resources
-    mapped: set[int] = set()
+    # Clave: la identidad de la copia; el valor la guarda para que su ``id`` no se reutilice.
+    mapped: dict[int, object] = {}
 
     def map_once(self, clone, mapping) -> None:
         if id(clone) in mapped:
             return
-        mapped.add(id(clone))
+        mapped[id(clone)] = clone
         original(self, clone, mapping)
 
     MultiLeader.map_resources = map_once
