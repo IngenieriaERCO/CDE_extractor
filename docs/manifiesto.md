@@ -1,4 +1,4 @@
-# Manifiesto de detalle (`cde-detail-manifest`, esquema 1.4)
+# Manifiesto de detalle (`cde-detail-manifest`, esquema 1.5)
 
 Este documento es para quien programe el **componedor de PDF** (la plancha A1). El manifiesto es el contrato técnico de cada detalle extraído: con él se puede identificar, validar y colocar el PDF sin volver a leer el DXF de origen.
 
@@ -14,6 +14,7 @@ El código está en `src/cde_exporter/cad/manifest.py` (`build_manifest`, `valid
 4. Calcula el SHA-256 del PDF y compáralo con `pdf.sha256`. Si no coincide, el PDF no es el que describe el manifiesto (p. ej. se reemplazó sin su manifiesto): no lo uses.
 5. Si necesitas escala física, exige `scale.physical_scale_guaranteed == true`. Si es `false`, `scale.physical_scale_reason` dice por qué.
 6. Para colocar el detalle, usa `pdf.page_size_mm` y `pdf.drawing.page_bounds_mm`. Para relacionar coordenadas del CAD con el PDF, usa la matriz `pdf.drawing.cad_to_page.matrix`.
+7. Si `pdf.drawing.mask` no es null (zona del Model Space con máscara de recorte), mide los trazos como dice [Cómo medir los trazos con máscara](#cómo-medir-los-trazos-con-máscara-desde-la-15).
 
 Ejemplo en Python, solo con la biblioteca estándar:
 
@@ -47,6 +48,7 @@ def cad_to_page_mm(x, y):          # coordenadas del Model Space -> mm de págin
 - `1.2` (2026-11-12) añade `selection.clip` (recorte a la zona) y los avisos `MODELSPACE_CLIPPED` (info) y `MODELSPACE_NOT_CLIPPED` (warning).
 - `1.3` (2026-11-18, aprobada por Luis Angel) añade a `options` todo lo que cambia el dibujo, junto: `units`, `instancing`, `xobject`, `clip` y `exporter_version`. Los manifiestos `1.0`–`1.2` siguen siendo válidos sin esas claves.
 - `1.4` (2026-11-19) añade a `options` `plot_style` y `print_transparency` (`--plot-style` y `--no-print-transparency`) y los avisos `PLOT_STYLE_APPLIED` y `HATCH_TRANSPARENT_OMITTED` (info). Sin esas opciones valen `null` y `true` y el dibujo no cambia. Los manifiestos `1.0`–`1.3` siguen siendo válidos sin esas claves.
+- `1.5` (2026-11-24) añade `pdf.drawing.mask` (zona de la máscara de recorte del PDF, o null) y, con máscara, `pdf.drawing.cad_bounds` y `page_bounds_mm` pasan a ser lo que se ve: lo dibujado recortado a la zona, siempre dentro de la página (antes contaban enteras las entidades que corta la máscara y se salían de la página). Los manifiestos `1.0`–`1.4` siguen siendo válidos sin `mask`. También desde la 1.5 el trabajador exporta zonas (`docs/protocolo_trabajador.md`); sus paquetes son como los de `cad extract-modelspace`.
 - `model_version` es la versión del modelo interno del detalle (hoy `"2"`). Es un dato de trazabilidad: el componedor no debería depender de ella.
 
 ## Campos
@@ -56,7 +58,7 @@ def cad_to_page_mm(x, y):          # coordenadas del Model Space -> mm de págin
 | Campo | Tipo | Significado |
 |---|---|---|
 | `document_type` | texto | Siempre `"cde-detail-manifest"`. |
-| `schema_version` | texto | Versión de este esquema (`"1.4"`). |
+| `schema_version` | texto | Versión de este esquema (`"1.5"`). |
 | `model_version` | texto | Versión del modelo interno (`"2"`). |
 | `generated_at` | texto o null | Fecha y hora de la extracción (ISO 8601 con zona horaria). |
 
@@ -102,6 +104,7 @@ def cad_to_page_mm(x, y):          # coordenadas del Model Space -> mm de págin
 | `margin_mm`, `content_size_mm` | número, [ancho, alto] | Margen pedido y tamaño del contenido según la caja del CAD. |
 | `drawing.cad_bounds` | `{min: [x, y], max: [x, y]}` | Caja de lo dibujado, en coordenadas CAD. |
 | `drawing.page_bounds_mm` | `{x0, y0, x1, y1}` | La misma caja en la página (mm, origen arriba a la izquierda). |
+| `drawing.mask` | objeto o null | Desde la 1.5. Null sin máscara de recorte (bloques, y zonas en las que todo lo que cruza el borde se pudo recortar). Con máscara: `zone_cad` (`[xmin, ymin, xmax, ymax]`, la zona en coordenadas CAD), `zone_page_mm` (`{x0, y0, x1, y1}`, la zona en la página) y `bleed_mm` (lo que la máscara sobresale de la zona por cada lado, 0,5 mm: el PDF recorta en `zone_page_mm` ampliada `bleed_mm`). Con máscara, `cad_bounds` y `page_bounds_mm` son lo dibujado **recortado a la zona**. |
 | `drawing.cad_to_page` | objeto | `units: "mm"`, `origin: "top-left"`, `y_axis: "down"` y `matrix: [a, b, c, d, e, f]`, con **X = a·x + c·y + e** e **Y = b·x + d·y + f**. Es la matriz real con la que se dibujó el PDF. |
 
 `drawing` es null si no hubo nada que dibujar. La caja de lo dibujado puede ser algo menor que `content_size_mm`, porque la caja del CAD incluye cosas que no dejan trazo, como el recuadro de un MTEXT; el dibujo se centra en la página.
@@ -157,7 +160,7 @@ Si no se indica la severidad, es `warning`.
 
 ### `selection`
 
-Desde la 1.1. `null` si se exportó un bloque (`cad extract-block`). En un paquete de `cad extract-modelspace`: `kind` (`"modelspace"`), `layers` y `exclude_layers` (patrones pedidos; lista vacía = todas), `window` (`[xmin, ymin, xmax, ymax]` en coordenadas CAD, o null), `window_from_block` (bloque del que se tomó la zona, o null), `entities` (entidades del Model Space elegidas; un INSERT cuenta una), `not_copied`, `zero_length_skipped`, `without_bounds_skipped` y, desde la 1.2, `clip`: null sin recorte (sin zona o con `--no-clip`), o `clipped_entities` (entidades recortadas), `pieces` (tramos que quedaron), `outside_removed` (las que solo tocaban la zona con su caja) y `not_clipped` (lista de `{type, count}`: lo que cruza el borde y entra entero). Con recorte, `pdf.page_size_mm` es la zona (ampliada solo por lo que entra entero y cruza el borde) y `pdf.drawing.cad_bounds` la caja de lo dibujado, que puede ser menor. En esos paquetes, `source.block_name` es el bloque de trabajo que agrupa la selección («Model_Space») y `source.reference` su INSERT en (0, 0, 0): las coordenadas CAD siguen siendo las del Model Space de origen.
+Desde la 1.1. `null` si se exportó un bloque (`cad extract-block`). En un paquete de `cad extract-modelspace`: `kind` (`"modelspace"`), `layers` y `exclude_layers` (patrones pedidos; lista vacía = todas), `window` (`[xmin, ymin, xmax, ymax]` en coordenadas CAD, o null), `window_from_block` (bloque del que se tomó la zona, o null), `entities` (entidades del Model Space elegidas; un INSERT cuenta una), `not_copied`, `zero_length_skipped`, `without_bounds_skipped` y, desde la 1.2, `clip`: null sin recorte (sin zona o con `--no-clip`), o `clipped_entities` (entidades recortadas), `pieces` (tramos que quedaron), `outside_removed` (las que solo tocaban la zona con su caja) y `not_clipped` (lista de `{type, count}`: lo que cruza el borde y no se puede recortar; desde el 2026-11-23 entra entero y la máscara de recorte del PDF lo corta en el borde, y su texto completo va en el TXT). Con recorte, `pdf.page_size_mm` es la zona más los márgenes (antes del 2026-11-23 se ampliaba con lo que entraba entero) y `pdf.drawing.cad_bounds` la caja de lo dibujado: menor si lo recortado no llega a los bordes; si algo cruza el borde entero (máscara), desde la 1.5 es la caja recortada a la zona y `pdf.drawing.mask` da la zona (en la 1.4 era mayor que la zona). Desde el 2026-11-23 se recortan también arcos, círculos, elipses y HATCH en planta, y `layers`/`exclude_layers` valen también dentro de los bloques (como congelar una capa en una ventana del CAD). Esto no cambió la versión del esquema. En esos paquetes, `source.block_name` es el bloque de trabajo que agrupa la selección («Model_Space») y `source.reference` su INSERT en (0, 0, 0): las coordenadas CAD siguen siendo las del Model Space de origen.
 
 ### `options`
 
@@ -173,6 +176,25 @@ Desde la 1.3, además:
 Desde la 1.4, además:
 - `plot_style`: la tabla de estilos de impresión con que se dibujó (`--plot-style`): `{"name": nombre del archivo .ctb, "sha256": SHA-256 del archivo}`, o null. Con ella, los colores y grosores de las entidades con color ACI son los de la tabla, no los del dibujo (los de color verdadero no cambian).
 - `print_transparency`: false con `--no-print-transparency`: los HATCH con transparencia del 80 % o más no se dibujaron (cuántos y en qué capas, en el aviso `HATCH_TRANSPARENT_OMITTED` y en `entities.hatches`).
+
+## Cómo medir los trazos con máscara (desde la 1.5)
+
+Para el agente del componedor (su comprobación «h) Trazos del PDF vs page_bounds_mm»; la «g) page_bounds_mm dentro de la página» no cambia y ya pasa).
+
+En una zona del Model Space, lo que cruza el borde y no se puede recortar (textos, cotas, INSERT, splines…) se escribe **entero** en el PDF y una máscara de recorte (`q x y w h re W n … Q`) oculta lo que sale de la zona. `page.get_drawings()` de PyMuPDF **no aplica la máscara**: devuelve los trazos enteros, que pueden salirse de la página. Por eso:
+
+1. Si `pdf.drawing.mask` es null: sin cambios (los trazos sin el fondo blanco frente a `page_bounds_mm`, ±0,5 mm).
+2. Si no es null:
+   1. Toma `R = pdf.drawing.mask.zone_page_mm` (mm de página, origen arriba a la izquierda, Y hacia abajo; para PyMuPDF, multiplica por 72/25,4). Es la zona **sin** el `bleed_mm`.
+   2. Para cada trazo de `page.get_drawings()` (sin el fondo blanco de página completa, como ahora), recorta su `rect` a `R` **a mano**: `x0 = max(rect.x0, R.x0)`, `y0 = max(rect.y0, R.y0)`, `x1 = min(rect.x1, R.x1)`, `y1 = min(rect.y1, R.y1)`. No uses `Rect.intersect` ni `&` de PyMuPDF: un segmento horizontal o vertical tiene un `rect` de alto o ancho cero, que PyMuPDF trata como vacío y perdería.
+   3. Descarta los trazos con `x0 > x1` o `y0 > y1` (los que caen enteros fuera de la zona, en la franja de `bleed_mm` o más allá). Un trazo que solo toca el borde (ancho o alto cero) cuenta.
+   4. La caja medida es el mínimo de los `x0`, `y0` y el máximo de los `x1`, `y1` de lo que queda.
+   5. Compárala con `page_bounds_mm`: misma tolerancia de ±0,5 mm por lado.
+3. Sin trazos tras el recorte: falla (como hoy «sin trazos»).
+
+Por qué cuadra: el exportador calcula `cad_bounds` como la intersección de la caja de lo dibujado (la que graba ezdxf) con `zone_cad`, y `page_bounds_mm` es esa caja por la matriz; recortar cada trazo a la misma zona da la misma caja con la diferencia de siempre entre trazos y caja grabada. Lo comprueba `tests/test_zone_clipping.py::test_with_a_mask_the_manifest_drawing_is_the_visible_part`, que hace exactamente estos pasos.
+
+Lo demás no cambia: el tamaño de página, la matriz y la comprobación «f) cad_bounds por la matriz = page_bounds_mm» siguen valiendo (`page_bounds_mm` es `cad_bounds` por la matriz también con máscara). Para colocar el detalle usa `page_bounds_mm` como siempre: es lo que se ve.
 
 ## Validación del manifiesto
 
@@ -201,7 +223,7 @@ Termina con código 0 («Paquete completo y coherente») o con código 1 y la li
 ```json
 {
   "document_type": "cde-detail-manifest",
-  "schema_version": "1.4",
+  "schema_version": "1.5",
   "model_version": "2",
   "source": {"dxf_name": "prueba_erco_perfil.dxf", "dxf_sha256": "1f1726e9…c07b38ed", "dxf_bytes": 58025354, "block_name": "Perfil_K0010"},
   "scale": {"requested": "1:50", "denominator": 50.0, "factor_mm_per_cad_unit": 20.0, "physical_scale_guaranteed": true, "physical_scale_reason": null},
@@ -212,7 +234,8 @@ Termina con código 0 («Paquete completo y coherente») o con código 1 y la li
       "cad_bounds": {"min": [4924093.7479, 2632176.2394], "max": [4924113.5538, 2632181.6351]},
       "page_bounds_mm": {"x0": 10.431, "y0": 5.744, "x1": 406.549, "y1": 113.658},
       "cad_to_page": {"units": "mm", "origin": "top-left", "y_axis": "down",
-                      "matrix": [20.0, 0.0, 0.0, -20.0, -98481864.52706, 52643638.44637]}
+                      "matrix": [20.0, 0.0, 0.0, -20.0, -98481864.52706, 52643638.44637]},
+      "mask": null
     }
   },
   "notices": {"counts": {"info": 4, "warning": 2, "critical": 0}},

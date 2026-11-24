@@ -31,10 +31,13 @@ from cde_exporter.cad.notices import (
 )
 
 DOCUMENT_TYPE = "cde-detail-manifest"
-SCHEMA_VERSION = "1.4"
+SCHEMA_VERSION = "1.5"
 # El manifiesto se publica junto al PDF como <prefijo>.manifest.json, el último de los tres.
 MANIFEST_SUFFIX = ".manifest.json"
 _MM_PER_POINT = 25.4 / 72
+# La máscara de recorte del PDF sobresale de la zona esto por cada lado (para no partir el
+# grosor de una línea que va justo por el borde); exporters.py la usa desde aquí.
+MASK_BLEED_MM = 0.5
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -75,6 +78,9 @@ class PdfFacts:
     page_size_mm: tuple[float, float]
     drawn_bounds: tuple[tuple[float, float], tuple[float, float]] | None
     cad_to_page_pt: tuple[float, float, float, float, float, float] | None
+    # Zona de una exportación con máscara de recorte (xmin, ymin, xmax, ymax en CAD); None sin
+    # máscara (bloques y zonas en las que todo se pudo recortar).
+    mask_box: tuple[float, float, float, float] | None = None
 
 
 def file_name(path: str | Path | None) -> str | None:
@@ -169,26 +175,47 @@ def _entities(detail: ExtractedDetail) -> dict:
     }
 
 
-def _drawing(facts: PdfFacts) -> dict | None:
-    if facts.drawn_bounds is None or facts.cad_to_page_pt is None:
-        return None
-    a, b, c, d, e, f = (value * _MM_PER_POINT for value in facts.cad_to_page_pt)
-    (x0, y0), (x1, y1) = facts.drawn_bounds
+def _page_box(matrix, x0: float, y0: float, x1: float, y1: float) -> dict:
+    """Caja CAD llevada a la página (mm, origen arriba a la izquierda, Y hacia abajo)."""
+    a, b, c, d, e, f = matrix
     corners = [(a * x + c * y + e, b * x + d * y + f) for x in (x0, x1) for y in (y0, y1)]
     return {
+        "x0": min(x for x, _ in corners),
+        "y0": min(y for _, y in corners),
+        "x1": max(x for x, _ in corners),
+        "y1": max(y for _, y in corners),
+    }
+
+
+def _drawing(facts: PdfFacts) -> dict | None:
+    """Caja de lo dibujado y matriz CAD → página. Con máscara (``mask_box``), la caja es la de lo
+    que se ve: lo dibujado recortado a la zona, dentro de la página (la geometría que corta la
+    máscara sigue entera en el PDF; docs/manifiesto.md dice cómo medirla)."""
+    if facts.drawn_bounds is None or facts.cad_to_page_pt is None:
+        return None
+    matrix = tuple(value * _MM_PER_POINT for value in facts.cad_to_page_pt)
+    (x0, y0), (x1, y1) = facts.drawn_bounds
+    mask = None
+    if facts.mask_box is not None:
+        zx0, zy0, zx1, zy1 = facts.mask_box
+        cx0, cy0, cx1, cy1 = max(x0, zx0), max(y0, zy0), min(x1, zx1), min(y1, zy1)
+        if cx0 <= cx1 and cy0 <= cy1:
+            x0, y0, x1, y1 = cx0, cy0, cx1, cy1
+        mask = {
+            "zone_cad": [zx0, zy0, zx1, zy1],
+            "zone_page_mm": _page_box(matrix, zx0, zy0, zx1, zy1),
+            "bleed_mm": MASK_BLEED_MM,
+        }
+    return {
         "cad_bounds": {"min": [x0, y0], "max": [x1, y1]},
-        "page_bounds_mm": {
-            "x0": min(x for x, _ in corners),
-            "y0": min(y for _, y in corners),
-            "x1": max(x for x, _ in corners),
-            "y1": max(y for _, y in corners),
-        },
+        "page_bounds_mm": _page_box(matrix, x0, y0, x1, y1),
         "cad_to_page": {
             "units": "mm",
             "origin": "top-left",
             "y_axis": "down",
-            "matrix": [a, b, c, d, e, f],
+            "matrix": list(matrix),
         },
+        "mask": mask,
     }
 
 
@@ -479,6 +506,18 @@ _SCHEMA = {
                     "y_axis": _Enum(frozenset({"down"})),
                     "matrix": _Floats(6),
                 },
+                "mask": _Null(
+                    {
+                        "zone_cad": _Floats(4),
+                        "zone_page_mm": {
+                            "x0": _NUMBER,
+                            "y0": _NUMBER,
+                            "x1": _NUMBER,
+                            "y1": _NUMBER,
+                        },
+                        "bleed_mm": _NUMBER,
+                    }
+                ),
             }
         ),
     },
@@ -591,6 +630,7 @@ _ADDED_IN: dict[str, tuple[int, int]] = {
     "manifiesto.options.exporter_version": (1, 3),
     "manifiesto.options.plot_style": (1, 4),
     "manifiesto.options.print_transparency": (1, 4),
+    "manifiesto.pdf.drawing.mask": (1, 5),
 }
 
 

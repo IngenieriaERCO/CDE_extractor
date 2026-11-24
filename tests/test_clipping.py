@@ -103,8 +103,10 @@ def test_clip_layout_cuts_lines_and_polylines_and_keeps_the_rest() -> None:
 
     report = clip_layout(modelspace, BOX)
 
-    assert report.clipped == 2 and report.pieces == 2 and report.outside == 1
-    assert dict(report.not_clipped) == {"LWPOLYLINE": 1, "CIRCLE": 1}
+    # El círculo que cruza el borde también se recorta (queda un ARC); la polilínea con bulge
+    # entra entera (la corta la máscara del PDF).
+    assert report.clipped == 3 and report.pieces == 3 and report.outside == 1
+    assert dict(report.not_clipped) == {"LWPOLYLINE": 1}
     lines = [entity for entity in modelspace if entity.dxftype() == "LINE"]
     assert lines[0].dxf.start.x == pytest.approx(0) and lines[0].dxf.end.x == pytest.approx(10)
     cut = [
@@ -216,7 +218,7 @@ def test_clipped_modelspace_page_overlays_the_block_page_exactly(tmp_path: Path)
     assert all(checks.values()), checks
 
 
-def test_an_arc_crossing_the_window_enters_whole_and_widens_the_page(tmp_path: Path) -> None:
+def test_an_arc_crossing_the_window_is_cut_and_the_page_is_the_window(tmp_path: Path) -> None:
     source = _source(tmp_path / "obra.dxf")
     document = ezdxf.readfile(source)
     document.modelspace().add_arc((25, 11), 4, 0, 180, dxfattribs={"layer": "CURVAS"})
@@ -246,12 +248,12 @@ def test_an_arc_crossing_the_window_enters_whole_and_widens_the_page(tmp_path: P
     )
 
     manifest = _manifest(prefix)
-    assert manifest["selection"]["clip"]["not_clipped"] == [{"type": "ARC", "count": 1}]
+    assert manifest["selection"]["clip"]["not_clipped"] == []
     width, height = manifest["pdf"]["page_size_mm"]
-    # La zona mide 20 × 12 m (100 × 60 mm a 1:200, más márgenes); el arco llega a x = 29.
-    assert width == pytest.approx((29 - 5) * 5 + 10, abs=1e-6)
+    # La zona mide 20 × 12 m: 100 × 60 mm a 1:200, más los márgenes; el arco ya no la amplía.
+    assert (width, height) == pytest.approx((100 + 10, 60 + 10), abs=1e-4)
     notices = [item for items in manifest["notices"]["by_category"].values() for item in items]
-    assert any(item["code"] == "MODELSPACE_NOT_CLIPPED" for item in notices)
+    assert not any(item["code"] == "MODELSPACE_NOT_CLIPPED" for item in notices)
 
 
 def test_a_closed_2d_polyline_with_widths_becomes_open_pieces() -> None:

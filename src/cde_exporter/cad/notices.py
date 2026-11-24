@@ -128,6 +128,11 @@ WARNING_CODES: dict[str, tuple[NoticeCategory, str | None]] = {
         "Solo se recortan líneas y polilíneas de tramos rectos; use --no-clip para que todo "
         "entre entero.",
     ),
+    "MODELSPACE_MASKED": (NoticeCategory.ENTITIES, None),
+    "MODELSPACE_LAYERS_IN_BLOCKS": (
+        NoticeCategory.ENTITIES,
+        "Si algo de un bloque debe salir, añada su capa a --layers o quítela de --exclude-layers.",
+    ),
     "SOURCE_UNUSED_BLOCKS_SKIPPED": (NoticeCategory.ENTITIES, None),
     "SOURCE_MODELSPACE_LOOSE_SKIPPED": (NoticeCategory.ENTITIES, None),
     "UNKNOWN_ENTITIES_OMITTED": (NoticeCategory.ENTITIES, UNKNOWN_ENTITIES_ADVICE),

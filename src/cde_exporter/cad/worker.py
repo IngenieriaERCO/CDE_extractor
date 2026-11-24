@@ -9,7 +9,8 @@ JSON por líneas (docs/protocolo_trabajador.md).
   registro de las librerías van a stderr.
 
 Etapas hechas: 1 (arranque, ``load``, ``status``, ``cancel`` y ``close``), 2 (``preview`` con
-caché) y 3 (``export``, en ``worker_export``).
+caché) y 3 (``export``, en ``worker_export``). Protocolo 1.1: zonas del Model Space en
+``preview`` y ``export`` (``worker_zone``).
 """
 
 from __future__ import annotations
@@ -100,6 +101,9 @@ class _Session:
     units: str | None
     margin_mm: float
     inventory: dict
+    # Cajas rápidas del Model Space para las zonas (worker_zone.session_boxes): se calculan la
+    # primera vez que se pide una zona.
+    modelspace_boxes: list | None = None
 
 
 class _Progress:
@@ -409,6 +413,8 @@ class Worker:
     def preview(self, request: Request) -> dict:
         data = request.data
         session = self.session_for(request)
+        if "zone" in data or "view" in data:
+            return self.preview_zone(request, session)
         block = find_reference(session.inventory, data)
         long_side = data.get("long_side_px", DEFAULT_LONG_SIDE_PX)
         if (
@@ -488,6 +494,81 @@ class Worker:
         seconds = round(time.perf_counter() - started, 2)
         return {**result, "png": str(png), "cached": False, "seconds": seconds}
 
+
+    def preview_zone(self, request: Request, session: _Session) -> dict:
+        """Vista previa de una zona, de un trozo o de todo el Model Space (sección 4.1)."""
+        from cde_exporter.cad.worker_export import plot_style_option
+        from cde_exporter.cad.worker_zone import (
+            ZONE_PREVIEW_STAGES,
+            draw_zone_preview,
+            parse_scale,
+            preview_key,
+            zone_paper,
+            zone_request,
+        )
+
+        data = request.data
+        long_side = data.get("long_side_px", DEFAULT_LONG_SIDE_PX)
+        if (
+            isinstance(long_side, bool)
+            or not isinstance(long_side, int)
+            or not MIN_LONG_SIDE_PX <= long_side <= MAX_LONG_SIDE_PX
+        ):
+            raise WorkerError(
+                protocol.BAD_REQUEST,
+                f"«long_side_px» debe ser un entero de {MIN_LONG_SIDE_PX} a {MAX_LONG_SIDE_PX}.",
+            )
+        document = session.loaded.document
+        hidden, all_layers = hidden_layer_selection(document, data.get("include_hidden_layers"))
+        zone = zone_request(data, document, hidden)
+        scale = None if data.get("scale") is None else parse_scale(data["scale"], "«scale»")
+        plot_style = plot_style_option(data.get("plot_style"))
+        print_transparency = data.get("print_transparency", True)
+        if not isinstance(print_transparency, bool):
+            raise WorkerError(
+                protocol.BAD_REQUEST, "«print_transparency» debe ser true o false."
+            )
+        tag = drawing_tag(layers_tag(hidden, all_layers), plot_style, print_transparency)
+        drawing = {
+            "plot_style": None if plot_style is None else plot_style.describe(),
+            "print_transparency": print_transparency,
+            "include_hidden_layers": ["*"]
+            if all_layers
+            else (sorted(hidden) if hidden else None),
+        }
+        png, meta = self.previews.paths(
+            session.loaded.fingerprint, preview_key(zone), long_side, tag
+        )
+        started = time.perf_counter()
+        result = self.previews.get(png, meta)
+        cached = result is not None
+        if not cached:
+            progress = _Progress(self.output, request, ZONE_PREVIEW_STAGES, self.state)
+            image, result = draw_zone_preview(
+                session,
+                zone,
+                long_side,
+                hidden_layers=hidden,
+                plot_style=plot_style,
+                print_transparency=print_transparency,
+                check=self.state.check,
+                progress=progress,
+            )
+            self.state.check()
+            result = {**result, **drawing}
+            self.previews.put(png, meta, image, result)
+            self.previews.trim(keep=(png, meta))
+        frame = None if result["view"] is None else tuple(result["view"])
+        seconds = round(time.perf_counter() - started, 2)
+        return {
+            **result,
+            **drawing,
+            "scale": scale,
+            "paper": zone_paper(session, zone, scale, frame),
+            "png": str(png),
+            "cached": cached,
+            "seconds": seconds,
+        }
 
     # ------------------------------------------------------------------ export
     def export(self, request: Request) -> dict:

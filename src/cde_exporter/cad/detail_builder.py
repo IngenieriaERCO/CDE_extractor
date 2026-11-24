@@ -205,7 +205,27 @@ def modelspace_selection_warnings(selection: ModelSpaceSelection | None) -> list
             )
         )
     crossing = sum(count for _kind, count in selection.not_clipped)
-    if crossing:
+    if crossing and selection.masked:
+        kinds = ", ".join(f"{kind} {count}" for kind, count in selection.not_clipped)
+        one = crossing == 1
+        warnings.append(
+            ExtractionWarning(
+                "MODELSPACE_MASKED",
+                Severity.INFO,
+                f"{_entities_text(crossing)} {'cruza' if one else 'cruzan'} el borde de la zona "
+                f"y no se {'puede' if one else 'pueden'} recortar ({kinds}): "
+                f"{'se dibuja entera' if one else 'se dibujan enteras'} y la máscara de recorte "
+                "del PDF las corta en el borde. La página mide la zona."
+                + (
+                    f" Su texto completo ({len(selection.masked_texts)} "
+                    f"{'línea' if len(selection.masked_texts) == 1 else 'líneas'}) está en la "
+                    "sección B."
+                    if selection.masked_texts
+                    else ""
+                ),
+            )
+        )
+    elif crossing:
         kinds = ", ".join(f"{kind} {count}" for kind, count in selection.not_clipped)
         warnings.append(
             ExtractionWarning(
@@ -215,6 +235,18 @@ def modelspace_selection_warnings(selection: ModelSpaceSelection | None) -> list
                 f"la zona y {'entra entera' if crossing == 1 else 'entran enteras'} porque no se "
                 f"{'puede' if crossing == 1 else 'pueden'} recortar ({kinds}); la página se amplía "
                 "para que quepan.",
+            )
+        )
+    removed = sum(count for _layer, count in selection.nested_removed)
+    if removed:
+        layers = ", ".join(f"«{layer}» {count}" for layer, count in selection.nested_removed)
+        warnings.append(
+            ExtractionWarning(
+                "MODELSPACE_LAYERS_IN_BLOCKS",
+                Severity.INFO,
+                f"Las capas que no se ven tampoco salen dentro de los bloques: "
+                f"{_entities_text(removed)} de las definiciones de bloque "
+                f"{'quitada' if removed == 1 else 'quitadas'} de la copia ({layers}).",
             )
         )
     if selection.without_bounds:

@@ -116,14 +116,31 @@ def _format_block(detail: ExtractedDetail) -> list[str]:
         lines += _line("No copiadas", str(selection.not_copied))
         lines += _line("De longitud nula (no se dibujan)", str(selection.zero_length))
         lines += _line("Sin caja (fuera de la zona)", str(selection.without_bounds))
+        if selection.nested_removed:
+            lines += _line(
+                "Quitado dentro de los bloques (capas que no se ven)",
+                ", ".join(f"«{layer}» {count}" for layer, count in selection.nested_removed),
+            )
         if selection.clipped:
             crossing = ", ".join(f"{kind} {count}" for kind, count in selection.not_clipped)
+            whole = (
+                "enteras, cortadas por la máscara del PDF"
+                if selection.masked
+                else "sin recortar (enteras)"
+            )
             lines += _line(
                 "Recorte a la zona",
                 f"{selection.clipped_entities} recortadas ({selection.clip_pieces} tramos), "
-                f"{selection.outside_removed} quitadas por quedar fuera, sin recortar (enteras): "
+                f"{selection.outside_removed} quitadas por quedar fuera, {whole}: "
                 f"{crossing or 'ninguna'}",
             )
+            if selection.masked_texts:
+                lines += _line(
+                    "Textos que cruzan el borde (completos)",
+                    str(len(selection.masked_texts)),
+                )
+                for kind, layer, text in selection.masked_texts:
+                    lines += _line("", f"- {kind}, capa «{layer}»: {text}", "    ")
         elif selection.window is not None:
             lines += _line("Recorte a la zona", "no (--no-clip): las entidades entran enteras")
     return lines

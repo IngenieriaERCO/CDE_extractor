@@ -208,11 +208,14 @@ def paint(
     check: Check = _noop_check,
     progress: Progress = _noop_progress,
     extent_hint: float | None = None,
+    frame: tuple[float, float, float, float] | None = None,
 ) -> PreviewImage:
     """Pinta la grabación en un PNG RGBA de fondo transparente, ajustado al dibujo.
 
     ``extent_hint``: lado mayor aproximado del dibujo en unidades CAD (la caja de ``load``),
     solo para elegir con qué detalle se aplanan las curvas.
+    ``frame``: (xmin, ymin, xmax, ymax) en unidades CAD; si se da, la imagen se ajusta a esa
+    caja en vez de a lo dibujado (lo que queda fuera no se ve).
     """
     tolerance = _tolerance(player, long_side_px, extent_hint)
     colors = {key: _rgba(props.color) for key, props in player.properties.items()}
@@ -288,14 +291,17 @@ def paint(
 
     place(collect(player.records), None)
     progress("paint", 0.3, "Preparando la vista previa")
-    if not placed:
+    if not placed and frame is None:
         return PreviewImage(Image.new("RGBA", (1, 1), (0, 0, 0, 0)), None, None)
 
-    # 2. Caja de lo dibujado y matriz CAD → píxeles.
-    xmin = min(float(points[:, 0].min()) for _g, points in placed)
-    ymin = min(float(points[:, 1].min()) for _g, points in placed)
-    xmax = max(float(points[:, 0].max()) for _g, points in placed)
-    ymax = max(float(points[:, 1].max()) for _g, points in placed)
+    # 2. Caja de lo dibujado (o la pedida) y matriz CAD → píxeles.
+    if frame is not None:
+        xmin, ymin, xmax, ymax = (float(value) for value in frame)
+    else:
+        xmin = min(float(points[:, 0].min()) for _g, points in placed)
+        ymin = min(float(points[:, 1].min()) for _g, points in placed)
+        xmax = max(float(points[:, 0].max()) for _g, points in placed)
+        ymax = max(float(points[:, 1].max()) for _g, points in placed)
     margin = min(MARGIN_PX, long_side_px // 20)
     width, height = xmax - xmin, ymax - ymin
     extent = max(width, height)

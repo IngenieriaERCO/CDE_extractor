@@ -15,6 +15,7 @@ from ezdxf import xref
 from ezdxf.document import Drawing
 from ezdxf.entities.mleader import MultiLeader
 
+from cde_exporter.cad.draw_order import copy_block_draw_order
 from cde_exporter.cad.models import CadProcessingError
 from cde_exporter.cad.reader import entity_bounds, is_unknown_entity, read_dxf
 
@@ -184,6 +185,8 @@ def extract_block_reference(
         loader.execute()
     _restore_default_resources(document, target)
     target.header["$INSUNITS"] = int(document.header.get("$INSUNITS", 0) or 0)
+    # El Loader no copia las tablas de orden de dibujo (ACAD_SORTENTS) de los bloques.
+    copy_block_draw_order(document, target)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists() and not overwrite:
         raise CadProcessingError(f"El archivo de salida ya existe: {destination}")

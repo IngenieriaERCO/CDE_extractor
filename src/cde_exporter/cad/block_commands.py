@@ -900,6 +900,7 @@ def _run_extract_block(
                     draw_svg=keep,
                     text_layer=not args.no_text_layer,
                     render_box=page_window,
+                    mask_box=getattr(args, "mask_box", None),
                     plot_style=plot_table,
                     print_transparency=print_transparency(args),
                 )
@@ -1247,7 +1248,11 @@ def _checked_manifest(source: Path, pdf: Path, detail, export_report, args) -> d
         source_dxf=source,
         pdf_file=pdf,
         pdf=PdfFacts(
-            page_count, page_size, export_report.drawn_bounds, export_report.cad_to_page_pt
+            page_count,
+            page_size,
+            export_report.drawn_bounds,
+            export_report.cad_to_page_pt,
+            mask_box=getattr(args, "mask_box", None),
         ),
         options=_run_options(args),
         # El trabajador ya calculó el hash en «load»: no se vuelve a leer el DXF.

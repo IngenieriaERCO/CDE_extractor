@@ -230,5 +230,6 @@ data/output/*
 !data/output/.gitkeep
 data/input/*
 !data/input/.gitkeep
+data/verificacion/
 *.backup
 *.pre_single_font_backup

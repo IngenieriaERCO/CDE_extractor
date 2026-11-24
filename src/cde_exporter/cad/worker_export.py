@@ -8,6 +8,8 @@ leer el DXF:
 - Los trabajos se hacen en orden; si uno falla, los demás siguen y el que falla no deja
   archivos. Cada paquete se publica de forma atómica (manifiesto el último).
 - Avance por etapas (``run_hooks``) y cancelación entre etapas y mientras se dibuja.
+- Desde el protocolo 1.1, un trabajo puede ser una zona del Model Space (``zone``, sección 5.4):
+  se exporta como ``cad extract-modelspace`` (``worker_zone``); sin nombre, ``Zona_01``…
 """
 
 from __future__ import annotations
@@ -39,6 +41,15 @@ from cde_exporter.cad.project_commands import (
 )
 from cde_exporter.cad.scale import parse_nominal_scale
 from cde_exporter.cad.worker_protocol import Request, WorkerError
+from cde_exporter.cad.worker_zone import (
+    check_zone_has_content,
+    generated_names,
+    output_exists,
+    parse_scale,
+    prepare_zone,
+    zone_args,
+    zone_request,
+)
 from cde_exporter.config import get_settings
 
 # Peso de cada etapa en el avance de un trabajo (dibujar es lo que más tarda).
@@ -73,12 +84,20 @@ DEFAULT_OPTIONS = {
 @dataclass
 class _Job:
     id: str
-    block: dict  # el de ``load`` (blocks[])
+    block: dict | None  # el de ``load`` (blocks[]); None en un trabajo de zona
     scale: str
-    package: str
+    package: str | None  # None hasta generarlo (zona sin nombre)
     status: str = "pending"
     result: dict | None = None
     detail: object = None  # detalle finalizado (para resumen_proyecto.json)
+    # Trabajo de zona: {"zone": (xmin, ymin, xmax, ymax), "layers": (...),
+    # "exclude_layers": (...)}; None en un trabajo de bloque.
+    zone: dict | None = None
+    generated: bool = False  # nombre de paquete generado (Zona_01…)
+
+    @property
+    def label(self) -> str:
+        return self.block["ref"] if self.block is not None else f"zona «{self.package}»"
 
 
 def _bad(message: str, **details) -> WorkerError:
@@ -209,6 +228,12 @@ def plan_export(data: dict, session, find_reference) -> tuple[Path, list[_Job], 
         if not isinstance(job_id, str) or not job_id or job_id in ids:
             raise _bad(f"El trabajo {index} necesita un «job» de texto único.", job=job_id)
         ids.add(job_id)
+        if "zone" in raw:
+            job = _plan_zone_job(raw, job_id, session, options)
+            if job.package is not None:
+                _check_package(job.package, job_id, output_dir, packages, options, source)
+            jobs.append(job)
+            continue
         try:
             block = find_reference(session.inventory, raw)
         except WorkerError as failure:
@@ -222,46 +247,15 @@ def plan_export(data: dict, session, find_reference) -> tuple[Path, list[_Job], 
         except (CadProcessingError, ValueError) as failure:
             raise _bad(f"Escala no válida en «{job_id}»: {failure}", job=job_id) from failure
         package = raw.get("package", block["file_stem"])
-        if not isinstance(package, str) or not is_package_name(package):
-            raise WorkerError(
-                protocol.OUTPUT_INVALID,
-                f"Nombre de paquete no válido en «{job_id}»: {package!r}.",
-                "Use solo letras sin acentos, números, punto, guion y guion bajo, sin empezar "
-                f"por punto y con {PACKAGE_NAME_MAX} caracteres como mucho.",
-                {"job": job_id, "package": package},
-            )
-        if package.casefold() in packages:
-            raise WorkerError(
-                protocol.OUTPUT_INVALID,
-                f"Los trabajos «{packages[package.casefold()]}» y «{job_id}» usan el mismo "
-                f"paquete «{package}».",
-                details={"job": job_id, "package": package},
-            )
-        packages[package.casefold()] = job_id
-        longest = output_dir / f"{package}{MANIFEST_SUFFIX}"
-        if len(str(longest)) > PACKAGE_PATH_MAX:
-            raise WorkerError(
-                protocol.OUTPUT_INVALID,
-                f"La ruta de salida de «{job_id}» pasa de {PACKAGE_PATH_MAX} caracteres "
-                f"({len(str(longest))}).",
-                "Use una carpeta de salida más corta o un nombre de paquete más corto.",
-                {"job": job_id, "path": str(longest)},
-            )
-        for path in _outputs(output_dir, package):
-            if path.resolve() == source:
-                raise WorkerError(
-                    protocol.OUTPUT_INVALID,
-                    "La salida no puede sobrescribir el DXF de origen.",
-                    details={"job": job_id, "path": str(path)},
-                )
-            if path.exists() and not options["overwrite"]:
-                raise WorkerError(
-                    protocol.OUTPUT_EXISTS,
-                    f"El archivo de salida ya existe: {path}",
-                    "Use otro nombre de paquete u «overwrite»: true.",
-                    {"job": job_id, "path": str(path)},
-                )
+        _check_package(package, job_id, output_dir, packages, options, source)
         jobs.append(_Job(job_id, block, scale.strip(), package))
+    # Zonas sin nombre: Zona_01, Zona_02… libres en el pedido y en la carpeta de salida.
+    unnamed = [job for job in jobs if job.package is None]
+    if unnamed:
+        names = generated_names(len(unnamed), set(packages), output_exists(output_dir, _outputs))
+        for job, name in zip(unnamed, names, strict=True):
+            job.package, job.generated = name, True
+            _check_package(name, job.id, output_dir, packages, options, source)
     summary = output_dir / SUMMARY_NAME
     if options["write_summary"] and summary.exists() and not options["overwrite"]:
         raise WorkerError(
@@ -271,6 +265,88 @@ def plan_export(data: dict, session, find_reference) -> tuple[Path, list[_Job], 
             {"path": str(summary)},
         )
     return output_dir, jobs, options
+
+
+def _plan_zone_job(raw: dict, job_id: str, session, options: dict) -> _Job:
+    """Trabajo de zona comprobado; su nombre puede quedar sin poner (se genera después)."""
+    from cde_exporter.cad.worker import hidden_layer_selection
+
+    document = session.loaded.document
+    try:
+        for key in ("ref", "block", "handle", "occurrence"):
+            if key in raw:
+                raise _bad(f"El trabajo de zona no lleva «{key}».")
+        hidden, _all = hidden_layer_selection(document, options["include_hidden_layers"])
+        request = zone_request(raw, document, hidden)
+        if request.zone is None:
+            raise _bad("Falta «zone» ([xmin, ymin, xmax, ymax]).")
+        if request.view is not None:
+            raise _bad("Un trabajo de zona no lleva «view» (solo «zone»).")
+        scale = parse_scale(raw.get("scale"), f"«{job_id}»")
+        zone = {
+            "zone": request.zone,
+            "layers": request.layers,
+            "exclude_layers": request.exclude_layers,
+        }
+        check_zone_has_content(session, zone)
+    except WorkerError as failure:
+        failure.details = {**failure.details, "job": job_id}
+        raise
+    name = raw.get("file_stem", raw.get("package"))
+    if name is not None and not isinstance(name, str):
+        raise WorkerError(
+            protocol.OUTPUT_INVALID,
+            f"Nombre de paquete no válido en «{job_id}»: {name!r}.",
+            details={"job": job_id, "package": name},
+        )
+    package = name.strip() if name and name.strip() else None
+    return _Job(job_id, None, scale, package, zone=zone)
+
+
+def _check_package(
+    package, job_id: str, output_dir: Path, packages: dict, options: dict, source: Path
+) -> None:
+    """Nombre válido, no repetido en el pedido, ruta no demasiado larga, sin pisar el DXF ni
+    archivos que ya existen (salvo «overwrite»). Lo anota en ``packages``."""
+    if not isinstance(package, str) or not is_package_name(package):
+        raise WorkerError(
+            protocol.OUTPUT_INVALID,
+            f"Nombre de paquete no válido en «{job_id}»: {package!r}.",
+            "Use solo letras sin acentos, números, punto, guion y guion bajo, sin empezar "
+            f"por punto y con {PACKAGE_NAME_MAX} caracteres como mucho.",
+            {"job": job_id, "package": package},
+        )
+    if package.casefold() in packages:
+        raise WorkerError(
+            protocol.OUTPUT_INVALID,
+            f"Los trabajos «{packages[package.casefold()]}» y «{job_id}» usan el mismo "
+            f"paquete «{package}».",
+            details={"job": job_id, "package": package},
+        )
+    packages[package.casefold()] = job_id
+    longest = output_dir / f"{package}{MANIFEST_SUFFIX}"
+    if len(str(longest)) > PACKAGE_PATH_MAX:
+        raise WorkerError(
+            protocol.OUTPUT_INVALID,
+            f"La ruta de salida de «{job_id}» pasa de {PACKAGE_PATH_MAX} caracteres "
+            f"({len(str(longest))}).",
+            "Use una carpeta de salida más corta o un nombre de paquete más corto.",
+            {"job": job_id, "path": str(longest)},
+        )
+    for path in _outputs(output_dir, package):
+        if path.resolve() == source:
+            raise WorkerError(
+                protocol.OUTPUT_INVALID,
+                "La salida no puede sobrescribir el DXF de origen.",
+                details={"job": job_id, "path": str(path)},
+            )
+        if path.exists() and not options["overwrite"]:
+            raise WorkerError(
+                protocol.OUTPUT_EXISTS,
+                f"El archivo de salida ya existe: {path}",
+                "Use otro nombre de paquete u «overwrite»: true.",
+                {"job": job_id, "path": str(path)},
+            )
 
 
 def _block_args(session, job: _Job, output_dir: Path, options: dict):
@@ -291,8 +367,32 @@ def _block_args(session, job: _Job, output_dir: Path, options: dict):
             job.scale,
         ]
     )
-    layers = options["include_hidden_layers"]
     args.occurrence = block["occurrence"] if block["total_occurrences"] > 1 else None
+    return _common_args(args, session, options)
+
+
+def _zone_args(session, job: _Job, output_dir: Path, options: dict):
+    """Argumentos de ``extract-modelspace`` para un trabajo de zona (valores por defecto del
+    CLI, con recorte a la zona)."""
+    from cde_exporter.cli import build_parser
+
+    args = build_parser().parse_args(
+        [
+            "cad",
+            "extract-modelspace",
+            str(session.loaded.path),
+            "--output-prefix",
+            str(output_dir / job.package),
+            "--scale",
+            job.scale,
+        ]
+    )
+    return zone_args(_common_args(args, session, options), job.zone)
+
+
+def _common_args(args, session, options: dict):
+    """Opciones comunes de ``export`` sobre los argumentos de una orden de exportación."""
+    layers = options["include_hidden_layers"]
     args.units = session.units
     args.margin_mm = session.margin_mm
     args.hatch_mode = options["hatch_mode"]
@@ -375,8 +475,12 @@ def _job_row(job: _Job, output_dir: Path, seconds: float | None, error=None, fac
     published = job.status == "published"
     return {
         "job": job.id,
-        "ref": job.block["ref"],
-        "handle": job.block["handle"],
+        "kind": "block" if job.zone is None else "zone",
+        "ref": None if job.block is None else job.block["ref"],
+        "handle": None if job.block is None else job.block["handle"],
+        "zone": None if job.zone is None else list(job.zone["zone"]),
+        "package_name": job.package,
+        "name_generated": job.generated,
         "status": job.status,
         "package": {
             "pdf": str(output_dir / f"{job.package}.pdf"),
@@ -427,6 +531,8 @@ def _totals(jobs: list[_Job]) -> dict:
 def _write_summary(session, output_dir: Path, jobs: list[_Job]) -> Path:
     published, failed = [], []
     for job in jobs:
+        if job.block is None:
+            continue  # las zonas no son referencias de bloque: no van en el resumen
         block = job.block
         package = PlannedPackage(
             block["name"],
@@ -503,35 +609,44 @@ def run_export(request: Request, session, *, send, state, check, cancelled_type,
             )
         job.status = "running"
         progress.job, progress.index = job, index
-        name = job.block["name"]
-        definition = session.loaded.document.blocks.get(name)
-        total = max(1, (len(definition) if definition is not None else 0))
-        drawn = 0
+        counter = {"total": 1, "drawn": 0}
+        if job.block is not None:
+            definition = session.loaded.document.blocks.get(job.block["name"])
+            counter["total"] = max(1, (len(definition) if definition is not None else 0))
 
         def on_stage(stage: str, job=job) -> None:
             check()
-            progress(stage, 0.0, f"{job.block['ref']}: {stage}", force=True)
+            progress(stage, 0.0, f"{job.label}: {stage}", force=True)
 
-        def on_entity(depth: int, job=job, total=total) -> None:
-            nonlocal drawn
+        def on_entity(depth: int, job=job, counter=counter) -> None:
             check()
             if depth == 1:
-                drawn += 1
+                counter["drawn"] += 1
+                total = counter["total"]
                 progress(
                     "draw",
-                    drawn / total,
-                    f"Dibujando {job.block['ref']}: {min(drawn, total)} de {total} entidades",
+                    counter["drawn"] / total,
+                    f"Dibujando {job.label}: {min(counter['drawn'], total)} de {total} entidades",
                 )
 
         started = time.perf_counter()
         details: list = []
         try:
             with run_hooks.hooks(on_stage, on_entity):
-                block_commands.run_extract_block(
-                    _block_args(session, job, output_dir, options),
-                    session.loaded.document,
-                    details,
-                )
+                if job.zone is None:
+                    block_commands.run_extract_block(
+                        _block_args(session, job, output_dir, options),
+                        session.loaded.document,
+                        details,
+                    )
+                else:
+                    progress("extract", 0.0, f"{job.label}: preparando la zona", force=True)
+                    values, working = prepare_zone(
+                        session, _zone_args(session, job, output_dir, options), job.zone, check
+                    )
+                    block = working.blocks.get(values.block_name)
+                    counter["total"] = max(1, len(block) if block is not None else 0)
+                    block_commands.run_extract_block(values, working, details)
         except cancelled_type:
             job.status = "cancelled"
             rows[job.id] = _job_row(job, output_dir, time.perf_counter() - started)
@@ -552,7 +667,7 @@ def run_export(request: Request, session, *, send, state, check, cancelled_type,
         facts = _manifest_facts(output_dir, job.package)
         job.result = facts
         rows[job.id] = _job_row(job, output_dir, time.perf_counter() - started, None, facts)
-        progress("publish", 1.0, f"{job.block['ref']}: publicado", force=True)
+        progress("publish", 1.0, f"{job.label}: publicado", force=True)
     summary = _write_summary(session, output_dir, jobs) if options["write_summary"] else None
     return {
         "output_dir": str(output_dir),

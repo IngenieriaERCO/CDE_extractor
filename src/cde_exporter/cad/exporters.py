@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pymupdf
 from ezdxf import bbox, xclip
+from ezdxf import colors as ezdxf_colors
 from ezdxf.addons.drawing import Frontend, RenderContext, config, layout
 from ezdxf.addons.drawing import pymupdf as pdf_backend
 from ezdxf.addons.drawing import svg as svg_backend
@@ -35,17 +36,20 @@ from ezdxf.addons.drawing.recorder import (
 from ezdxf.document import Drawing
 from ezdxf.entities import Insert
 from ezdxf.math import BoundingBox2d, Matrix44, Vec2, Vec3
-from ezdxf.path import nesting
+from ezdxf.path import from_vertices, nesting
 from ezdxf.render import hatching
+from ezdxf.tools import clipping_portal
 from ezdxf.tools.pattern import scale_pattern
 
 from cde_exporter.cad import run_hooks
+from cde_exporter.cad.draw_order import has_draw_order
 from cde_exporter.cad.entity_policy import (
     GEOMETRY_FROM_DATA_TYPES,
     HATCH_MEMORY_REASON,
     HATCH_TIMEOUT_REASON,
     unsupported_hint,
 )
+from cde_exporter.cad.manifest import MASK_BLEED_MM
 from cde_exporter.cad.models import INVALID_DATA, CadProcessingError, invalid_data_reason
 from cde_exporter.cad.plot_style import (
     PlotStyleTable,
@@ -239,6 +243,42 @@ class TextRun:
     advance: float
 
 
+_BACKGROUND_RGB = 0xC2  # tipos del color de HATCHBACKGROUNDCOLOR (código 1071)
+_BACKGROUND_ACI = 0xC3
+
+
+def hatch_background_color(entity) -> str | None:
+    """Color de fondo de un HATCH de patrón como ``#rrggbb``, o None si no tiene.
+
+    AutoCAD lo guarda en el XDATA ``HATCHBACKGROUNDCOLOR`` (código 1071) con el tipo en el byte
+    alto: 0xC2 color verdadero, 0xC3 ACI (el 7 sale negro, como en el PDF); 0xC8 («ninguno»,
+    el fondo de la ventana), PorCapa y PorBloque no pintan nada. ``bgcolor`` de ezdxf no mira
+    el tipo (un ACI lo leería como RGB)."""
+    original = getattr(entity, "source_of_copy", None)
+    for candidate in (entity, original):
+        if candidate is None or candidate.dxftype() != "HATCH":
+            continue
+        if candidate.dxf.get("solid_fill", 0):
+            return None  # un relleno sólido tapa su fondo
+        if not candidate.has_xdata("HATCHBACKGROUNDCOLOR"):
+            continue
+        try:
+            raw = candidate.get_xdata("HATCHBACKGROUNDCOLOR").get_first_value(1071, 0)
+            value = int(raw) & 0xFFFFFFFF
+        except (ValueError, TypeError, LookupError):
+            return None
+        kind = (value >> 24) & 0xFF
+        if kind == _BACKGROUND_RGB:
+            r, g, b = ezdxf_colors.int2rgb(value & 0xFFFFFF)
+        elif kind == _BACKGROUND_ACI and 1 <= (value & 0xFF) <= 255:
+            aci = value & 0xFF
+            r, g, b = (0, 0, 0) if aci == 7 else ezdxf_colors.aci2rgb(aci)
+        else:
+            return None
+        return f"#{r:02x}{g:02x}{b:02x}"
+    return None
+
+
 class _StrictFrontend(Frontend):
     """Registra las entidades que ezdxf omite en el renderizado.
 
@@ -292,6 +332,10 @@ class _StrictFrontend(Frontend):
         # (--no-print-transparency); sin ellas, el dibujo es el de siempre (plot_style.py).
         self.plot_style = plot_style
         self.print_transparency = print_transparency
+        # Orden de dibujo (draw_order.py): bloques con tabla ACAD_SORTENTS, por nombre, y los
+        # HATCH (``id``) cuyo fondo ya se pintó debajo de todo en un bloque sin tabla.
+        self._ordered_blocks: dict[str, bool] = {}
+        self._backgrounds_done: frozenset[int] = frozenset()
         # HATCH con transparencia alta no dibujados: (tipo, capa, handle, patrón, escala, %).
         self.transparent: list[tuple[str, str, str, str, float, int]] = []
         if plot_style is not None:
@@ -383,7 +427,7 @@ class _StrictFrontend(Frontend):
     def draw_composite_entity(self, entity, properties) -> None:
         key = self._instance_key(entity, properties) if self.instancing else None
         if key is None:
-            super().draw_composite_entity(entity, properties)
+            self._draw_composite(entity, properties)
             return
         matrix = entity.matrix44()
         cached = self._instances.get(key, False)
@@ -396,7 +440,7 @@ class _StrictFrontend(Frontend):
         )
         invisible, start = self.invisible, len(self._records)
         transparent = len(self.transparent)
-        super().draw_composite_entity(entity, properties)
+        self._draw_composite(entity, properties)
         after = (
             len(self.skipped), sum(self.omitted.values()), len(self.text_runs),
             len(self.degraded), len(self.messages),
@@ -413,6 +457,95 @@ class _StrictFrontend(Frontend):
         self._instances[key] = _Instance(
             records, self.invisible - invisible, tuple(self.transparent[transparent:])
         )
+
+    def _draw_composite(self, entity, properties) -> None:
+        """``Frontend.draw_composite_entity`` con el contenido de los INSERT en el orden de
+        dibujo de su bloque (ezdxf 1.4.4 no lo pide: ``# TODO: redraw_order=True?``)."""
+        if not isinstance(entity, Insert):
+            super().draw_composite_entity(entity, properties)
+            return
+        self.ctx.push_state(properties)
+        if entity.mcount > 1:
+            for virtual_insert in entity.multi_insert():
+                self._draw_insert(virtual_insert, properties)
+        else:
+            self._draw_insert(entity, properties)
+        self.ctx.pop_state()
+
+    def _block_has_order(self, insert) -> bool:
+        name = insert.dxf.name
+        if name not in self._ordered_blocks:
+            block = insert.doc.blocks.get(name) if insert.doc is not None else None
+            self._ordered_blocks[name] = block is not None and has_draw_order(block)
+        return self._ordered_blocks[name]
+
+    def _draw_insert(self, insert, properties) -> None:
+        """El ``draw_insert`` de ezdxf 1.4.4 (recorte XCLIP y atributos al final, #1321) con:
+        - el contenido en el orden de la tabla ACAD_SORTENTS del bloque, si la tiene;
+        - sin tabla, el fondo de los HATCH de patrón pintado antes que todo lo del bloque, para
+          que quede debajo de lo que lo cruza (``_draw_backgrounds_first``)."""
+        clip = xclip.XClip(insert)
+        is_clipping_active = clip.has_clipping_path and clip.is_clipping_enabled
+        if is_clipping_active:
+            boundary_path = clip.get_wcs_clipping_path()
+            if not boundary_path.is_inverted_clip:
+                clipping_shape = clipping_portal.find_best_clipping_shape(boundary_path.vertices)
+            else:
+                clipping_shape = clipping_portal.make_inverted_clipping_shape(
+                    boundary_path.inner_polygon(), outer_bounds=boundary_path.outer_bounds()
+                )
+            self.pipeline.push_clipping_shape(clipping_shape, None)
+        ordered = self._block_has_order(insert)
+        entities = list(
+            insert.virtual_entities(skipped_entity_callback=self.skip_entity, redraw_order=ordered)
+        )
+        outer = self._backgrounds_done
+        self._backgrounds_done = (
+            frozenset() if ordered else frozenset(self._draw_backgrounds_first(entities))
+        )
+        try:
+            self.draw_entities(entities)
+        finally:
+            self._backgrounds_done = outer
+        if is_clipping_active:
+            if clip.get_xclip_frame_policy():
+                self.pipeline.draw_path(
+                    path=from_vertices(boundary_path.inner_polygon(), close=True),
+                    properties=properties,
+                )
+            self.pipeline.pop_clipping_shape()
+        self.draw_entities(insert.attribs)
+
+    def _draw_backgrounds_first(self, entities) -> list[int]:
+        """Pinta el fondo de los HATCH de patrón de ``entities`` (el contenido de un bloque sin
+        tabla de orden) antes que nada; devuelve sus ``id`` para no pintarlo otra vez."""
+        done: list[int] = []
+        if self.config.hatch_policy != HatchPolicy.NORMAL:
+            return done
+        for entity in entities:
+            if entity.dxftype() != "HATCH" or hatch_background_color(entity) is None:
+                continue
+            properties = self.ctx.resolve_all(entity)
+            self.exec_property_override(entity, properties)
+            if not properties.is_visible or properties.filling is None:
+                continue
+            if not self.print_transparency and is_high_transparency(properties.color):
+                continue
+            if self._drawn_as_solid(entity):
+                continue
+            self._draw_hatch_background(entity, properties, None)
+            done.append(id(entity))
+        return done
+
+    def _drawn_as_solid(self, entity) -> bool:
+        """Si el HATCH se va a rellenar en vez de dibujar su patrón (simplificado por tamaño o
+        ya degradado en otra pasada): entonces no lleva fondo."""
+        if self.auto_hatch_threshold is not None:
+            restore_hatch_pattern(entity)
+            if _estimate_hatch_segments(entity) > self.auto_hatch_threshold:
+                return True
+        handle = _original_handle(entity)
+        return bool(handle and handle in self.known_degraded)
 
     def _instance_key(self, entity, properties) -> tuple | None:
         """Clave de los INSERT que se dibujan igual; None si este no se puede reutilizar."""
@@ -499,9 +632,27 @@ class _StrictFrontend(Frontend):
                 self._draw_hatch_as_solid(entity, properties, loops)
                 self._note_degraded(entity, self.known_degraded[handle])
             else:
+                if id(entity) not in self._backgrounds_done:
+                    self._draw_hatch_background(entity, properties, loops)
                 self._draw_hatch_or_degrade(entity, properties, loops)
         finally:
             random.setstate(state)
+
+    def _draw_hatch_background(self, entity, properties, loops) -> None:
+        """Color de fondo de un HATCH de patrón (``HATCHBACKGROUNDCOLOR``): AutoCAD rellena el
+        contorno con él debajo de las líneas del patrón; ezdxf no lo dibuja. Se rellena aquí,
+        justo antes del patrón, con la capa y la transparencia del HATCH. Solo con el patrón
+        dibujado (``--hatch-mode normal`` o ``auto``): relleno, solo contorno u omitido no
+        llevan fondo."""
+        if self.config.hatch_policy != HatchPolicy.NORMAL:
+            return
+        background = hatch_background_color(entity)
+        if background is None:
+            return
+        filled = copy.copy(properties)
+        alpha = properties.color[7:9] if len(properties.color) >= 9 else ""
+        filled.color = background + alpha
+        self._draw_hatch_as_solid(entity, filled, loops)
 
     def _draw_hatch_as_solid(self, entity, properties, loops) -> None:
         original = self.config
@@ -975,9 +1126,12 @@ class _PdfBackend(pdf_backend.PyMuPdfBackend):
     ``drawn_bounds`` su caja en coordenadas CAD.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, mask_box: tuple[float, float, float, float] | None = None) -> None:
         super().__init__()
         self.text_runs: list[TextRun] = []
+        # Rectángulo CAD (xmin, ymin, xmax, ymax) de la máscara de recorte (extract-modelspace
+        # con zona): lo que lo cruza entero (texto, cotas, INSERT…) no se ve fuera de él.
+        self.mask_box = mask_box
         self.placement_matrix: Matrix44 | None = None
         self.drawn_size: tuple[float, float] | None = None
         self.drawn_bounds: tuple[tuple[float, float], tuple[float, float]] | None = None
@@ -1049,7 +1203,67 @@ class _PdfBackend(pdf_backend.PyMuPdfBackend):
         if self.text_runs:
             write_text_layer(backend.page, self.text_runs, self.placement_matrix)
             backend.doc.subset_fonts()  # solo los glifos usados (Helvetica y los de respaldo)
+        if self.mask_box is not None and self.placement_matrix is not None:
+            apply_clip_mask(backend.page, mask_rect(self.mask_box, self.placement_matrix))
+            return backend.doc.tobytes(garbage=1)  # sin los flujos de contenido sueltos
         return backend.get_pdf_bytes()
+
+
+def run_inside(run: TextRun, box: tuple[float, float, float, float]) -> bool:
+    """¿Queda la línea de texto (su anchura por la altura de mayúsculas) dentro de la caja CAD
+    ``box``? Se admite una milésima del lado mayor de la caja de holgura."""
+    x_step, y_step = run.x_axis - run.origin, run.y_axis - run.origin
+    tolerance = max(box[2] - box[0], box[3] - box[1]) * 1e-3
+    for u, v in ((0, 0), (run.advance, 0), (0, run.cap_height), (run.advance, run.cap_height)):
+        point = run.origin + x_step * u + y_step * v
+        if not (
+            box[0] - tolerance <= point.x <= box[2] + tolerance
+            and box[1] - tolerance <= point.y <= box[3] + tolerance
+        ):
+            return False
+    return True
+
+
+# La máscara sobresale de la zona este tanto (mm de papel) para no cortar por la mitad el grosor
+# de una línea que va justo por el borde (la geometría se recorta en el borde exacto).
+# MASK_BLEED_MM (0,5 mm) viene de manifest.py, que lo declara en el manifiesto.
+
+
+def mask_rect(
+    box: tuple[float, float, float, float], matrix: Matrix44
+) -> pymupdf.Rect:
+    """Rectángulo de la página (puntos, origen arriba a la izquierda) que corresponde a la caja
+    CAD ``box``, ampliado ``MASK_BLEED_MM`` por cada lado."""
+    corners = [
+        matrix.transform(Vec3(x, y, 0))
+        for x, y in ((box[0], box[1]), (box[2], box[1]), (box[0], box[3]), (box[2], box[3]))
+    ]
+    bleed = MASK_BLEED_MM * _POINTS_PER_MM
+    return pymupdf.Rect(
+        min(point.x for point in corners) - bleed,
+        min(point.y for point in corners) - bleed,
+        max(point.x for point in corners) + bleed,
+        max(point.y for point in corners) + bleed,
+    )
+
+
+def apply_clip_mask(page: pymupdf.Page, rect: pymupdf.Rect) -> None:
+    """Junta el contenido de la página en un solo flujo y lo encierra en una máscara de recorte
+    (``q x y w h re W n … Q``): lo dibujado fuera de ``rect`` no se ve ni se imprime. La capa
+    de texto invisible también queda dentro. La geometría sigue en el PDF entera."""
+    doc = page.parent
+    xrefs = page.get_contents()
+    if not xrefs:
+        return
+    content = b"\n".join(doc.xref_stream(xref) or b"" for xref in xrefs)
+    height = page.mediabox.height
+    values = " ".join(
+        _pdf_number(value)
+        for value in (rect.x0, height - rect.y1, rect.width, rect.height)
+    )
+    doc.update_stream(xrefs[0], f"q\n{values} re W n\n".encode() + content + b"\nQ\n")
+    if len(xrefs) > 1:
+        doc.xref_set_key(page.xref, "Contents", f"{xrefs[0]} 0 R")
 
 
 def _draw_to_svg(
@@ -1105,8 +1319,9 @@ def _draw_to_pdf(
     render_box: BoundingBox2d | None = None,
     plot_style: PlotStyleTable | None = None,
     print_transparency: bool = True,
+    mask_box: tuple[float, float, float, float] | None = None,
 ) -> tuple[bytes, tuple[str, ...], tuple[tuple[str, str, int], ...]]:
-    backend = _PdfBackend()
+    backend = _PdfBackend(mask_box)
     layout_properties = LayoutProperties.from_layout(document.modelspace())
     layout_properties.set_colors("#ffffff")
     frontend = _StrictFrontend(
@@ -1137,7 +1352,13 @@ def _draw_to_pdf(
         stats["invisible"] = frontend.invisible
         stats["degraded"] = tuple(frontend.degraded)
         stats["transparent"] = tuple(frontend.transparent)
-        stats["text_lines"] = tuple(run.text.strip() for run in frontend.text_runs)
+        # Con máscara, las líneas que la cruzan (cortadas en el borde, completas en el TXT) no se
+        # exigen en la comprobación «Texto buscable».
+        stats["text_lines"] = tuple(
+            run.text.strip()
+            for run in frontend.text_runs
+            if mask_box is None or run_inside(run, mask_box)
+        )
         stats["drawn_size"] = backend.drawn_size
         stats["drawn_bounds"] = backend.drawn_bounds
         if backend.placement_matrix is not None:
@@ -1236,6 +1457,7 @@ def export_vector_outputs(
     render_box: tuple[float, float, float, float] | None = None,
     plot_style: PlotStyleTable | None = None,
     print_transparency: bool = True,
+    mask_box: tuple[float, float, float, float] | None = None,
 ) -> ExportReport:
     """Crea SVG/PDF vectoriales ajustados o con escala y página explícitas.
 
@@ -1251,6 +1473,9 @@ def export_vector_outputs(
 
     ``plot_style`` (una CTB leída con ``plot_style.load_plot_style``) y
     ``print_transparency`` solo cambian el dibujo si se piden (``plot_style.py``).
+
+    ``mask_box`` (caja CAD) encierra el contenido del PDF en una máscara de recorte de esa caja
+    (``apply_clip_mask``); el SVG intermedio no la lleva.
     """
     source_path = Path(source)
     svg_destination = Path(svg_path)
@@ -1355,6 +1580,7 @@ def export_vector_outputs(
             render_box=box,
             plot_style=plot_style,
             print_transparency=print_transparency,
+            mask_box=mask_box,
         )
         if draw_svg and svg_omitted != pdf_omitted:
             raise CadProcessingError(

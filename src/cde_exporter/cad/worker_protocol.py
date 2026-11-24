@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-PROTOCOL_VERSION = "1.0"
+PROTOCOL_VERSION = "1.1"
 
 COMMANDS = frozenset({"load", "preview", "export", "cancel", "status", "close"})
 # Se atienden siempre, aunque otro pedido esté en curso (los lee el hilo de stdin).

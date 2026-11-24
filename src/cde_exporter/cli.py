@@ -246,17 +246,20 @@ def build_parser() -> argparse.ArgumentParser:
     modelspace_command.add_argument(
         "--layers",
         metavar="CAPAS",
-        help="Solo estas capas (separadas por comas; admite * y ?, sin distinguir mayúsculas)",
+        help="Capas que se ven, también dentro de los bloques (separadas por comas; admite * y "
+        "?, sin distinguir mayúsculas)",
     )
     modelspace_command.add_argument(
-        "--exclude-layers", metavar="CAPAS", help="Quita estas capas (mismo formato que --layers)"
+        "--exclude-layers",
+        metavar="CAPAS",
+        help="Capas que no se ven, también dentro de los bloques (mismo formato que --layers)",
     )
     modelspace_command.add_argument(
         "--window",
         nargs=4,
         type=float,
         metavar=("XMIN", "YMIN", "XMAX", "YMAX"),
-        help="Zona en coordenadas CAD: entra entera cada entidad cuya caja la toca (sin recorte)",
+        help="Zona en coordenadas CAD: lo que la toca se recorta en su borde (ver --no-clip)",
     )
     modelspace_command.add_argument(
         "--window-from-block",
@@ -269,7 +272,7 @@ def build_parser() -> argparse.ArgumentParser:
     modelspace_command.add_argument(
         "--no-clip",
         action="store_true",
-        help="Con zona, no recorta: cada entidad que toca la zona entra entera",
+        help="Con zona, no recorta ni pone máscara: cada entidad que toca la zona entra entera",
     )
     modelspace_command.add_argument(
         "--list",
@@ -311,6 +314,61 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_include_hidden(modelspace_command)
     _add_plot_options(modelspace_command)
+
+    zone_preview_command = cad_subcommands.add_parser(
+        "preview-modelspace",
+        help="Vista previa PNG del Model Space (todo o un trozo) con la zona, las capas que se "
+        "ven y su tamaño en la hoja a 1:N, para elegir antes de extract-modelspace",
+    )
+    zone_preview_command.add_argument("drawing", help="Ruta del dibujo DXF")
+    zone_preview_command.add_argument(
+        "--output", required=True, help="Archivo .png (al lado se escribe el .json); se sobrescribe"
+    )
+    zone_preview_command.add_argument(
+        "--view",
+        nargs=4,
+        type=float,
+        metavar=("XMIN", "YMIN", "XMAX", "YMAX"),
+        help="Trozo del Model Space que se muestra (sin --view: la zona con un 25 %% de contexto "
+        "o, sin zona, todo el Model Space)",
+    )
+    zone_preview_command.add_argument(
+        "--window",
+        nargs=4,
+        type=float,
+        metavar=("XMIN", "YMIN", "XMAX", "YMAX"),
+        help="Zona que se exportaría (se marca en rojo)",
+    )
+    zone_preview_command.add_argument(
+        "--window-from-block",
+        metavar="BLOQUE",
+        help="Usa como zona la caja de una referencia de este bloque en el Model Space",
+    )
+    zone_preview_command.add_argument(
+        "--occurrence", type=int, help="Referencia de --window-from-block si hay varias"
+    )
+    zone_preview_command.add_argument(
+        "--layers",
+        metavar="CAPAS",
+        help="Capas que se ven, también dentro de los bloques (como en extract-modelspace)",
+    )
+    zone_preview_command.add_argument(
+        "--exclude-layers",
+        metavar="CAPAS",
+        help="Capas que no se ven, también dentro de los bloques (como en extract-modelspace)",
+    )
+    zone_preview_command.add_argument(
+        "--scale", help="Escala nominal 1:N para mostrar el tamaño en la hoja"
+    )
+    zone_preview_command.add_argument(
+        "--units", choices=("mm", "cm", "m", "in", "ft"),
+        help="Declara o corrige las unidades del dibujo",
+    )
+    zone_preview_command.add_argument("--margin-mm", type=float, default=5.0)
+    zone_preview_command.add_argument(
+        "--px", type=int, default=1500, help="Lado mayor de la imagen en píxeles (64 a 8000)"
+    )
+    _add_include_hidden(zone_preview_command)
 
     verify_command = cad_subcommands.add_parser(
         "verify-package",
@@ -561,6 +619,11 @@ def _run_cad(args: argparse.Namespace) -> int:
 
         if args.cad_command == "extract-modelspace":
             return run_extract_modelspace(args)
+
+        if args.cad_command == "preview-modelspace":
+            from cde_exporter.cad.zone_preview import run_preview_modelspace
+
+            return run_preview_modelspace(args)
 
         print(_EXTRACT_DEPRECATED, file=sys.stderr)
         source = Path(args.drawing)

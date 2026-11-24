@@ -193,7 +193,7 @@ def test_plot_style_colors_and_lineweights_in_the_pdf(tmp_path: Path) -> None:
     assert (150, 150, 150) in strokes and (128, 128, 255) in strokes
     assert verify_package(pdf) == ()
     manifest = json.loads(prefix.with_name("con_ctb.manifest.json").read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == "1.4"
+    assert manifest["schema_version"] == "1.5"
     assert manifest["options"]["plot_style"] == load_plot_style(ctb).describe()
     report = prefix.with_name("con_ctb.txt").read_text(encoding="utf-8")
     assert "PLOT_STYLE_APPLIED" in report and "erco.ctb" in report

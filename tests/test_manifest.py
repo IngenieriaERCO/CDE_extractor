@@ -240,9 +240,10 @@ def test_options_1_3_have_their_types(valid_manifest: dict) -> None:
 
 def test_manifests_1_3_without_the_options_added_in_1_4_stay_valid(valid_manifest: dict) -> None:
     """Esquema 1.4: ``options`` lleva plot_style y print_transparency (--plot-style y
-    --no-print-transparency). Un 1.3 ya publicado es válido sin ellas; un 1.4 sin ellas no."""
+    --no-print-transparency). Un 1.3 ya publicado es válido sin ellas; un 1.4 o posterior sin
+    ellas no."""
     added = ("plot_style", "print_transparency")
-    assert valid_manifest["schema_version"] == "1.4"
+    assert valid_manifest["schema_version"] == "1.5"
     assert valid_manifest["options"]["plot_style"] is None
     assert valid_manifest["options"]["print_transparency"] is True
     for key in added:

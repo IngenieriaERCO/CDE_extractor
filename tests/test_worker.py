@@ -317,6 +317,12 @@ def test_worker_process_speaks_only_json_on_stdout(tmp_path: Path) -> None:
             process.kill()
     final = [json.loads(line) for line in rest.decode("utf-8").splitlines()]
     assert final == [
-        {"protocol": "1.0", "id": "c-2", "type": "result", "command": "close", "data": {}}
+        {
+            "protocol": protocol.PROTOCOL_VERSION,
+            "id": "c-2",
+            "type": "result",
+            "command": "close",
+            "data": {},
+        }
     ]
     assert process.returncode == 0

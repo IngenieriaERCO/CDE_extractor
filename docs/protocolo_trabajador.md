@@ -1,8 +1,10 @@
-# Protocolo del trabajador (`cde-exporter worker`), versión 1.0
+# Protocolo del trabajador (`cde-exporter worker`), versión 1.1
 
 Este documento es para quien programe la integración del **Componedor** con el exportador. Es el contrato entre los dos programas: el Componedor lanza el trabajador como **comando externo** (no importa código del exportador), le envía pedidos y lee respuestas, siempre en JSON por líneas.
 
 Estado: **contrato aprobado por Luis Angel (2026-11-17)**, con las observaciones del agente del Componedor incorporadas (sección 14). Implementado por etapas: 1 (arranque, `load`, `--list --json`) y 2 (`preview`) con visto bueno; 3 (`export`, avance, cancelar y manifiesto 1.3) hecha, pendiente de visto bueno; 4 (DXF pequeño de prueba para el Componedor) pendiente.
+
+**Versión 1.1 (2026-11-24, pendiente de visto bueno):** zonas del Model Space en `preview` (sección 4.1) y en `export` (sección 5.4), con el DXF leído una sola vez, y manifiesto 1.5 (`pdf.drawing.mask`, `docs/manifiesto.md`). Solo añade: un Componedor que habla la 1.0 funciona igual (el trabajador acepta pedidos con `"protocol": "1.0"`; las respuestas dicen `"1.1"`), y las filas de `export` llevan claves nuevas (`kind`, `zone`, `package_name`, `name_generated`) que puede ignorar.
 
 Decisiones ya tomadas (Luis Angel, 2026-11-17):
 - Un proceso de trabajo persistente que **lee el DXF una sola vez** y atiende tres órdenes: cargar (`load`), vista previa (`preview`) y exportar (`export`), más cancelar (`cancel`).
@@ -82,8 +84,8 @@ Cada pedido termina con **exactamente un** `result` o un `error`. Ejemplo:
 
 ```json
 {"protocol": "1.0", "id": null, "type": "ready",
- "data": {"protocol_version": "1.0", "exporter_version": "0.1.0", "ezdxf": "1.4.4", "pymupdf": "1.28.2",
-          "manifest_schema_version": "1.3", "work_dir": "C:\\ruta\\carpeta_de_trabajo"}}
+ "data": {"protocol_version": "1.1", "exporter_version": "0.1.0", "ezdxf": "1.4.4", "pymupdf": "1.28.2",
+          "manifest_schema_version": "1.5", "work_dir": "C:\\ruta\\carpeta_de_trabajo"}}
 ```
 
 ## 3. `load` — cargar un DXF
@@ -265,6 +267,66 @@ Respuesta (`data`):
 - `omitted`: lo que la vista previa no dibuja, por tipo (los 3DSOLID, por decisión; lo que ezdxf no sabe dibujar, incluidos los tipos desconocidos de `unknown_entities`).
 - **Caché:** el PNG se guarda en `work-dir\previews\<huella del DXF>\<handle>_<px>_<capas>.png`, con un `.json` del mismo nombre que guarda el resto de la respuesta. `<capas>` es `visible`, `hidden-all` (con `["*"]`) o `hidden-` y 6 cifras del SHA-1 de las capas pedidas; con `plot_style` se le añade `_p` y 6 cifras del SHA-256 de la CTB, y con `print_transparency: false`, `_t` (sin ellas, el nombre de siempre: las vistas previas ya guardadas siguen valiendo). Si ya existe con la misma clave (huella, handle, tamaño y capas ocultas pedidas), se devuelve sin dibujar (`cached: true`) y cuenta como usada ahora. Si la caché pasa de `--preview-cache-mb` (500 MB por defecto), se borran las imágenes usadas hace más tiempo (nunca la que se acaba de devolver). Una vista previa cancelada no deja nada en la caché.
 
+### 4.1 Vista previa de una zona del Model Space (desde la 1.1)
+
+Pedido: el mismo `preview`, con `zone` (o `view`) en lugar de una referencia:
+
+```json
+{"protocol": "1.1", "id": "c-4", "command": "preview",
+ "data": {"session": "s-1", "zone": [1000.00, 2000.00, 1000.67, 2000.65],
+          "layers": null, "exclude_layers": ["EDD_COTAS"], "scale": 10, "long_side_px": 1500,
+          "include_hidden_layers": null, "plot_style": null, "print_transparency": true}}
+```
+
+- Si `data` tiene la clave `zone` o la clave `view`, es una vista previa de zona (sin `ref`).
+- `zone`: `[xmin, ymin, xmax, ymax]` en el marco único (Model Space, unidades del dibujo), o `null`.
+- `view` (opcional): el trozo que se dibuja, si no es la zona.
+- La imagen se ajusta a `view`; sin `view`, a `zone`; con `zone: null` y sin `view`, a todo el Model Space.
+- `layers`: lista blanca de capas que se ven (`null` o `[]`: todas); `exclude_layers`: capas que no se ven. Admiten `*` y `?` y no distinguen mayúsculas; una capa no puede llevar comas. Valen en todos los niveles, también dentro de los bloques, como al congelar una capa en una ventana del CAD: un INSERT anidado en una capa que no se ve desaparece entero, y lo de la capa «0» toma la capa del INSERT. Es el mismo filtro que la exportación de la zona.
+- `layers` con nombres que no casan con ninguna capa del DXF da `BAD_REQUEST`. Si todas las capas que nombra están ocultas en el CAD, también, salvo que se pidan en `include_hidden_layers`.
+- `scale` (opcional): `N` (número) o `"1:N"`. Solo sirve para calcular `paper`; no cambia la imagen.
+- `long_side_px`, `include_hidden_layers`, `plot_style` y `print_transparency`: como en la sección 4.
+
+Qué hace: dibuja lo que hay en ese trozo del Model Space, con el mismo motor ligero que la vista previa de un bloque: texto como rectángulos, rayados rellenos, sin 3DSOLID.
+- **No recorta:** lo que cruza el borde se ve entero hasta el borde de la imagen. La exportación sí lo recorta.
+- **Mismas convenciones** que la sección 4: PNG con fondo transparente, `cad_to_px` con `a = −d` y `b = c = 0`, color 7 en negro. No lleva rectángulos, cuadrícula ni rótulos: los dibuja el Componedor, si quiere, con `cad_to_px`.
+
+Respuesta (`data`):
+
+```json
+{
+  "png": "C:\\ruta\\carpeta_de_trabajo\\previews\\8f0c…\\ms-3a9f0c12de_1500_visible.png",
+  "kind": "zone", "ref": null, "handle": null,
+  "px": [1500, 1455],
+  "bounds": {"min": [1000.0, 2000.0], "max": [1000.67, 2000.65]},
+  "cad_to_px": [2209.55, 0.0, 0.0, -2209.55, -2209540.0, 4420546.5],
+  "zone": [1000.0, 2000.0, 1000.67, 2000.65],
+  "view": [1000.0, 2000.0, 1000.67, 2000.65],
+  "layers": [], "exclude_layers": ["EDD_COTAS"],
+  "layer_rows": [{"name": "EDD_COTAS", "entities_in_view": 6, "cad_state": null, "shown": false}],
+  "entities": {"in_view": 25, "drawn": 19, "without_bounds": 3},
+  "groups": [],
+  "scale": "1:10",
+  "paper": {"content_mm": [67.0, 65.0], "page_mm": [77.0, 75.0], "margin_mm": 5.0, "fits_a1": true},
+  "omitted": {"3DSOLID": 0, "REGION": 0},
+  "include_hidden_layers": null, "plot_style": null, "print_transparency": true,
+  "cached": false, "seconds": 3.2
+}
+```
+
+- `bounds` y `view`: la caja que representa la imagen. Con `zone: null` y sin `view`, es la de todo el Model Space; si no hay nada con caja, `null`.
+- `layer_rows`: cada capa del DXF con:
+  - `entities_in_view`: las entidades del Model Space de esa capa que tocan la vista;
+  - `cad_state`: `null`, `"apagada"`, `"congelada"` o `"apagada y congelada"`;
+  - `shown`: si se dibuja con el filtro y las capas ocultas pedidas.
+
+  Sirve para la lista de capas del Componedor.
+- `entities`: cuántas entidades del Model Space tocan la vista (`in_view`), cuántas se dibujan tras el filtro de capas del primer nivel (`drawn`) y cuántas no tienen caja (`without_bounds`; no se pueden situar ni dibujar).
+- `groups`: solo con todo el Model Space (`zone: null` y sin `view`). Son los grupos de dibujo separados por huecos de más del 0,5 % del lado mayor, de más a menos entidades (15 como mucho): `{"number", "box": [xmin, ymin, xmax, ymax], "entities"}`. Sirven para un Model Space con detalles a cientos de kilómetros entre sí: el Componedor puede ofrecer cada grupo como `view`. Con `zone` o `view`, `[]`.
+- `paper`: tamaño en la hoja de la **zona** a la escala pedida (`content_mm`), y de la hoja con los márgenes de `load` (`page_mm`, el `pdf.page_size_mm` que tendrá el paquete). `fits_a1` dice si cabe en una plancha A1, en cualquier orientación. Sin zona se calcula con la vista. Es `null` sin `scale` o si las unidades del DXF no están declaradas (ni en `load`).
+- **Caché:** como en la sección 4. En vez del handle, el nombre lleva `ms-` y 10 cifras del SHA-1 de zona, vista y capas. `scale` y `paper` no entran en la clave: cambiar la escala devuelve la imagen guardada con el `paper` nuevo.
+- **Tiempo:** la primera vista previa o exportación de zona de una sesión calcula las cajas de todo el Model Space, una vez por bloque (etapa `boxes` del avance). En el DXF de PRGD, de 97 MB, son unos 15 s. Las siguientes las reutilizan.
+
 ## 5. `export` — exportar
 
 Pedido:
@@ -353,6 +415,50 @@ Respuesta (`data`):
 - El SHA-256 del DXF que va en cada manifiesto es el calculado en `load` (no se vuelve a leer el archivo por paquete).
 - Si el DXF cambió desde `load`, el pedido termina con el error `DXF_CHANGED` (sección 9).
 
+### 5.4 Trabajos de zona (desde la 1.1)
+
+Un trabajo de `jobs[]` puede ser una zona del Model Space en vez de una referencia:
+
+```json
+{"job": "z1", "zone": [1000.00, 2000.00, 1000.67, 2000.65],
+ "layers": ["0", "_001_*"], "exclude_layers": null, "scale": 10, "file_stem": "Seccion_pedestal"}
+```
+
+- `zone` (obligatoria): `[xmin, ymin, xmax, ymax]` en el marco único. Un trabajo de zona no lleva `ref`, `block`, `handle`, `occurrence` ni `view`.
+- `layers` y `exclude_layers`: como en la sección 4.1 (también dentro de los bloques).
+- `scale`: `N` o `"1:N"`.
+- `file_stem` (o `package`, como en un trabajo de bloque): el nombre del paquete, que cumple la sección 5.1.
+- **Si falta, es `null` o está vacío, se genera:** `Zona_01`, `Zona_02`… en el orden de los trabajos, saltando los nombres ya usados en el pedido y los que ya tienen algún archivo en `output_dir`. Un nombre generado nunca pisa nada, ni con `overwrite: true`.
+- `options`: las mismas, comunes a todos los trabajos (bloques y zonas se pueden mezclar en un pedido).
+
+Qué hace: lo mismo que `cad extract-modelspace --window … --scale …` (`docs/estado_proyecto.md`, «Zona del Model Space como detalle»), sobre el DXF ya cargado y sin releerlo:
+- entra lo que toca la zona y lo de las capas que se ven;
+- líneas, polilíneas de tramos rectos, arcos, círculos, elipses y HATCH se recortan en el borde;
+- lo demás (textos, cotas, INSERT…) entra entero y una máscara de recorte del PDF lo corta en el borde; su texto completo va en el TXT;
+- la página es la zona más los márgenes de `load`.
+
+El paquete es como los de la línea de órdenes:
+- `selection` en el manifiesto, con `window` = `zone`;
+- `source.block_name` = «Model_Space»;
+- `source.dxf_sha256`: el del DXF de `load`;
+- manifiesto 1.5, con `pdf.drawing.mask` si hubo máscara.
+
+**Antes de empezar** (además de lo de la sección 5), por cada trabajo de zona se comprueba esto; si algo falla, no se exporta nada:
+- `zone` y `scale` válidas: si no, `BAD_REQUEST`, con `details.job`;
+- `layers` existe en el DXF: si no, `BAD_REQUEST`;
+- en la zona hay algo de las capas que se ven, según las cajas rápidas: si no, `BAD_REQUEST`;
+- el nombre, si viene, cumple la sección 5.1: si no, `OUTPUT_INVALID`.
+
+Respuesta: cada fila de `jobs[]` (sección 5.2) lleva además, en todos los trabajos:
+- `kind`: `"block"` o `"zone"`;
+- `zone`: la zona, o `null` en un trabajo de bloque;
+- `package_name`: el nombre usado, también el generado;
+- `name_generated`: `true` si se generó.
+
+En un trabajo de zona, `ref` y `handle` son `null`. Las zonas **no** van en `resumen_proyecto.json`, que solo lista referencias de bloque.
+
+Rendimiento: la selección exacta, la de la línea de órdenes, solo se calcula sobre lo que las cajas rápidas de la sesión sitúan en la zona, más lo que no tiene caja y los puntos. La caja rápida contiene siempre a la exacta, así que el resultado es el mismo que mirando todo el Model Space. En PRGD, la línea de órdenes tarda 89 s en elegir una zona; el trabajador, unos segundos tras la primera.
+
 ### 5.3 Opciones en el manifiesto (requiere el esquema 1.3)
 
 Para que un paquete diga **todo lo que cambia su dibujo**, el `options` de su manifiesto llevará, además de lo que ya lleva (`hatch_mode`, `hatch_threshold`, `solids`, `omit_unsupported`, `text_layer`, `font_substitutions`, `font_folder`, `font_fallback`, `margin_mm`, `include_hidden_layers`):
@@ -431,7 +537,7 @@ Respuesta: `{"busy": true, "current": "c-3", "stage": "read", "session": "s-1", 
 | `BLOCK_NOT_FOUND` / `REFERENCE_NOT_FOUND` | No existe el bloque, o esa ocurrencia o handle |
 | `NOT_EXPORTABLE` | La referencia está en `omitted` (anónima, XREF…) |
 | `OUTPUT_EXISTS` | Un archivo de salida ya existe y `overwrite` es `false` |
-| `OUTPUT_INVALID` | `output_dir` no es una carpeta válida, `package` no cumple la sección 5.1, o dos trabajos usan el mismo `package` |
+| `OUTPUT_INVALID` | `output_dir` no es una carpeta válida, `package` (o `file_stem` de una zona) no cumple la sección 5.1, o dos trabajos usan el mismo `package` |
 | `CANCELLED` | El pedido se canceló |
 | `INTERNAL` | Fallo inesperado del programa; `details.traceback` solo con `CDE_DEBUG=1` |
 
@@ -508,6 +614,13 @@ Además de las pruebas de cada orden, estas comprueban el contrato:
 - `DXF_CHANGED` al cambiar la fecha o el tamaño del DXF entre `load` y `export`.
 - Nombres de paquete: acentos, eñes, caracteres raros, más de 60 caracteres (sufijo de hash) y ruta de más de 240 caracteres.
 - Temporales `.cde-tmp-` limpiados al arrancar y al empezar un `export`.
+- Zonas (1.1, `tests/test_worker_zone.py`):
+  - vista previa de una zona con capas excluidas, también dentro de un bloque, y caché que no guarda el papel;
+  - todo el Model Space con sus grupos;
+  - zonas o capas no válidas;
+  - trabajos de zona publicados con manifiesto 1.5 y máscara, y nombres generados que saltan los archivos que ya existen;
+  - bloques y zonas en un mismo pedido;
+  - trabajos de zona no válidos que detienen el pedido sin escribir nada.
 
 ## 14. Decisiones y observaciones incorporadas
 
@@ -533,3 +646,11 @@ Observaciones del agente del Componedor (2026-11-17), todas incorporadas:
 10. Nombres de paquete: letras sin acentos, números, punto, guion y guion bajo; máximo 60 caracteres con sufijo de hash; ruta completa de 240 caracteres como mucho (sección 5.1).
 11. El `options` del manifiesto con todas las opciones que cambian el dibujo y la versión del exportador (sección 5.3; **esquema 1.3, pendiente de visto bueno**).
 12. Opcional: `include_layers: false` en `load` (secciones 3 y 11).
+
+Versión 1.1, zonas del Model Space (decisiones de Luis Angel, 2026-11-23 y 24):
+
+1. Lo que cruza el borde y no se puede recortar, con máscara de recorte en el PDF y su texto completo en el TXT.
+2. Capas como lista blanca (`layers`) y como exclusión (`exclude_layers`).
+3. Nombre del paquete puesto por el usuario o generado (`Zona_01`…).
+4. Las zonas las guarda el Componedor.
+5. Manifiesto 1.5: con máscara, la caja del dibujo es la que se ve, dentro de la página. Cómo medir los trazos con máscara (comprobación h del Componedor): `docs/manifiesto.md`, «Cómo medir los trazos con máscara».

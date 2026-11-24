@@ -204,6 +204,14 @@ class ModelSpaceSelection:
     clip_pieces: int = 0
     outside_removed: int = 0
     not_clipped: tuple[tuple[str, int], ...] = ()
+    # Con recorte, las que no se pueden recortar entran enteras y la máscara de recorte del PDF
+    # las corta en el borde de la zona; ``masked_texts`` guarda su texto completo
+    # (tipo, capa, texto) para el TXT.
+    masked: bool = False
+    masked_texts: tuple[tuple[str, str, str], ...] = ()
+    # Capas visibles también dentro de los bloques: entidades quitadas de las definiciones de
+    # bloque de la copia por estar en una capa no pedida o excluida, por capa.
+    nested_removed: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

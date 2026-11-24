@@ -5,11 +5,18 @@ existe en una copia en memoria. Luego se exporta con el mismo flujo que «cad ex
 (PDF, TXT y manifiesto, mismas comprobaciones y publicación atómica). El DXF de origen no se
 modifica.
 
-Selección (sin recorte):
-- Por capas: ``--layers`` y ``--exclude-layers`` (separadas por comas, con comodines ``*`` y
-  ``?``, sin distinguir mayúsculas). Un INSERT se elige por su propia capa y entra entero.
+Selección:
+- Por capas: ``--layers`` (lista blanca: solo esas capas se ven) y ``--exclude-layers`` (esas
+  no se ven), separadas por comas, con comodines ``*`` y ``?``, sin distinguir mayúsculas; se
+  pueden usar las dos. Un INSERT se elige por su propia capa; dentro de los bloques, como al
+  congelar una capa en una ventana del CAD, lo que está en una capa que no se ve se quita de la
+  copia (lo de la capa «0» toma la capa del INSERT y se queda).
 - Por zona: ``--window`` o ``--window-from-block``. Entra cada entidad cuya caja XY toca la
-  zona, entera. Las que no tienen caja no se pueden situar: no entran y se avisa.
+  zona. Las que no tienen caja no se pueden situar: no entran y se avisa. Con recorte (por
+  defecto; ``--no-clip`` lo quita) se cortan en el borde líneas, polilíneas de tramos rectos,
+  arcos, círculos, elipses y HATCH (``clipping.py``); lo demás (textos, cotas, INSERT…) entra
+  entero y la máscara de recorte del PDF lo corta en el borde; su texto completo va en el TXT.
+  La página mide la zona.
 - Las líneas y polilíneas de longitud nula no se dibujan (serían un punto suelto) y se avisa.
 - Lo que está en capas ocultas entra en la selección pero no se dibuja (se avisa), salvo con
   --include-hidden-layers. Si --layers solo pide capas ocultas, la orden se detiene.
@@ -39,9 +46,9 @@ from cde_exporter.cad.clipping import (
     clip_layout,
     inside,
     is_clippable,
-    union_boxes,
 )
 from cde_exporter.cad.detail_model import ModelSpaceSelection
+from cde_exporter.cad.draw_order import copy_block_draw_order, modelspace_ranks, set_draw_order
 from cde_exporter.cad.hidden_layers import layer_state, parse_layer_selection
 from cde_exporter.cad.models import CadProcessingError
 from cde_exporter.cad.reader import entity_bounds
@@ -129,13 +136,19 @@ def select_modelspace(
     layers: tuple[str, ...],
     exclude_layers: tuple[str, ...],
     window: tuple[float, float, float, float] | None,
+    candidates=None,
 ) -> Selection:
-    """Entidades del Model Space que cumplen las capas y la zona pedidas (sin recortar)."""
+    """Entidades del Model Space que cumplen las capas y la zona pedidas (sin recortar).
+
+    ``candidates``: si se da, solo se miran esas entidades (en el orden del Model Space). El
+    trabajador la usa para no calcular la caja exacta de todo el Model Space en cada zona: le
+    pasa lo que su caja rápida (mayor o igual que la exacta) sitúa en la zona, más lo que no
+    tiene caja y los puntos (``zone_preview.zone_candidates``)."""
     chosen, by_layer = [], Counter()
     vertices = zero = unbounded = 0
     xmin = ymin = math.inf
     xmax = ymax = -math.inf
-    for entity in document.modelspace():
+    for entity in document.modelspace() if candidates is None else candidates:
         if not entity.dxf.is_supported("layer"):
             continue  # entidades que ezdxf no interpreta (p. ej. GEOMAPIMAGE): no se copian
         layer = str(entity.dxf.get("layer", "0") or "0")
@@ -234,6 +247,57 @@ def _check_requested_layers(
         )
 
 
+def _visible(layer: str, layers: tuple[str, ...], exclude_layers: tuple[str, ...]) -> bool:
+    if layers and not _matches(layer, layers):
+        return False
+    return not (exclude_layers and _matches(layer, exclude_layers))
+
+
+def filter_block_layers(
+    document: Drawing, layers: tuple[str, ...], exclude_layers: tuple[str, ...]
+) -> Counter:
+    """Quita de las definiciones de bloque de ``document`` (una copia de trabajo) lo que está en
+    una capa que no se ve: no pedida en ``layers`` o excluida en ``exclude_layers``. Es lo que
+    hace congelar una capa en una ventana del CAD: un INSERT anidado en esa capa desaparece
+    entero y lo de la capa «0» toma la capa del INSERT, así que se queda. Devuelve lo quitado
+    por capa."""
+    removed: Counter = Counter()
+    if not layers and not exclude_layers:
+        return removed
+    for block in document.blocks:
+        if block.block_record.is_any_layout:
+            continue
+        for entity in list(block):
+            if not entity.dxf.is_supported("layer"):
+                continue
+            layer = str(entity.dxf.get("layer", "0") or "0")
+            if layer == "0" or _visible(layer, layers, exclude_layers):
+                continue
+            block.delete_entity(entity)
+            removed[layer] += 1
+    return removed
+
+
+def nested_layers(document: Drawing, entities) -> Counter:
+    """Capas de lo que hay dentro de los bloques de los INSERT elegidos (con los anidados),
+    contando cada definición una vez, para que --list diga qué capas se pueden pedir."""
+    found: Counter = Counter()
+    pending = [entity.dxf.name for entity in entities if entity.dxftype() == "INSERT"]
+    seen: set[str] = set()
+    while pending:
+        name = pending.pop()
+        if name.casefold() in seen or name not in document.blocks:
+            continue
+        seen.add(name.casefold())
+        for entity in document.blocks.get(name):
+            if not entity.dxf.is_supported("layer"):
+                continue
+            found[str(entity.dxf.get("layer", "0") or "0")] += 1
+            if entity.dxftype() == "INSERT":
+                pending.append(entity.dxf.name)
+    return found
+
+
 def _unique_block_name(document: Drawing) -> str:
     name, number = WORKING_BLOCK, 2
     while name in document.blocks:
@@ -246,26 +310,39 @@ def _bounds(entity) -> tuple[float, float, float, float] | None:
 
 
 def clip_preview(entities, window) -> tuple[tuple[float, float, float, float], Counter]:
-    """Página que daría el recorte (la ventana, ampliada con lo que no se puede recortar y
-    cruza el borde) y esas entidades por tipo, sin copiar nada (para --list)."""
-    box, crossing = window, Counter()
+    """Página que daría el recorte (la ventana) y, por tipo, lo que no se puede recortar y
+    cruza el borde (lo cortará la máscara del PDF), sin copiar nada (para --list)."""
+    crossing = Counter()
     for entity in entities:
         bounds = _bounds(entity)
         if bounds is None or inside(bounds, window) or is_clippable(entity):
             continue
         crossing[entity.dxftype()] += 1
-        box = union_boxes(box, bounds)
-    return box, crossing
+    return window, crossing
 
 
 def working_document(
     document: Drawing, entities: tuple, clip_window=None
 ) -> tuple[Drawing, str, int, ClipReport | None]:
+    """``build_working_document`` sin filtro de capas dentro de los bloques: documento, nombre
+    del bloque, entidades no copiadas e informe del recorte."""
+    return build_working_document(document, entities, clip_window)[:4]
+
+
+def build_working_document(
+    document: Drawing,
+    entities: tuple,
+    clip_window=None,
+    layers: tuple[str, ...] = (),
+    exclude_layers: tuple[str, ...] = (),
+) -> tuple[Drawing, str, int, ClipReport | None, Counter]:
     """Copia las entidades elegidas a un DXF nuevo y las agrupa en un bloque de trabajo.
 
-    Con ``clip_window``, recorta la copia contra esa ventana (``clipping.clip_layout``).
-    Devuelve el documento, el nombre del bloque, cuántas entidades no se pudieron copiar y el
-    informe del recorte (None sin recorte).
+    Con ``clip_window``, recorta la copia contra esa ventana (``clipping.clip_layout``). Con
+    ``layers`` o ``exclude_layers``, quita de los bloques de la copia lo que está en capas que no
+    se ven (``filter_block_layers``).
+    Devuelve el documento, el nombre del bloque, cuántas entidades no se pudieron copiar, el
+    informe del recorte (None sin recorte) y lo quitado de los bloques por capa.
     Las coordenadas no cambian: el bloque tiene su base en (0, 0, 0) y se inserta ahí, así
     que la matriz CAD → página del manifiesto sigue en coordenadas del Model Space de origen.
     """
@@ -277,16 +354,44 @@ def working_document(
         loader.execute()
     _restore_default_resources(document, target)
     target.header["$INSUNITS"] = int(document.header.get("$INSUNITS", 0) or 0)
+    copy_block_draw_order(document, target)
     modelspace = target.modelspace()
     copied_count = len(modelspace)
-    clip = None if clip_window is None else clip_layout(modelspace, clip_window, _bounds)
+    ranks = _copied_ranks(document, modelspace, wanted)
+    clip = None if clip_window is None else clip_layout(modelspace, clip_window, _bounds, ranks)
+    removed = filter_block_layers(target, layers, exclude_layers)
     copied = list(modelspace)
     name = _unique_block_name(target)
     block = target.blocks.new(name)
     for entity in copied:
         modelspace.move_to_layout(entity, block)
+    if ranks is not None:
+        # El bloque de trabajo se dibuja en el orden de dibujo del Model Space de origen (su
+        # tabla ACAD_SORTENTS); las piezas del recorte van donde iba su entidad.
+        last = len(ranks) + 1
+        set_draw_order(block, sorted(copied, key=lambda entity: ranks.get(id(entity), last)))
     modelspace.add_blockref(name, (0, 0, 0))
-    return target, name, len(entities) - copied_count, clip
+    return target, name, len(entities) - copied_count, clip, removed
+
+
+def _copied_ranks(document: Drawing, modelspace, wanted: set[int]) -> dict[int, int] | None:
+    """Puesto en el orden de dibujo del Model Space de origen de cada entidad copiada (por
+    ``id`` de la copia); None si el origen no tiene tabla de orden o si la copia no se puede
+    emparejar con el origen (el Loader copia en el orden guardado)."""
+    source_ranks = modelspace_ranks(document)
+    if source_ranks is None:
+        return None
+    originals = [entity for entity in document.modelspace() if id(entity) in wanted]
+    copies = list(modelspace)
+    if len(originals) != len(copies) or any(
+        original.dxftype() != copy.dxftype()
+        for original, copy in zip(originals, copies, strict=True)
+    ):
+        return None
+    return {
+        id(copy): source_ranks[id(original)]
+        for original, copy in zip(originals, copies, strict=True)
+    }
 
 
 def _print_list(
@@ -310,6 +415,17 @@ def _print_list(
         else:
             note = f" ({state}: no se dibuja)"
         print(f"  - capa «{layer}»: {count}{note}")
+    inner = nested_layers(document, selection.entities)
+    if inner:
+        print("Capas dentro de los bloques elegidos (entidades por definición de bloque):")
+        for layer, count in sorted(inner.items(), key=lambda item: item[0].casefold()):
+            if layer == "0":
+                note = " (toma la capa del INSERT)"
+            elif not _visible(layer, _patterns(args.layers), _patterns(args.exclude_layers)):
+                note = " (no se ve: se quita)"
+            else:
+                note = ""
+            print(f"  - capa «{layer}»: {count}{note}")
     if selection.zero_length:
         print(f"De longitud nula (no se dibujarían): {selection.zero_length}")
     if selection.without_bounds:
@@ -319,7 +435,7 @@ def _print_list(
         box, crossing = clip_preview(selection.entities, clip_window)
         print("Con recorte a la zona: la página mide la zona" + (
             "." if not crossing else
-            ", ampliada por lo que no se puede recortar y cruza el borde: "
+            "; lo que no se puede recortar y cruza el borde lo corta la máscara del PDF: "
             + ", ".join(f"{kind} {count}" for kind, count in sorted(crossing.items())) + "."
         ))
     if box is None:
@@ -357,11 +473,24 @@ def run_extract_modelspace(args) -> int:
     if block_commands.has_output_extension(Path(args.output_prefix)):
         raise CadProcessingError("--output-prefix debe ser una ruta base sin extensión")
     document, pruned = block_commands.read_source_dxf(source, Path(args.output_prefix).parent)
+    prepared = prepare_modelspace_export(args, document, pruned)
+    if prepared is None:  # --list
+        return 0
+    values, working = prepared
+    return block_commands.run_extract_block(values, working)
+
+
+def prepare_modelspace_export(args, document: Drawing, pruned, candidates=None):
+    """Elige, copia, recorta y agrupa en el bloque de trabajo lo pedido en ``args`` (las
+    opciones de ``extract-modelspace``) del DXF ya leído, que no se modifica. Devuelve los
+    argumentos de ``extract-block`` y la copia de trabajo, o None con ``--list`` (solo imprime).
+    La usan la línea de órdenes y el trabajador (``worker_export``, zonas)."""
+    source = Path(args.drawing)
     layers, exclude = _patterns(args.layers), _patterns(args.exclude_layers)
     reveal = parse_layer_selection(document, args.include_hidden_layers)
     _check_requested_layers(document, layers, reveal)
     window, window_block = _window(args, document)
-    selection = select_modelspace(document, layers, exclude, window)
+    selection = select_modelspace(document, layers, exclude, window, candidates)
     print(
         f"Model Space de {source.name}: {len(selection.entities)} entidades seleccionadas"
         + (f" (capas: {', '.join(layers)})" if layers else "")
@@ -372,19 +501,25 @@ def run_extract_modelspace(args) -> int:
     clip_window = window if window is not None and not args.no_clip else None
     if args.list:
         _print_list(selection, document, args, reveal, clip_window)
-        return 0
+        return None
     if not selection.entities:
         raise CadProcessingError(
             "La selección del Model Space está vacía; no se generaron archivos."
         )
-    working, block_name, not_copied, clip = working_document(
-        document, selection.entities, clip_window
+    working, block_name, not_copied, clip, removed = build_working_document(
+        document, selection.entities, clip_window, layers, exclude
     )
+    masked = clip is not None and bool(clip.not_clipped)
     if clip is not None:
         print(
             f"Recorte a la zona: {clip.clipped} entidades recortadas ({clip.pieces} tramos), "
             f"{clip.outside} fuera de la zona quitadas, "
-            f"{sum(clip.not_clipped.values())} sin recortar (entran enteras)."
+            f"{sum(clip.not_clipped.values())} enteras cortadas por la máscara del PDF."
+        )
+    if removed:
+        print(
+            f"Capas que no se ven, dentro de los bloques: {sum(removed.values())} entidades "
+            "quitadas de la copia."
         )
     sys.stdout.flush()
     values = dict(vars(args))
@@ -409,14 +544,12 @@ def run_extract_modelspace(args) -> int:
             clip_pieces=0 if clip is None else clip.pieces,
             outside_removed=0 if clip is None else clip.outside,
             not_clipped=tuple(sorted(clip.not_clipped.items())) if clip is not None else (),
+            masked=masked,
+            masked_texts=tuple(clip.masked_texts) if masked else (),
+            nested_removed=tuple(sorted(removed.items(), key=lambda item: item[0].casefold())),
         ),
-        # Con recorte, la página es la ventana (ampliada por lo que entra entero y la cruza).
-        page_window=None
-        if clip is None
-        else (
-            clip_window
-            if clip.not_clipped_bounds is None
-            else union_boxes(clip_window, clip.not_clipped_bounds)
-        ),
+        # Con recorte, la página es la ventana; lo que la cruza entero lo corta la máscara.
+        page_window=clip_window if clip is not None else None,
+        mask_box=clip_window if masked else None,
     )
-    return block_commands.run_extract_block(argparse.Namespace(**values), working)
+    return argparse.Namespace(**values), working
