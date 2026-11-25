@@ -19,6 +19,8 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
+from PIL import Image
+
 from cde_exporter.cad import worker_protocol as protocol
 from cde_exporter.cad.models import CadProcessingError
 from cde_exporter.cad.modelspace_commands import (
@@ -26,17 +28,18 @@ from cde_exporter.cad.modelspace_commands import (
     _visible,
     prepare_modelspace_export,
 )
-from cde_exporter.cad.preview import paint
+from cde_exporter.cad.preview import ALWAYS_REPORTED, PreviewImage, paint
+from cde_exporter.cad.preview_index import paint_index
 from cde_exporter.cad.scale import parse_nominal_scale
 from cde_exporter.cad.worker_protocol import WorkerError
 from cde_exporter.cad.zone_preview import (
     GROUP_GAP,
     _layer_name,
     _layer_rows,
+    boxes_for,
     draw_entities,
     drawing_groups,
     mm_per_unit,
-    modelspace_boxes,
     paper_size,
     select_view,
     zone_candidates,
@@ -131,7 +134,7 @@ def session_boxes(session, check=None, progress=None) -> list:
     if session.modelspace_boxes is None:
         if progress is not None:
             progress("boxes", 0.0, "Calculando las cajas del Model Space")
-        session.modelspace_boxes = modelspace_boxes(session.loaded.document, check)
+        boxes_for(session, session.loaded.document, check)
         if progress is not None:
             progress("boxes", 1.0, "Cajas del Model Space calculadas")
     return session.modelspace_boxes
@@ -176,8 +179,13 @@ def draw_zone_preview(
     print_transparency: bool,
     check,
     progress,
+    index=None,
 ) -> tuple[object, dict]:
-    """Dibuja la vista previa de una zona. Devuelve (imagen, datos de la respuesta)."""
+    """Dibuja la vista previa de una zona. Devuelve (imagen, datos de la respuesta).
+
+    Con ``index`` (la vista previa preparada, ``preview_index``), la imagen se pinta desde él
+    en una fracción de segundo, con menos detalle de lejos; sin él, se dibuja con ezdxf lo que
+    toca la vista (``prepared: false``)."""
     document = session.loaded.document
     boxes = session_boxes(session, check, progress)
     frame = request.view or request.zone
@@ -193,20 +201,37 @@ def draw_zone_preview(
         for entity in everything.entities
         if _visible(_layer_name(entity), request.layers, request.exclude_layers)
     ]
-    player, omitted = draw_entities(
-        document,
-        entities,
-        layers=request.layers,
-        exclude_layers=request.exclude_layers,
-        hidden_layers=hidden_layers,
-        check=check,
-        progress=progress,
-        plot_style=plot_style,
-        print_transparency=print_transparency,
-    )
-    check()
-    extent = None if frame is None else max(frame[2] - frame[0], frame[3] - frame[1])
-    picture = paint(player, long_side, check, progress, extent, frame=frame)
+    lod = None
+    if index is not None:
+        # Desde la vista previa preparada: lo omitido es el de todo el Model Space.
+        omitted = {kind: 0 for kind in ALWAYS_REPORTED} | dict(index.omitted)
+        if frame is None:
+            picture = PreviewImage(Image.new("RGBA", (1, 1), (0, 0, 0, 0)), None, None)
+            stats = {"items": 0, "dots": 0}
+        else:
+            picture, stats = paint_index(
+                index,
+                frame,
+                long_side,
+                lambda layer: _visible(layer, request.layers, request.exclude_layers),
+                check,
+            )
+        lod = {"strokes": stats["items"], "as_dots": stats["dots"]}
+    else:
+        player, omitted = draw_entities(
+            document,
+            entities,
+            layers=request.layers,
+            exclude_layers=request.exclude_layers,
+            hidden_layers=hidden_layers,
+            check=check,
+            progress=progress,
+            plot_style=plot_style,
+            print_transparency=print_transparency,
+        )
+        check()
+        extent = None if frame is None else max(frame[2] - frame[0], frame[3] - frame[1])
+        picture = paint(player, long_side, check, progress, extent, frame=frame)
     data = {
         "ref": None,
         "handle": None,
@@ -233,6 +258,8 @@ def draw_zone_preview(
         },
         "groups": groups,
         "omitted": omitted,
+        "prepared": index is not None,
+        "lod": lod,
     }
     return picture.image, data
 

@@ -316,7 +316,9 @@ def test_worker_process_speaks_only_json_on_stdout(tmp_path: Path) -> None:
         if process.poll() is None:
             process.kill()
     final = [json.loads(line) for line in rest.decode("utf-8").splitlines()]
-    assert final == [
+    # Desde la 1.2, entre medias pueden llegar avisos de la preparación de la vista previa.
+    assert all(message["type"] == "event" and message["id"] is None for message in final[:-1])
+    assert final[-1:] == [
         {
             "protocol": protocol.PROTOCOL_VERSION,
             "id": "c-2",

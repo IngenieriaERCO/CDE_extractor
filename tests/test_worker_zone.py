@@ -7,7 +7,7 @@ from pathlib import Path
 import ezdxf
 import pytest
 from PIL import Image
-from test_worker import running  # noqa: F401 - fixture del trabajador en el proceso
+from test_worker import TIMEOUT, running  # noqa: F401 - fixture del trabajador en el proceso
 from test_worker_export import _export, _files, _final, _load
 
 from cde_exporter.cad import worker_protocol as protocol
@@ -78,9 +78,19 @@ def test_generated_names_skip_taken_and_existing_ones() -> None:
 # ----------------------------------------------------------------- preview
 
 
+def _ready(sink) -> dict:
+    """Espera el aviso de que la vista previa preparada está lista (protocolo 1.2)."""
+    with sink.condition:
+        assert sink.condition.wait_for(
+            lambda: any(m.get("event") == "preview_ready" for m in sink.messages), TIMEOUT
+        )
+    return next(m for m in sink.messages if m.get("event") == "preview_ready")
+
+
 def test_a_zone_preview_shows_only_the_layers_that_are_seen(running, tmp_path: Path) -> None:  # noqa: F811
     sink, stdin = running
     session = _load(sink, stdin, _source(tmp_path / "obra.dxf"))["session"]
+    _ready(sink)
 
     reply = _preview(sink, stdin, "c-p1", session, zone=ZONE, exclude_layers=["COTAS"], scale=100)
 
@@ -103,6 +113,7 @@ def test_a_zone_preview_shows_only_the_layers_that_are_seen(running, tmp_path: P
     again = _preview(
         sink, stdin, "c-p2", session, zone=ZONE, exclude_layers=["COTAS"], scale="1:50"
     )["data"]
+    assert data["prepared"] is True and again["prepared"] is True
     assert again["cached"] is True and again["png"] == data["png"]
     assert again["paper"]["content_mm"] == [200.0, 200.0]  # el papel no va en la caché
 
@@ -243,7 +254,7 @@ def test_bad_zone_jobs_stop_before_writing_anything(running, tmp_path: Path) -> 
     assert _files(output) == []
 
 
-def test_the_versions_are_protocol_1_1_and_manifest_1_5() -> None:
+def test_the_versions_are_protocol_1_2_and_manifest_1_5() -> None:
     """El mensaje ``ready`` las anuncia (lo comprueba test_worker con el proceso real)."""
-    assert protocol.PROTOCOL_VERSION == "1.1"
+    assert protocol.PROTOCOL_VERSION == "1.2"
     assert SCHEMA_VERSION == "1.5"

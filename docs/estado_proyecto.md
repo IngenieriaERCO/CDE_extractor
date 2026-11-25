@@ -1,6 +1,6 @@
 # Estado del proyecto — Exportador Vectorial
 
-Último hito: Fase 4, pasos 5, 6 y 7 — avisos críticos que bloquean, manifiesto publicado como tercer archivo y `--all` todo o nada (consulta git log para el hash). Después, ajuste para los planos de PVcase (3DSOLID con transform binario y MULTILEADER; sección «Ajuste Fase 4: planos de PVcase»). Después, PDF sin rectángulo blanco de fondo de página (sección «Ajuste: PDF sin fondo de página»). Después, arreglo de `--help` y orden `cad extract-all-blocks` (sección «Ajuste: `--help` y exportación de proyecto»). Último ajuste, en la rama `trabajo/capas-ocultas-model-space`: avisos de capas ocultas, `--include-hidden-layers`, orden `cad extract-modelspace` y copia por partes de DXF muy grandes y recorte a la zona en `extract-modelspace` (sección «Ajuste: capas ocultas y Model Space»; recorte sin commit); reutilización de bloques repetidos y unidades en metros sin aviso falso (sección «Ajuste: rendimiento con bloques repetidos», con el Form XObject). En curso: trabajador persistente para el Componedor, etapas 1 (commit `99761a4`), 2 (commit `5de8302`) y 3 (commit `6c9c5b7`) de 4 (sección «Trabajador persistente»); después, entidades de complementos y lectura selectiva (sección «Entidades de complementos, bloques anónimos y lectura selectiva», commit `114268f`) y bloques anónimos `*U` en el trabajador (sección «Bloques anónimos en el trabajador», commit `92c2c37`) y el sistema de coordenadas del GEODATA en `load` (sección «Sistema de coordenadas en load», commit `58fc279`); después, tabla de impresión CTB y transparencia de los rellenos (sección «Tabla de impresión (CTB) y transparencia», commit `7154704`) y CTB derivada del PDF de AutoCAD (sección «CTB derivada del PDF de AutoCAD», sin commit). En curso: zona del Model Space como detalle, subfases 1, 2 y 3 de 3 (secciones «Zona del Model Space como detalle», «Vista previa de una zona» y «Zonas en el trabajador», sin commit) y fondo de los HATCH de patrón (sección «Color de fondo de los HATCH») y orden de dibujo ACAD_SORTENTS (sección «Orden de dibujo»), commit `402ad72`; después, cuñas de los LEADER y medición de la vista previa (sección «Cuñas de los LEADER», sin commit). 714 pruebas pasando, ruff limpio.
+Último hito: Fase 4, pasos 5, 6 y 7 — avisos críticos que bloquean, manifiesto publicado como tercer archivo y `--all` todo o nada (consulta git log para el hash). Después, ajuste para los planos de PVcase (3DSOLID con transform binario y MULTILEADER; sección «Ajuste Fase 4: planos de PVcase»). Después, PDF sin rectángulo blanco de fondo de página (sección «Ajuste: PDF sin fondo de página»). Después, arreglo de `--help` y orden `cad extract-all-blocks` (sección «Ajuste: `--help` y exportación de proyecto»). Último ajuste, en la rama `trabajo/capas-ocultas-model-space`: avisos de capas ocultas, `--include-hidden-layers`, orden `cad extract-modelspace` y copia por partes de DXF muy grandes y recorte a la zona en `extract-modelspace` (sección «Ajuste: capas ocultas y Model Space»; recorte sin commit); reutilización de bloques repetidos y unidades en metros sin aviso falso (sección «Ajuste: rendimiento con bloques repetidos», con el Form XObject). En curso: trabajador persistente para el Componedor, etapas 1 (commit `99761a4`), 2 (commit `5de8302`) y 3 (commit `6c9c5b7`) de 4 (sección «Trabajador persistente»); después, entidades de complementos y lectura selectiva (sección «Entidades de complementos, bloques anónimos y lectura selectiva», commit `114268f`) y bloques anónimos `*U` en el trabajador (sección «Bloques anónimos en el trabajador», commit `92c2c37`) y el sistema de coordenadas del GEODATA en `load` (sección «Sistema de coordenadas en load», commit `58fc279`); después, tabla de impresión CTB y transparencia de los rellenos (sección «Tabla de impresión (CTB) y transparencia», commit `7154704`) y CTB derivada del PDF de AutoCAD (sección «CTB derivada del PDF de AutoCAD», sin commit). En curso: zona del Model Space como detalle, subfases 1, 2 y 3 de 3 (secciones «Zona del Model Space como detalle», «Vista previa de una zona» y «Zonas en el trabajador», sin commit) y fondo de los HATCH de patrón (sección «Color de fondo de los HATCH») y orden de dibujo ACAD_SORTENTS (sección «Orden de dibujo»), commit `402ad72`; después, cuñas de los LEADER y medición de la vista previa (sección «Cuñas de los LEADER», commit `1af0712`); después, velocidad de la vista previa (sección «Velocidad de la vista previa», sin commit). 723 pruebas pasando, ruff limpio.
 
 ## Plan en 4 fases
 1. Selección de bloque + escala — hecha.
@@ -443,6 +443,39 @@ Medición de la vista previa con PRGD (tarea 2, sin programar; 1 500 px, CTB, si
 | **Total** | **43–48 s** (la primera, más 17–19 s de cajas) | 1,9 s | 0,95 s | 0,19 s |
 
 No hay recorte en la vista previa. Casi todo el tiempo es ezdxf dibujando con todo detalle lo que en esa vista mide menos de un píxel; la vista se vuelve a dibujar entera en cada zoom.
+
+## Velocidad de la vista previa (2026-11-25, sin commit)
+Decisiones de Luis Angel:
+- preparar la vista previa en segundo plano, con aviso y avance;
+- medir la memoria antes de programar y mantenerla razonable;
+- se acepta perder detalle diminuto de lejos;
+- hacer las propuestas 1, 2 y 3 (la 4 y la 5, después si hace falta).
+
+Hecho (protocolo 1.2, `docs/protocolo_trabajador.md`, sección 4.2; `preview_index.py`):
+- **Propuesta 1:** las cajas del Model Space se calculan una vez, en segundo plano, tras `load`. El cálculo es compartido y reanudable (`zone_preview.ModelspaceBoxes`, `boxes_for`): si un pedido de zona las necesita antes, sigue donde iba la preparación, y al revés.
+- **Propuesta 2:** todo el Model Space se graba una vez por sesión, en un hilo aparte que cede el turno a cada pedido antes de cada entidad, a cualquier profundidad (`Gate`). Cada entidad del Model Space se indexa al terminar y su grabación se descarta. Se indexan 166 956 trazos (559 348 puntos) y el índice ocupa 17,6 MB.
+- **Propuesta 3:** cada vista filtra los trazos por caja y por capas, con numpy, y pinta con Pillow en el orden de dibujo. Un trazo de menos de un píxel se pinta como un punto. La vista, la matriz `cad_to_px` y los recuentos son los de siempre.
+- **Eventos** `preview_progress`, `preview_ready` y `preview_failed`. `load` acepta `prepare_preview` (la CTB y la transparencia que se prepararán) y devuelve `preview_preparation`, como `status`. La respuesta de `preview` de zona trae `prepared` y `lod`. Si llega otra configuración, se prepara la nueva.
+- **Arreglos encontrados por el camino:**
+  - `exporters._draw_insert` ya no copia en memoria todo el contenido de un bloque antes de dibujarlo. Solo lo hace si el bloque tiene achurados con fondo, que deben ir debajo. Con un bloque enorme de PRGD eran 21 s sin poder ceder el turno y unos 300 MB.
+  - `zone_preview._box_of` dejaba de lado la cancelación: tomaba la orden de parar como «datos inválidos».
+
+**Medición con PRGD** (`Downloads`, 105 MB; trabajador como proceso; CTB derivada, sin transparencia; `data/verificacion/velocidad/`):
+
+| | Antes | Ahora |
+|---|---|---|
+| `load` | 58 s | 58 s (igual) |
+| Hasta `preview_ready` | — | 50–52 s tras `load`, en segundo plano |
+| Todo el Model Space / 3,7 km / 915 m (G1) | 44–48 s, más 17–19 s de cajas la primera | **0,41–0,46 s** |
+| 200 m / 50 m / 10 m | 1,9 / 0,95 / 0,19 s | **0,10 / 0,13 / 0,06 s** |
+| Vista cercana mientras se prepara | — | 3,6–16 s (espera a las cajas si aún no estaban) |
+| `status` mientras se prepara | — | 0,09 s |
+| Memoria del proceso | 1 048 MB tras `load` | 1 262 MB (+214 MB, de ellos unos 190 MB son las cajas, que ya hacían falta para las zonas) |
+
+- Pruebas: `tests/test_preview_index.py` (9). Se adaptaron 2 pruebas del trabajador: los eventos que llegan entre mensajes en `test_worker`, y en `test_worker_zone` esperar `preview_ready` y la versión 1.2.
+- Pendiente:
+  - el Componedor debe enviar la CTB en `load`, mostrar el avance y, hasta `preview_ready`, pedir solo vistas cercanas;
+  - la propuesta 4 (caché por niveles) y la 5 (geometría al navegador), si hacen falta.
 
 ## Otros
 - Hablar con Alan: ¿limpiar historial de Git (SVG/TXT de salidas ya commiteados)? Investigar handles duplicados del DXF.

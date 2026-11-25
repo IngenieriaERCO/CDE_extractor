@@ -62,6 +62,7 @@ from cde_exporter.cad.preview import (
     paint,
 )
 from cde_exporter.cad.reader import entity_bounds
+from cde_exporter.cad.run_hooks import DrawingCancelled
 from cde_exporter.cad.scale import parse_nominal_scale
 
 FORMAT = "cde-zone-preview"
@@ -105,6 +106,8 @@ def _box_of(cache: _Bounds, entity) -> tuple[float, float, float, float] | None:
     ):
         try:
             box, _exact, _hidden = cache.reference(entity, True)
+        except DrawingCancelled:
+            raise  # cancelar o detener la preparación de la vista previa: no son datos
         except Exception:  # noqa: BLE001 - datos inválidos: se prueba la caja exacta
             box = None
         if box is not None and box.has_data:
@@ -118,21 +121,71 @@ def _box_of(cache: _Bounds, entity) -> tuple[float, float, float, float] | None:
     return entity_bounds(entity) or _points_bounds(entity)
 
 
+class ModelspaceBoxes:
+    """Cálculo reanudable de las cajas rápidas: si se interrumpe (cancelar, o ceder el turno en
+    la preparación de la vista previa), quien lo continúe sigue donde se quedó, con las cajas de
+    las definiciones ya calculadas. En el trabajador lo comparten la preparación en segundo
+    plano y los pedidos (``boxes_for``)."""
+
+    def __init__(self, document) -> None:
+        self.cache = _Bounds(document)
+        self.entities = list(document.modelspace())
+        self.rows: list[tuple[object, tuple | None, bool]] = []
+        self.position = 0
+        self._checked = -1
+
+    def complete(self, check=None) -> list[tuple[object, tuple | None, bool]]:
+        """Sigue hasta el final. ``check`` puede ceder el turno a otro que continúe este mismo
+        cálculo (el pedido de una zona mientras se prepara la vista previa): al volver, se
+        mira de nuevo dónde va y se descarta lo que el otro ya hizo."""
+        previous = self.cache.check
+        self.cache.check = check
+        try:
+            while True:
+                position = self.position
+                if position >= len(self.entities):
+                    break
+                if check is not None and position % 50 == 0 and self._checked != position:
+                    self._checked = position
+                    check()
+                    continue  # quizá otro avanzó mientras tanto
+                entity = self.entities[position]
+                row = None
+                if not entity.dxf.is_supported("layer"):
+                    pass
+                elif _is_zero_length(entity):
+                    row = (entity, None, True)
+                else:
+                    row = (entity, _box_of(self.cache, entity), False)
+                if self.position != position:
+                    continue  # otro la hizo (y siguió) mientras se cedía el turno
+                if row is not None:
+                    self.rows.append(row)
+                self.position = position + 1
+        finally:
+            self.cache.check = previous
+        return self.rows
+
+
 def modelspace_boxes(document, check=None) -> list[tuple[object, tuple | None, bool]]:
     """(entidad, caja rápida o None, es un punto) de cada entidad del Model Space que ezdxf
     interpreta, en su orden. Se calcula una vez por DXF (el trabajador la guarda en la
     sesión)."""
-    cache = _Bounds(document)
-    rows = []
-    for number, entity in enumerate(document.modelspace()):
-        if check is not None and number % 500 == 0:
-            check()
-        if not entity.dxf.is_supported("layer"):
-            continue
-        if _is_zero_length(entity):
-            rows.append((entity, None, True))
-            continue
-        rows.append((entity, _box_of(cache, entity), False))
+    return ModelspaceBoxes(document).complete(check)
+
+
+def boxes_for(target, document, check=None) -> list[tuple[object, tuple | None, bool]]:
+    """Las cajas rápidas de ``target`` (la sesión del trabajador: ``modelspace_boxes`` y
+    ``boxes_builder``); si faltan, se calculan o se sigue el cálculo que otro dejó a medias."""
+    if getattr(target, "modelspace_boxes", None) is not None:
+        return target.modelspace_boxes
+    builder = getattr(target, "boxes_builder", None)
+    if builder is None:
+        builder = ModelspaceBoxes(document)
+        target.boxes_builder = builder
+    rows = builder.complete(check)
+    target.modelspace_boxes = rows
+    target.boxes_builder = None
     return rows
 
 

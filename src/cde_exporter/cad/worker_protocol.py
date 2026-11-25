@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-PROTOCOL_VERSION = "1.1"
+PROTOCOL_VERSION = "1.2"
 
 COMMANDS = frozenset({"load", "preview", "export", "cancel", "status", "close"})
 # Se atienden siempre, aunque otro pedido esté en curso (los lee el hilo de stdin).
@@ -107,6 +107,13 @@ def error(request_id: str | None, failure: WorkerError, command: str | None = No
 
 def progress(request_id: str, data: dict) -> dict:
     return message("progress", request_id, data=data)
+
+
+def event(name: str, data: dict) -> dict:
+    """Aviso que no responde a ningún pedido (``id`` null; desde la 1.2): la preparación de la
+    vista previa en segundo plano (``preview_progress``, ``preview_ready``,
+    ``preview_failed``)."""
+    return message("event", None, event=name, data=data)
 
 
 def parse_request(line: bytes) -> Request:

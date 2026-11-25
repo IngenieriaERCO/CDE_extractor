@@ -1,10 +1,15 @@
-# Protocolo del trabajador (`cde-exporter worker`), versión 1.1
+# Protocolo del trabajador (`cde-exporter worker`), versión 1.2
 
 Este documento es para quien programe la integración del **Componedor** con el exportador. Es el contrato entre los dos programas: el Componedor lanza el trabajador como **comando externo** (no importa código del exportador), le envía pedidos y lee respuestas, siempre en JSON por líneas.
 
 Estado: **contrato aprobado por Luis Angel (2026-11-17)**, con las observaciones del agente del Componedor incorporadas (sección 14). Implementado por etapas: 1 (arranque, `load`, `--list --json`) y 2 (`preview`) con visto bueno; 3 (`export`, avance, cancelar y manifiesto 1.3) hecha, pendiente de visto bueno; 4 (DXF pequeño de prueba para el Componedor) pendiente.
 
 **Versión 1.1 (2026-11-24, pendiente de visto bueno):** zonas del Model Space en `preview` (sección 4.1) y en `export` (sección 5.4), con el DXF leído una sola vez, y manifiesto 1.5 (`pdf.drawing.mask`, `docs/manifiesto.md`). Solo añade: un Componedor que habla la 1.0 funciona igual (el trabajador acepta pedidos con `"protocol": "1.0"`; las respuestas dicen `"1.1"`), y las filas de `export` llevan claves nuevas (`kind`, `zone`, `package_name`, `name_generated`) que puede ignorar.
+
+**Versión 1.2 (2026-11-25, pendiente de visto bueno):** **vista previa preparada en segundo plano** (sección 4.2). Tras `load`, el trabajador dibuja una vez todo el Model Space en segundo plano y avisa con **eventos** (`type: "event"`, sección 2.3): `preview_progress` (avance) y `preview_ready` («vista previa lista»). Desde entonces, cualquier vista de zona se pinta en una fracción de segundo. Solo añade:
+- la opción `prepare_preview` de `load` y el campo `preview_preparation` en `load` y en `status`;
+- los mensajes de evento, que un Componedor 1.1 puede ignorar;
+- `prepared` y `lod` en la respuesta de `preview` de zona.
 
 Decisiones ya tomadas (Luis Angel, 2026-11-17):
 - Un proceso de trabajo persistente que **lee el DXF una sola vez** y atiende tres órdenes: cargar (`load`), vista previa (`preview`) y exportar (`export`), más cancelar (`cancel`).
@@ -73,8 +78,9 @@ Todo mensaje del trabajador tiene `protocol`, `id` (el del pedido; `null` en `re
 | `progress` | Durante un pedido largo, varias veces | Avance (sección 6) |
 | `result` | **Fin correcto** del pedido (una sola vez) | `data` con el resultado |
 | `error` | **Fin con error** del pedido (una sola vez) | `error` (sección 8) |
+| `event` | Desde la 1.2, en cualquier momento, **sin pedido** (`id` null) | `event` (nombre) y `data` (sección 4.2) |
 
-Cada pedido termina con **exactamente un** `result` o un `error`. Ejemplo:
+Cada pedido termina con **exactamente un** `result` o un `error`. Los `event` no pertenecen a ningún pedido: pueden llegar entre los mensajes de otro (por ejemplo, entre los `progress` de un `export`), y el Componedor los distingue por `type`. Ejemplo:
 
 ```json
 {"protocol": "1.0", "id": "c-17", "type": "result", "command": "load", "data": {"...": "..."}}
@@ -84,7 +90,7 @@ Cada pedido termina con **exactamente un** `result` o un `error`. Ejemplo:
 
 ```json
 {"protocol": "1.0", "id": null, "type": "ready",
- "data": {"protocol_version": "1.1", "exporter_version": "0.1.0", "ezdxf": "1.4.4", "pymupdf": "1.28.2",
+ "data": {"protocol_version": "1.2", "exporter_version": "0.1.0", "ezdxf": "1.4.4", "pymupdf": "1.28.2",
           "manifest_schema_version": "1.5", "work_dir": "C:\\ruta\\carpeta_de_trabajo"}}
 ```
 
@@ -101,6 +107,7 @@ Pedido:
 - `units`: `null` (usar `$INSUNITS`) o `mm`, `cm`, `m`, `in`, `ft` (como `--units`). **Vale para toda la sesión:** la vista previa y la exportación usan estas unidades.
 - `margin_mm`: margen de página (por defecto 5). **Vale para toda la sesión**: es el que usará `export` y el que entra en el tamaño de página que calcula el Componedor.
 - `include_layers` (opcional, por defecto `true`): con `false` no se calcula la tabla de capas (`layers` es `[]`), lo que ahorra 1–2 s en bloques muy grandes.
+- `prepare_preview` (opcional, desde la 1.2): `true` (por defecto), `false` o `{"plot_style": ruta de la .ctb o null, "print_transparency": true|false}`. Prepara la vista previa en segundo plano con esa configuración (sección 4.2). **El Componedor debe enviar la misma CTB y transparencia que usará en `preview`**; si no coinciden, la preparación se repite con la configuración pedida. Con `false` no se prepara y cada vista se dibuja como en la 1.1. Una CTB que no existe da `BAD_REQUEST`.
 - `anonymous_min_entities` (opcional, entero ≥ 0 o `null`): entidades visibles que necesita un bloque anónimo `*U` del Model Space para ofrecerse en `blocks` (ver «Bloques anónimos» en la sección 3.1). Si viene, **manda sobre la variable `CDE_ANON_MIN_ENTITIES`**; con `null` o sin la clave, vale la variable o, sin ella, 100. Otro valor (negativo, decimal, texto, `true`) da `BAD_REQUEST`. La respuesta devuelve el umbral usado en `anonymous_min_entities`.
 
 Qué hace: lee el DXF **una vez** (con la copia temporal sin bloques sin usar si pasa de 200 MB, como hoy), calcula la huella y el SHA-256 (sección 10), la lista de bloques y la tabla de capas. Tiempos medidos con los prototipos: GUAMO_prueba.dxf (6,8 MB) unos 3 s; PRUEBAEXPORTADORSUPERFICIES.dxf (830 MB) unos 100–110 s, casi todo leer.
@@ -327,6 +334,59 @@ Respuesta (`data`):
 - **Caché:** como en la sección 4. En vez del handle, el nombre lleva `ms-` y 10 cifras del SHA-1 de zona, vista y capas. `scale` y `paper` no entran en la clave: cambiar la escala devuelve la imagen guardada con el `paper` nuevo.
 - **Tiempo:** la primera vista previa o exportación de zona de una sesión calcula las cajas de todo el Model Space, una vez por bloque (etapa `boxes` del avance). En el DXF de PRGD, de 97 MB, son unos 15 s. Las siguientes las reutilizan.
 
+### 4.2 Vista previa preparada (desde la 1.2)
+
+Medido con PRGD (`PRGD-25-1365-CIV-PL-106_1_VA.dxf`, 105 MB): una vista lejana tardaba **41–48 s** cada vez. ezdxf volvía a dibujar con todo detalle las 25 822 entidades (159 000 trazos), aunque casi todo midiera menos de un píxel. Ahora el Model Space se dibuja **una sola vez** por sesión y cada vista solo filtra y pinta.
+
+**Qué hace el trabajador tras `load`** (salvo `prepare_preview: false`):
+1. Responde a `load` como siempre (no tarda más) y, en segundo plano, prepara:
+   - calcula las cajas de todo el Model Space (las usan también las zonas);
+   - dibuja todo el Model Space con el motor de la vista previa, en el orden de dibujo del DXF;
+   - indexa cada trazo con su caja, color y las capas de las que depende.
+2. **Nunca dibuja dos cosas a la vez:** la preparación cede el turno a cualquier pedido antes de cada entidad, a cualquier profundidad, y lo retoma al terminar el pedido. Un pedido espera como mucho lo que tarda una entidad (en PRGD, menos de 2 s; normalmente nada). `status` y `cancel` responden siempre al momento, como antes.
+3. Envía eventos:
+
+```json
+{"protocol": "1.2", "id": null, "type": "event", "event": "preview_progress",
+ "data": {"session": "s-1", "stage": "draw", "percent": 61.4, "message": "Preparando la vista previa: 9 120 de 25 837"}}
+{"protocol": "1.2", "id": null, "type": "event", "event": "preview_ready",
+ "data": {"session": "s-1", "items": 166956, "points": 559348, "memory_mb": 17.6, "seconds": 49.9,
+          "plot_style": {"name": "CTB_ERCO_derivada_PRGD.ctb", "sha256": "b4a9…"}, "print_transparency": false}}
+{"protocol": "1.2", "id": null, "type": "event", "event": "preview_failed",
+ "data": {"session": "s-1", "message": "…"}}
+```
+
+- `preview_progress`: como mucho dos por segundo. `stage` es `boxes`, `draw` o `index`; `percent` va de 0 a 100 y solo sube.
+- `preview_ready`: «vista previa lista». `items` y `points` son los trazos indexados, `memory_mb` lo que ocupa el índice, `seconds` lo que tardó, y lleva la configuración preparada.
+- `preview_failed`: la preparación falló. Las vistas se siguen dibujando como en la 1.1; el `message` es para el registro.
+- Con otro `load` o con `close`, la preparación en curso se detiene sin aviso. Los eventos llevan `session`: el Componedor ignora los de una sesión que ya no es la suya.
+
+**`preview_preparation`** (en `load` y en `status`): `{"state": "running" | "ready" | "failed" | "stopped", "stage": …, "percent": …, "plot_style": …, "print_transparency": …, "error": …}`.
+
+**Qué cambia en `preview` de zona** (sección 4.1; la de un bloque, por referencia, no cambia):
+- Si la preparación está lista para la **misma CTB y transparencia** y el pedido no trae `include_hidden_layers`, la imagen sale del índice: `"prepared": true`. La vista, los recuentos, las capas y la matriz `cad_to_px` son los mismos que sin preparar.
+- **Menos detalle de lejos** (decisión de Luis Angel): un trazo que en esa vista mide menos de un píxel se pinta como un punto de su color, debajo de lo demás. `lod` lo cuenta: `{"strokes": trazos en la vista, "as_dots": de ellos, pintados como punto}`.
+- Con la preparación todavía en marcha, con otra configuración o con `include_hidden_layers`, la vista se dibuja como en la 1.1: `"prepared": false`, `"lod": null`. Si la configuración es otra, además se empieza a preparar la nueva (la última pedida).
+- En una vista preparada, `omitted` cuenta lo no dibujado en todo el Model Space, no solo en la vista.
+- La caché de PNG distingue las dos clases de imagen (el nombre de la preparada termina en `_i`).
+
+**Recomendación para el Componedor:**
+1. Envíe en `load` la CTB y la transparencia que usará.
+2. Muestre el avance de `preview_progress` («Preparando la vista previa: 61 %»).
+3. Hasta `preview_ready`, pida solo vistas cercanas, que se dibujan rápido igualmente; las lejanas tardarían lo de antes.
+
+**Medido con PRGD** (trabajador como proceso, CTB derivada, sin transparencia, 1 500 px; `data/verificacion/velocidad/medicion_trabajador.json`):
+
+| | Antes (1.1) | Ahora (1.2, preparada) |
+|---|---|---|
+| `load` | 58 s | 58 s (igual) |
+| Preparación en segundo plano | — | 50 s tras `load` hasta `preview_ready` |
+| Todo el Model Space / 3,7 km / 915 m (G1) | 44–48 s (la primera, más 17–19 s de cajas) | **0,41–0,46 s** |
+| 200 m / 50 m / 10 m | 1,9 / 0,95 / 0,19 s | **0,10 / 0,13 / 0,06 s** |
+| Vista cercana pedida mientras se prepara | — | 3,6–16 s (si llega mientras se calculan las cajas, espera a que terminen; las cajas se calculan una sola vez entre los dos) |
+| `status` mientras se prepara | — | 0,09 s |
+| Memoria | 1 048 MB tras `load` | 1 262 MB al terminar (+214 MB); el índice, 17,6 MB |
+
 ## 5. `export` — exportar
 
 Pedido:
@@ -509,7 +569,7 @@ Los dos se atienden **siempre y enseguida** (stdin se lee en un hilo aparte), au
 {"protocol": "1.0", "id": "c-5", "command": "status", "data": {}}
 ```
 
-Respuesta: `{"busy": true, "current": "c-3", "stage": "read", "session": "s-1", "dxf": "GUAMO_prueba.dxf", "memory_mb": 603}`.
+Respuesta: `{"busy": true, "current": "c-3", "stage": "read", "session": "s-1", "dxf": "GUAMO_prueba.dxf", "memory_mb": 603, "preview_preparation": {…}}`. Desde la 1.2, `preview_preparation` es `null` (sin DXF, o `prepare_preview: false`) o el estado de la preparación (sección 4.2).
 
 `close`: respuesta `result` con `{}` y el proceso termina (sección 1).
 
@@ -614,6 +674,14 @@ Además de las pruebas de cada orden, estas comprueban el contrato:
 - `DXF_CHANGED` al cambiar la fecha o el tamaño del DXF entre `load` y `export`.
 - Nombres de paquete: acentos, eñes, caracteres raros, más de 60 caracteres (sufijo de hash) y ruta de más de 240 caracteres.
 - Temporales `.cde-tmp-` limpiados al arrancar y al empezar un `export`.
+- Vista previa preparada (1.2, `tests/test_preview_index.py`):
+  - las capas de cada trazo, también dentro de los bloques;
+  - la misma matriz que sin preparar, y puntos de lejos;
+  - el turno entre la preparación y un pedido;
+  - las cajas compartidas y reanudables;
+  - los eventos y `status`;
+  - `prepare_preview: false`;
+  - y una configuración nueva preparada al pedirla.
 - Zonas (1.1, `tests/test_worker_zone.py`):
   - vista previa de una zona con capas excluidas, también dentro de un bloque, y caché que no guarda el papel;
   - todo el Model Space con sus grupos;
@@ -654,3 +722,10 @@ Versión 1.1, zonas del Model Space (decisiones de Luis Angel, 2026-11-23 y 24):
 3. Nombre del paquete puesto por el usuario o generado (`Zona_01`…).
 4. Las zonas las guarda el Componedor.
 5. Manifiesto 1.5: con máscara, la caja del dibujo es la que se ve, dentro de la página. Cómo medir los trazos con máscara (comprobación h del Componedor): `docs/manifiesto.md`, «Cómo medir los trazos con máscara».
+
+Versión 1.2, velocidad de la vista previa (decisiones de Luis Angel, 2026-11-25):
+
+1. La vista previa se prepara en segundo plano, con aviso y avance (eventos).
+2. La memoria se midió antes de programar y se mantiene razonable: el índice ocupa 17,6 MB y el proceso sube unos 214 MB en PRGD.
+3. Se acepta perder detalle diminuto en las vistas lejanas (puntos).
+4. Hechas las propuestas 1 a 3: cajas una sola vez, en segundo plano; grabación única del Model Space; e índice con menos detalle de lejos. La 4 (caché por niveles) y la 5 (geometría al navegador), para después si hacen falta.

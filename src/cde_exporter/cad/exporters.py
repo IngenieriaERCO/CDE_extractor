@@ -335,6 +335,7 @@ class _StrictFrontend(Frontend):
         # Orden de dibujo (draw_order.py): bloques con tabla ACAD_SORTENTS, por nombre, y los
         # HATCH (``id``) cuyo fondo ya se pintó debajo de todo en un bloque sin tabla.
         self._ordered_blocks: dict[str, bool] = {}
+        self._background_blocks: dict[str, bool] = {}
         self._backgrounds_done: frozenset[int] = frozenset()
         # HATCH con transparencia alta no dibujados: (tipo, capa, handle, patrón, escala, %).
         self.transparent: list[tuple[str, str, str, str, float, int]] = []
@@ -479,6 +480,20 @@ class _StrictFrontend(Frontend):
             self._ordered_blocks[name] = block is not None and has_draw_order(block)
         return self._ordered_blocks[name]
 
+    def _block_has_backgrounds(self, insert) -> bool:
+        """Si el bloque tiene, en su primer nivel, algún HATCH de patrón con color de fondo
+        (y el patrón se dibuja): solo entonces se pinta el fondo antes que el bloque."""
+        if self.config.hatch_policy != HatchPolicy.NORMAL:
+            return False
+        name = insert.dxf.name
+        if name not in self._background_blocks:
+            block = insert.doc.blocks.get(name) if insert.doc is not None else None
+            self._background_blocks[name] = block is not None and any(
+                entity.dxftype() == "HATCH" and hatch_background_color(entity) is not None
+                for entity in block
+            )
+        return self._background_blocks[name]
+
     def _draw_insert(self, insert, properties) -> None:
         """El ``draw_insert`` de ezdxf 1.4.4 (recorte XCLIP y atributos al final, #1321) con:
         - el contenido en el orden de la tabla ACAD_SORTENTS del bloque, si la tiene;
@@ -496,13 +511,17 @@ class _StrictFrontend(Frontend):
                 )
             self.pipeline.push_clipping_shape(clipping_shape, None)
         ordered = self._block_has_order(insert)
-        entities = list(
-            insert.virtual_entities(skipped_entity_callback=self.skip_entity, redraw_order=ordered)
+        entities = insert.virtual_entities(
+            skipped_entity_callback=self.skip_entity, redraw_order=ordered
         )
         outer = self._backgrounds_done
-        self._backgrounds_done = (
-            frozenset() if ordered else frozenset(self._draw_backgrounds_first(entities))
-        )
+        done: frozenset[int] = frozenset()
+        if not ordered and self._block_has_backgrounds(insert):
+            # Solo entonces hacen falta todas a la vez; si no, se dibujan según salen (un
+            # bloque enorme no se copia entero en memoria antes de dibujarlo).
+            entities = list(entities)
+            done = frozenset(self._draw_backgrounds_first(entities))
+        self._backgrounds_done = done
         try:
             self.draw_entities(entities)
         finally:

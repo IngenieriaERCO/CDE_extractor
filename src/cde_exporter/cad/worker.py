@@ -10,7 +10,9 @@ JSON por líneas (docs/protocolo_trabajador.md).
 
 Etapas hechas: 1 (arranque, ``load``, ``status``, ``cancel`` y ``close``), 2 (``preview`` con
 caché) y 3 (``export``, en ``worker_export``). Protocolo 1.1: zonas del Model Space en
-``preview`` y ``export`` (``worker_zone``).
+``preview`` y ``export`` (``worker_zone``). Protocolo 1.2: vista previa preparada en segundo
+plano tras ``load`` (``preview_index``), con eventos de avance y de «lista»; la preparación va
+en un hilo aparte que cede el turno a cada pedido (``Gate``: nunca dibujan los dos a la vez).
 """
 
 from __future__ import annotations
@@ -52,6 +54,7 @@ from cde_exporter.cad.preview import (
     layers_tag,
     paint,
 )
+from cde_exporter.cad.preview_index import Gate, Preparation
 from cde_exporter.cad.reader import unknown_entities_message
 from cde_exporter.cad.scale import OVERRIDE_UNITS
 from cde_exporter.cad.worker_protocol import Request, WorkerError
@@ -101,9 +104,12 @@ class _Session:
     units: str | None
     margin_mm: float
     inventory: dict
-    # Cajas rápidas del Model Space para las zonas (worker_zone.session_boxes): se calculan la
-    # primera vez que se pide una zona.
+    # Cajas rápidas del Model Space para las zonas (worker_zone.session_boxes): las calcula la
+    # preparación de la vista previa o, si se piden antes, la primera zona.
     modelspace_boxes: list | None = None
+    boxes_builder: object = None  # cálculo de las cajas a medias (zone_preview.ModelspaceBoxes)
+    # Vista previa preparada en segundo plano (preview_index.Preparation), o None.
+    preparation: object = None
 
 
 class _Progress:
@@ -200,6 +206,8 @@ class Worker:
         output.on_close = self.state.cancel.set
         self.queue: queue.Queue = queue.Queue()
         self.previews = PreviewCache(work_dir / "previews", preview_cache_mb)
+        # Turno entre los pedidos y la preparación de la vista previa (preview_index.Gate).
+        self.gate = Gate()
 
     # ------------------------------------------------------------------ hilo de stdin
     def read_requests(self, stream) -> None:
@@ -222,6 +230,7 @@ class Worker:
                 continue
             if request.command == "close":
                 self.state.cancel.set()
+                self.stop_preparation()
                 self.queue.put(request)
                 return
             with self.state.lock:
@@ -238,6 +247,7 @@ class Worker:
                 self.state.cancel.clear()
             self.queue.put(request)
         self.state.cancel.set()
+        self.stop_preparation()
         self.queue.put(None)  # fin de stdin: como «close»
 
     def request_cancel(self, request: Request) -> bool:
@@ -253,6 +263,7 @@ class Worker:
         with self.state.lock:
             current = self.state.current
             session = self.state.session
+        preparation = session.preparation if session else None
         return {
             "busy": current is not None,
             "current": current.id if current else None,
@@ -260,7 +271,61 @@ class Worker:
             "session": session.id if session else None,
             "dxf": session.loaded.path.name if session else None,
             "memory_mb": _memory_mb(),
+            "preview_preparation": None if preparation is None else preparation.describe(),
         }
+
+    # ------------------------------------------------------------------ vista previa preparada
+    def stop_preparation(self) -> None:
+        with self.state.lock:
+            session = self.state.session
+        if session is not None and session.preparation is not None:
+            session.preparation.stop.set()
+
+    def start_preparation(self, session: _Session, plot_style, print_transparency: bool) -> None:
+        """Lanza (o relanza con otra configuración) la preparación de la vista previa."""
+        if session.preparation is not None:
+            session.preparation.stop.set()
+        send = self.output.send
+
+        def progress(stage: str, percent: float, text: str) -> None:
+            send(
+                protocol.event(
+                    "preview_progress",
+                    {
+                        "session": session.id,
+                        "stage": stage,
+                        "percent": round(percent, 1),
+                        "message": text,
+                    },
+                )
+            )
+
+        def done(preparation) -> None:
+            if preparation.state == "ready":
+                send(
+                    protocol.event(
+                        "preview_ready",
+                        {"session": session.id, **preparation.index.describe()},
+                    )
+                )
+            elif preparation.state == "failed":
+                send(
+                    protocol.event(
+                        "preview_failed",
+                        {"session": session.id, "message": preparation.error},
+                    )
+                )
+
+        preparation = Preparation(
+            session.loaded.document,
+            plot_style=plot_style,
+            print_transparency=print_transparency,
+            progress=progress,
+            on_done=done,
+            boxes_target=session,
+        )
+        session.preparation = preparation
+        preparation.start(self.gate)
 
     # ------------------------------------------------------------------ hilo principal
     def run(self) -> None:
@@ -269,10 +334,14 @@ class Worker:
             if request is None or self.output.closed.is_set():
                 return
             if request.command == "close":
+                self.stop_preparation()
                 self.output.send(protocol.result(request, {}))
                 return
             try:
-                data = self.dispatch(request)
+                # La preparación de la vista previa cede el turno (como mucho, lo que tarda una
+                # entidad) y lo recupera al terminar el pedido.
+                with self.gate.turn():
+                    data = self.dispatch(request)
             except WorkerError as failure:
                 self.output.send(protocol.error(request.id, failure, request.command))
             except Cancelled:
@@ -343,6 +412,26 @@ class Worker:
             raise WorkerError(
                 protocol.BAD_REQUEST, "«anonymous_min_entities» debe ser un entero ≥ 0 o null."
             )
+        prepare = data.get("prepare_preview", True)
+        if isinstance(prepare, bool):
+            prepare_options = {} if prepare else None
+        elif isinstance(prepare, dict):
+            prepare_options = prepare
+        else:
+            raise WorkerError(
+                protocol.BAD_REQUEST,
+                "«prepare_preview» debe ser true, false o un objeto con «plot_style» y "
+                "«print_transparency».",
+            )
+        if prepare_options is not None:
+            from cde_exporter.cad.worker_export import plot_style_option
+
+            prepare_style = plot_style_option(prepare_options.get("plot_style"))
+            prepare_transparency = prepare_options.get("print_transparency", True)
+            if not isinstance(prepare_transparency, bool):
+                raise WorkerError(
+                    protocol.BAD_REQUEST, "«print_transparency» debe ser true o false."
+                )
         source = Path(path)
         if not source.is_file():
             raise WorkerError(
@@ -350,6 +439,7 @@ class Worker:
                 f"No existe el DXF: {path}",
                 "Revise la ruta (absoluta) del archivo.",
             )
+        self.stop_preparation()
         with self.state.lock:
             self.state.session = None  # un «load» nuevo reemplaza al anterior
         progress = _Progress(self.output, request, LOAD_STAGES, self.state)
@@ -384,7 +474,15 @@ class Worker:
             self.state.sessions += 1
             session = _Session(f"s-{self.state.sessions}", loaded, units, float(margin), inventory)
             self.state.session = session
-        return {"session": session.id, **load_response(loaded, inventory)}
+        if prepare_options is not None:
+            # En segundo plano: empieza cuando este pedido termina (al soltar el turno).
+            self.start_preparation(session, prepare_style, prepare_transparency)
+        preparation = session.preparation
+        return {
+            "session": session.id,
+            **load_response(loaded, inventory),
+            "preview_preparation": None if preparation is None else preparation.describe(),
+        }
 
     # ------------------------------------------------------------------ preview
     def session_for(self, request: Request) -> _Session:
@@ -536,6 +634,19 @@ class Worker:
             if all_layers
             else (sorted(hidden) if hidden else None),
         }
+        # Vista previa preparada: si está lista para esta CTB y transparencia y no se piden
+        # capas ocultas del CAD. Si se pide otra configuración, se prepara la nueva (la última
+        # pedida) y, mientras, se dibuja como antes.
+        preparation = session.preparation
+        index = None
+        if hidden is None and preparation is not None:
+            if preparation.matches(plot_style, print_transparency):
+                if preparation.state == "ready":
+                    index = preparation.index
+            elif preparation.state in ("ready", "running", "failed", "stopped"):
+                self.start_preparation(session, plot_style, print_transparency)
+        if index is not None:
+            tag += "_i"
         png, meta = self.previews.paths(
             session.loaded.fingerprint, preview_key(zone), long_side, tag
         )
@@ -553,6 +664,7 @@ class Worker:
                 print_transparency=print_transparency,
                 check=self.state.check,
                 progress=progress,
+                index=index,
             )
             self.state.check()
             result = {**result, **drawing}

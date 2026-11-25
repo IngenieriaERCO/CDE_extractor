@@ -122,6 +122,9 @@ class _Bounds:
         }
         self.cache: dict[tuple[str, str, bool], _Box] = {}
         self.solids: dict[str, tuple[float, float, float, float] | None] = {}
+        # Se llama en cada entidad de una definición (cancelar, o ceder el turno a un pedido
+        # mientras se prepara la vista previa en segundo plano: preview_index.Gate).
+        self.check = None
 
     def _hidden(self, layer: str) -> bool:
         return layer.casefold() in self.hidden_layers
@@ -164,6 +167,8 @@ class _Bounds:
         if name in stack or name not in self.document.blocks:
             return result
         for entity in self.document.blocks[name]:
+            if self.check is not None:
+                self.check()
             kind = entity.dxftype()
             if kind == "ATTDEF" or is_unknown_entity(entity) or dxf_attr(entity, "invisible", 0):
                 continue  # las de tipos desconocidos no tienen caja (se avisan aparte)
