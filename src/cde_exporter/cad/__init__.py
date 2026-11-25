@@ -1,10 +1,14 @@
 """Lectura, selección, extracción y exportación local de dibujos DXF."""
 
+from cde_exporter.cad import leader_arrows
 from cde_exporter.cad.exporters import ExportReport, export_vector_outputs
 from cde_exporter.cad.extractor import ExtractionReport, extract_dxf_region
 from cde_exporter.cad.models import CadProcessingError, CadWindow, DxfInspection
 from cde_exporter.cad.reader import diagnose_unbounded_entities, inspect_dxf, read_dxf
 from cde_exporter.cad.selection import select_by_window
+
+# Punta de los LEADER como en AutoCAD (leader_arrows.py); ezdxf busca la función en cada uso.
+leader_arrows.install()
 
 __all__ = [
     "CadProcessingError",
