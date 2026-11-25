@@ -9,9 +9,12 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-PROTOCOL_VERSION = "1.2"
+PROTOCOL_VERSION = "1.3"
 
-COMMANDS = frozenset({"load", "preview", "export", "cancel", "status", "close"})
+# «texts» desde la 1.3: textos de una zona y escala propuesta (zone_texts, scale_text).
+COMMANDS = frozenset(
+    {"load", "preview", "texts", "export", "cancel", "status", "close"}
+)
 # Se atienden siempre, aunque otro pedido esté en curso (los lee el hilo de stdin).
 IMMEDIATE_COMMANDS = frozenset({"cancel", "status", "close"})
 

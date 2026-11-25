@@ -13,6 +13,7 @@ caché) y 3 (``export``, en ``worker_export``). Protocolo 1.1: zonas del Model S
 ``preview`` y ``export`` (``worker_zone``). Protocolo 1.2: vista previa preparada en segundo
 plano tras ``load`` (``preview_index``), con eventos de avance y de «lista»; la preparación va
 en un hilo aparte que cede el turno a cada pedido (``Gate``: nunca dibujan los dos a la vez).
+Protocolo 1.3: ``texts``, los textos de una zona y la escala que proponen (``worker_zone``).
 """
 
 from __future__ import annotations
@@ -110,6 +111,8 @@ class _Session:
     boxes_builder: object = None  # cálculo de las cajas a medias (zone_preview.ModelspaceBoxes)
     # Vista previa preparada en segundo plano (preview_index.Preparation), o None.
     preparation: object = None
+    # Qué bloques tienen texto, para «texts» (zone_texts.TextBlocks): se rellena al pedirse.
+    text_blocks: object = None
 
 
 class _Progress:
@@ -371,6 +374,11 @@ class Worker:
             return self.load(request)
         if request.command == "preview":
             return self.preview(request)
+        if request.command == "texts":
+            from cde_exporter.cad.worker_zone import zone_texts_response
+
+            session = self.session_for(request)
+            return zone_texts_response(session, request.data, self.state.check)
         if request.command == "export":
             return self.export(request)
         raise WorkerError(

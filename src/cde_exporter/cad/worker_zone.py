@@ -9,6 +9,8 @@
   genera ``Zona_01``, ``Zona_02``…
 - Las cajas rápidas del Model Space (``zone_preview.modelspace_boxes``) se calculan una vez por
   sesión: la primera vista previa o exportación de zona las calcula y las demás las reutilizan.
+- ``texts`` (protocolo 1.3): los textos de una zona con las capas que se ven (``zone_texts``) y
+  la escala que proponen (``scale_text``).
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,6 +34,7 @@ from cde_exporter.cad.modelspace_commands import (
 from cde_exporter.cad.preview import ALWAYS_REPORTED, PreviewImage, paint
 from cde_exporter.cad.preview_index import paint_index
 from cde_exporter.cad.scale import parse_nominal_scale
+from cde_exporter.cad.scale_text import find_scales, propose
 from cde_exporter.cad.worker_protocol import WorkerError
 from cde_exporter.cad.zone_preview import (
     GROUP_GAP,
@@ -44,6 +48,7 @@ from cde_exporter.cad.zone_preview import (
     select_view,
     zone_candidates,
 )
+from cde_exporter.cad.zone_texts import DEFAULT_MAX_TEXTS, MAX_TEXTS, TextBlocks, zone_texts
 
 ZONE_NAME_PREFIX = "Zona_"
 ZONE_PREVIEW_STAGES = (("boxes", 0.3), ("draw", 0.5), ("paint", 0.2))
@@ -325,3 +330,62 @@ def output_exists(output_dir: Path, outputs):
         return any(path.exists() for path in outputs(output_dir, name))
 
     return exists
+
+
+# ----------------------------------------------------------------- textos (protocolo 1.3)
+
+
+def parse_max_texts(value) -> int:
+    if value is None:
+        return DEFAULT_MAX_TEXTS
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_TEXTS:
+        raise _bad(f"«max_texts» debe ser un entero de 1 a {MAX_TEXTS}.", key="max_texts")
+    return value
+
+
+def zone_texts_response(session, data: dict, check=None) -> dict:
+    """Orden ``texts`` (sección 4.3): los textos de la zona con las capas que se ven y la
+    escala que proponen. La lista se corta en ``max_texts``, pero la escala se busca en todos."""
+    from cde_exporter.cad.worker import hidden_layer_selection  # aquí: worker importa este
+
+    started = time.perf_counter()
+    if data.get("zone") is None:
+        raise _bad("Falta «zone» ([xmin, ymin, xmax, ymax]) en «texts».", key="zone")
+    document = session.loaded.document
+    hidden, all_layers = hidden_layer_selection(document, data.get("include_hidden_layers"))
+    request = zone_request({**data, "view": None}, document, hidden)
+    limit = parse_max_texts(data.get("max_texts"))
+    if session.text_blocks is None:
+        session.text_blocks = TextBlocks(document)
+    # Con las cajas rápidas ya calculadas, solo lo que puede tocar la zona; sin ellas, todo el
+    # Model Space: recorrer solo textos e INSERT con texto lleva décimas de segundo, y calcular
+    # las cajas, en un DXF grande, decenas de segundos.
+    if session.modelspace_boxes is not None:
+        candidates = zone_candidates(session.modelspace_boxes, request.zone)
+    else:
+        candidates = document.modelspace()
+    texts = zone_texts(
+        document,
+        candidates,
+        request.zone,
+        layers=request.layers,
+        exclude_layers=request.exclude_layers,
+        reveal=hidden,
+        blocks=session.text_blocks,
+        check=check,
+    )
+    for item in texts:
+        item["scales"] = [match.scale for match in find_scales(item["text"])]
+    candidates_found, proposed = propose(texts)
+    return {
+        "zone": list(request.zone),
+        "layers": list(request.layers),
+        "exclude_layers": list(request.exclude_layers),
+        "include_hidden_layers": ["*"] if all_layers else (sorted(hidden) if hidden else None),
+        "total": len(texts),
+        "truncated": len(texts) > limit,
+        "texts": texts[:limit],
+        "scale_candidates": candidates_found,
+        "proposed_scale": proposed,
+        "seconds": round(time.perf_counter() - started, 3),
+    }

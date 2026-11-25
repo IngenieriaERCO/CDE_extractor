@@ -477,6 +477,35 @@ Hecho (protocolo 1.2, `docs/protocolo_trabajador.md`, sección 4.2; `preview_ind
   - el Componedor debe enviar la CTB en `load`, mostrar el avance y, hasta `preview_ready`, pedir solo vistas cercanas;
   - la propuesta 4 (caché por niveles) y la 5 (geometría al navegador), si hacen falta.
 
+## Textos en la vista previa y escala de la zona (2026-11-25, sin commit)
+Problema: en la vista previa de zona los textos salen como cajas vacías, así que no se lee «ESC 1:25» para decidir la escala antes de exportar.
+
+Decisiones de Luis Angel:
+- una sola fuente (Arial o equivalente) para la vista previa;
+- el texto se ve a partir de 6 píxeles de altura;
+- para la escala cuentan TEXT, MTEXT, atributos y textos de directrices; las cotas se dibujan solo si es fácil;
+- una escala: se rellena y el usuario la confirma o la cambia; varias: se muestran todas; ninguna: nada.
+
+**Subfase A, hecha** (protocolo 1.3, `docs/protocolo_trabajador.md`, sección 4.3):
+- Orden `texts`: los textos que se ven en una zona, con su posición, altura, giro y capa efectiva, también dentro de bloques, con el filtro de capas de la exportación (`zone_texts.py`).
+- Escala propuesta en `scale_candidates` y `proposed_scale` (`scale_text.py`, solo biblioteca estándar).
+- No espera a las cajas del Model Space.
+
+Probado con el trabajador sobre PRGD (`PRGD-25-1365-CIV-PL-106_1_VA.dxf`):
+
+| Zona | Textos | Tiempo | Resultado |
+|---|---|---|---|
+| «PLANTA / SECCIÓN … ESCALA 1:25» | 80 | 0,32 s (la primera de la sesión) | propone 1:25 (8 textos) |
+| «SECCIÓN-V-F 0.30 X 0.15 / ESC-1:10» | 11 | 0,18 s | propone 1:10 (3 textos) |
+| Rejillas, con 1:25 y 1:12.5 | 184 | 0,19 s | sin propuesta: 1:25 (14) y 1:12.5 (2) |
+| Zona vacía | 0 | 0,04 s | nada |
+
+- En todo el Model Space de PRGD-25 hay 1 635 textos; 57 llevan escala, con 7 escalas distintas (1:5, 1:10, 1:12.5, 1:15, 1:20, 1:25 y 1:35), escritas como «ESCALA 1:5», «ESC-1:15» o «Esc: 1:10».
+- En PRGD-26 (`PRGD-26-1377-GEN-PL-101_1_V0.dxf`) solo hay 17 textos y ninguno con escala.
+- Pruebas: `tests/test_zone_texts.py` (33). En `test_worker_zone` la versión pasa a 1.3.
+
+**Subfase B, pendiente:** el texto real en la vista previa preparada, con cajas cuando no se leería y menos de 0,5 s con PRGD.
+
 ## Otros
 - Hablar con Alan: ¿limpiar historial de Git (SVG/TXT de salidas ya commiteados)? Investigar handles duplicados del DXF.
 - Informes Word de Fase 1 y 2 desactualizados (4 archivos de salida, escala solo por flag): rehacer con guía de uso actual (data/input → escala por pregunta → PDF+TXT).

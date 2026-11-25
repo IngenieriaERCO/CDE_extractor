@@ -254,7 +254,7 @@ def test_bad_zone_jobs_stop_before_writing_anything(running, tmp_path: Path) -> 
     assert _files(output) == []
 
 
-def test_the_versions_are_protocol_1_2_and_manifest_1_5() -> None:
+def test_the_versions_are_protocol_1_3_and_manifest_1_5() -> None:
     """El mensaje ``ready`` las anuncia (lo comprueba test_worker con el proceso real)."""
-    assert protocol.PROTOCOL_VERSION == "1.2"
+    assert protocol.PROTOCOL_VERSION == "1.3"
     assert SCHEMA_VERSION == "1.5"

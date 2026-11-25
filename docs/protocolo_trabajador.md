@@ -1,4 +1,4 @@
-# Protocolo del trabajador (`cde-exporter worker`), versión 1.2
+# Protocolo del trabajador (`cde-exporter worker`), versión 1.3
 
 Este documento es para quien programe la integración del **Componedor** con el exportador. Es el contrato entre los dos programas: el Componedor lanza el trabajador como **comando externo** (no importa código del exportador), le envía pedidos y lee respuestas, siempre en JSON por líneas.
 
@@ -10,6 +10,8 @@ Estado: **contrato aprobado por Luis Angel (2026-11-17)**, con las observaciones
 - la opción `prepare_preview` de `load` y el campo `preview_preparation` en `load` y en `status`;
 - los mensajes de evento, que un Componedor 1.1 puede ignorar;
 - `prepared` y `lod` en la respuesta de `preview` de zona.
+
+**Versión 1.3 (2026-11-25, pendiente de visto bueno):** orden nueva **`texts`** (sección 4.3): los textos que se ven en una zona, con su posición y su capa, y la **escala que proponen** («ESC 1:25», «ESCALA: 1:25», «ESC-1:10»…). Solo añade: un Componedor 1.2 funciona igual. Para saber si puede usar `texts`, el Componedor mira `protocol_version` en `ready` (1.3 o mayor).
 
 Decisiones ya tomadas (Luis Angel, 2026-11-17):
 - Un proceso de trabajo persistente que **lee el DXF una sola vez** y atiende tres órdenes: cargar (`load`), vista previa (`preview`) y exportar (`export`), más cancelar (`cancel`).
@@ -90,7 +92,7 @@ Cada pedido termina con **exactamente un** `result` o un `error`. Los `event` no
 
 ```json
 {"protocol": "1.0", "id": null, "type": "ready",
- "data": {"protocol_version": "1.2", "exporter_version": "0.1.0", "ezdxf": "1.4.4", "pymupdf": "1.28.2",
+ "data": {"protocol_version": "1.3", "exporter_version": "0.1.0", "ezdxf": "1.4.4", "pymupdf": "1.28.2",
           "manifest_schema_version": "1.5", "work_dir": "C:\\ruta\\carpeta_de_trabajo"}}
 ```
 
@@ -387,6 +389,77 @@ Medido con PRGD (`PRGD-25-1365-CIV-PL-106_1_VA.dxf`, 105 MB): una vista lejana t
 | `status` mientras se prepara | — | 0,09 s |
 | Memoria | 1 048 MB tras `load` | 1 262 MB al terminar (+214 MB); el índice, 17,6 MB |
 
+### 4.3 Textos de una zona y escala propuesta (`texts`, desde la 1.3)
+
+Para decidir la escala de una zona antes de exportarla: el trabajador devuelve los textos que caen en la zona y busca en ellos la escala escrita en el plano.
+
+Pedido:
+
+```json
+{"protocol": "1.3", "id": "c-9", "command": "texts",
+ "data": {"session": "s-1", "zone": [4976388, 2041718, 4976396, 2041730],
+          "layers": null, "exclude_layers": ["COTAS"], "include_hidden_layers": null, "max_texts": 2000}}
+```
+
+- `zone` (obligatoria), `layers`, `exclude_layers` e `include_hidden_layers`: como en `preview` de zona (sección 4.1). Se usa el mismo filtro de capas que en la exportación, también dentro de los bloques.
+- `max_texts`: cuántos textos se devuelven como mucho (de 1 a 20 000; 2 000 por defecto). La escala se busca siempre en todos.
+
+**Qué textos entran:**
+- Los TEXT, MTEXT, ATTRIB y el texto de los MULTILEADER (directrices), también dentro de bloques anidados. Las cotas no entran.
+- Un texto está en la zona si lo está su punto de inserción.
+- Solo los que se verían:
+  - no salen los de capas apagadas o congeladas, salvo las pedidas en `include_hidden_layers`;
+  - no salen los atributos invisibles;
+  - un INSERT invisible, o en una capa que no se ve, no da ningún texto.
+- La capa «0» dentro de un bloque toma la del INSERT, como al dibujar.
+
+Respuesta:
+
+```json
+{"protocol": "1.3", "id": "c-9", "type": "result", "command": "texts",
+ "data": {"zone": [4976388, 2041718, 4976396, 2041730], "layers": [], "exclude_layers": ["COTAS"],
+          "include_hidden_layers": null, "total": 80, "truncated": false,
+          "texts": [{"text": "PLANTA CONSTRUCTIVA
+ESCALA 1:25", "kind": "MTEXT", "x": 4976389.953612, "y": 2041729.080341,
+                     "height": 0.162, "rotation": 0.0, "layer": "_001_Concreto_Proyectado", "handle": "5F21A",
+                     "modelspace_handle": "5F21A", "blocks": [], "scales": ["1:25"]}],
+          "scale_candidates": [{"scale": "1:25", "denominator": 25, "axis": null, "count": 8,
+                                "sources": [{"text": "PLANTA CONSTRUCTIVA
+ESCALA 1:25", "x": 4976389.953612,
+                                             "y": 2041729.080341, "layer": "_001_Concreto_Proyectado", "handle": "5F21A"}]}],
+          "proposed_scale": "1:25", "seconds": 0.32}}
+```
+
+**Cada texto (`texts[]`):** ordenados de arriba abajo y de izquierda a derecha.
+- `text`: el texto plano, sin códigos de formato; los saltos de línea del MTEXT van como `
+`.
+- `kind`: el tipo de entidad.
+- `x`, `y`: el punto de inserción, en el marco único (sección 2.1).
+- `height`: la altura en unidades CAD, con la escala de los INSERT.
+- `rotation`: el giro en grados, de 0 a 360.
+- `layer`: la capa efectiva.
+- `handle`: el handle de la entidad. Dentro de un bloque es el de su definición, que se repite en cada INSERT.
+- `modelspace_handle`: el del INSERT (o del texto) del Model Space.
+- `blocks`: los nombres de bloque por los que se llega al texto, de fuera adentro.
+- `scales`: las escalas escritas en ese texto.
+- Con más de `max_texts` textos, la lista se corta y `truncated` es `true`; `total` es el número de todos.
+
+**Escalas reconocidas:**
+- Hace falta la palabra `ESC` o `ESCALA`, sin distinguir mayúsculas ni tildes, y admite `ESC.`. Un «1:25» suelto no cuenta, porque podría ser una pendiente.
+- Detrás va `1:N` o `1/N`, con o sin `:`, `-` o `=` delante: `ESC 1:25`, `ESCALA: 1:25`, `ESC-1:10`, `Esc: 1:10`, `esc. 1/50`.
+- `N` admite decimales (`1:12.5`, `1:2,5`) y miles con punto (`ESCALA 1:1.000` = 1:1000).
+- Puede haber varias en un mismo texto (`ESC 1:25 Y 1:50`) y con eje, como en los perfiles (`ESC. H 1:1000 V 1:100`, que da `axis` `"H"` y `"V"`).
+
+**Propuesta (decisión de Luis Angel, 2026-11-25):**
+- `scale_candidates` agrupa cada escala distinta (con su eje) con las veces que sale (`count`) y hasta 10 textos de donde salió (`sources`). Van de la que más sale a la que menos y, a igualdad, primero la del texto más alto.
+- `proposed_scale` solo tiene valor si en la zona hay **una sola** escala y sin eje. Entonces el Componedor la rellena, muestra el texto de donde salió y el usuario la confirma o la cambia.
+- Con varias, o con ejes H/V, es `null` y el Componedor muestra todas para elegir.
+- Sin ninguna, `scale_candidates` es `[]` y no se propone nada.
+
+**Tiempo:** no espera a las cajas del Model Space. Si ya están calculadas (por la vista previa preparada o por una zona), mira solo lo que toca la zona; si no, recorre el Model Space mirando solo los textos y los INSERT de bloques con texto (cada bloque se revisa una vez por sesión). En PRGD (`PRGD-25-1365-CIV-PL-106_1_VA.dxf`, 1 635 textos en todo el Model Space) tarda **0,2–0,3 s**, la primera también.
+
+**Errores:** `BAD_REQUEST` si falta `zone` o no es válida, si una capa de `layers` o de `include_hidden_layers` no existe o si `max_texts` no vale; `NO_SESSION` y `DXF_CHANGED` como en `preview`.
+
 ## 5. `export` — exportar
 
 Pedido:
@@ -589,7 +662,7 @@ Respuesta: `{"busy": true, "current": "c-3", "stage": "read", "session": "s-1", 
 | `BAD_REQUEST` | Línea que no es JSON, falta un campo obligatorio, un valor no es válido (escala, rutas…), o `units`/`margin_mm` de `export` distintos de los de `load` |
 | `UNKNOWN_COMMAND` | `command` desconocido |
 | `BUSY` | Llega un pedido distinto de `cancel`, `status` o `close` mientras otro está en curso |
-| `NO_SESSION` | `preview` o `export` sin DXF cargado, o con un `session` que no es el actual |
+| `NO_SESSION` | `preview`, `texts` o `export` sin DXF cargado, o con un `session` que no es el actual |
 | `DXF_NOT_FOUND` | La ruta del DXF no existe o no se puede leer |
 | `DXF_INVALID` | El archivo no es un DXF que ezdxf pueda leer (incluye DXF dañados) |
 | `DXF_TOO_LARGE` | No hay memoria para leerlo ni con la copia reducida (sección 3: el mensaje dice cuánta haría falta y cuánta hay libre) |
@@ -682,6 +755,12 @@ Además de las pruebas de cada orden, estas comprueban el contrato:
   - los eventos y `status`;
   - `prepare_preview: false`;
   - y una configuración nueva preparada al pedirla.
+- Textos de una zona (1.3, `tests/test_zone_texts.py`):
+  - los patrones de escala, y los textos que no la llevan («PENDIENTE 1:2», «ESCALERA 1:20»…);
+  - una escala propuesta, varias ofrecidas sin propuesta, y las de eje H/V;
+  - textos de bloques escalados (con la capa «0» heredada), atributos y directrices;
+  - el filtro de capas dentro de los bloques y las capas ocultas;
+  - y la orden por el trabajador: `max_texts` y pedidos no válidos.
 - Zonas (1.1, `tests/test_worker_zone.py`):
   - vista previa de una zona con capas excluidas, también dentro de un bloque, y caché que no guarda el papel;
   - todo el Model Space con sus grupos;
@@ -729,3 +808,9 @@ Versión 1.2, velocidad de la vista previa (decisiones de Luis Angel, 2026-11-25
 2. La memoria se midió antes de programar y se mantiene razonable: el índice ocupa 17,6 MB y el proceso sube unos 214 MB en PRGD.
 3. Se acepta perder detalle diminuto en las vistas lejanas (puntos).
 4. Hechas las propuestas 1 a 3: cajas una sola vez, en segundo plano; grabación única del Model Space; e índice con menos detalle de lejos. La 4 (caché por niveles) y la 5 (geometría al navegador), para después si hacen falta.
+
+Versión 1.3, textos de una zona (decisiones de Luis Angel, 2026-11-25):
+
+1. Para la escala cuentan TEXT, MTEXT, atributos y textos de directrices; no las cotas.
+2. Una sola escala: el Componedor la rellena y el usuario la confirma o la cambia, viendo el texto de donde salió. Varias: se muestran todas para elegir. Ninguna: nada.
+3. Por subfases: primero `texts` (A); después, el texto real en la vista previa (B).
