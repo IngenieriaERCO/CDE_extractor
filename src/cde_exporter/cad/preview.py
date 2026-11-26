@@ -168,6 +168,12 @@ def draw_reference(
 # ----------------------------------------------------------------- pintado
 
 
+def _sub_paths(path) -> list:
+    """Las partes de un trazado de ezdxf (la «R»: contorno y hueco), para aplanarlas por
+    separado: ``Path.flattening`` las une con un tramo de una a otra."""
+    return list(path.sub_paths()) if path.has_sub_paths else [path]
+
+
 def _rgba(color: str) -> tuple[int, int, int, int]:
     alpha = int(color[7:9], 16) if len(color) >= 9 else 255
     return int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16), alpha
@@ -244,11 +250,18 @@ def paint(
                 continue
             color = colors.get(record.property_hash, (0, 0, 0, 255))
             if isinstance(record, PathRecord):
-                vertices = list(record.path.flattening(tolerance))
-                if vertices:
-                    add(geometry, "line", color, [vertices])
+                # Cada parte (sub-trazado) por separado: ``flattening`` las une con un tramo.
+                lines = [list(part.flattening(tolerance)) for part in _sub_paths(record.path)]
+                lines = [line for line in lines if line]
+                if lines:
+                    add(geometry, "line", color, lines)
             elif isinstance(record, FilledPathsRecord):
-                rings = [list(path.flattening(tolerance)) for path in record.paths]
+                # Cada parte, un anillo (par-impar: la que queda dentro de otra es un hueco).
+                rings = [
+                    list(part.flattening(tolerance))
+                    for path in record.paths
+                    for part in _sub_paths(path)
+                ]
                 rings = [ring for ring in rings if len(ring) > 2]
                 if rings:
                     add(geometry, "fill", color, rings)

@@ -655,7 +655,9 @@ class Worker:
             elif preparation.state in ("ready", "running", "failed", "stopped"):
                 self.start_preparation(session, plot_style, print_transparency)
         if index is not None:
-            tag += "_it"  # preparada, con el texto real (1.4); las «_i» de la 1.3 no valen
+            # Preparada, con el texto real (1.4). «_it2» desde el arreglo de las partes de las
+            # letras y del MULTILEADER: las «_it» (letras que faltaban) y las «_i» no valen.
+            tag += "_it2"
         png, meta = self.previews.paths(
             session.loaded.fingerprint, preview_key(zone), long_side, tag
         )

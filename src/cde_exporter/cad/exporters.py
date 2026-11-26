@@ -38,6 +38,7 @@ from ezdxf.entities import Insert
 from ezdxf.math import BoundingBox2d, Matrix44, Vec2, Vec3
 from ezdxf.path import from_vertices, nesting
 from ezdxf.render import hatching
+from ezdxf.render import mleader as mleader_render
 from ezdxf.tools import clipping_portal
 from ezdxf.tools.pattern import scale_pattern
 
@@ -462,6 +463,12 @@ class _StrictFrontend(Frontend):
     def _draw_composite(self, entity, properties) -> None:
         """``Frontend.draw_composite_entity`` con el contenido de los INSERT en el orden de
         dibujo de su bloque (ezdxf 1.4.4 no lo pide: ``# TODO: redraw_order=True?``)."""
+        if entity.dxftype() == "MULTILEADER":
+            # Siempre desde sus datos: ezdxf da preferencia al gráfico proxy, y AutoCAD puede
+            # guardar uno de relleno (el texto «AcDbMLeader (ACDB_MLEADER_CLASS)» en un
+            # recuadro, sin la flecha ni el texto real; los 386 de PRGD-25).
+            self.draw_entities(mleader_render.virtual_entities(entity, proxy_graphic=False))
+            return
         if not isinstance(entity, Insert):
             super().draw_composite_entity(entity, properties)
             return

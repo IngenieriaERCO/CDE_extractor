@@ -300,6 +300,42 @@ def _xy(vertices) -> np.ndarray:
     return np.array([(v.x, v.y) for v in vertices], dtype=np.float64).reshape(-1, 2)
 
 
+def _parts(path, tolerance: float) -> list[np.ndarray]:
+    """Cada parte (sub-trazado) de un trazado, aplanada por separado. ``Path.flattening`` las
+    une en una sola línea (salta de una a otra con un tramo): la «R» quedaba con su hueco unido
+    al contorno, y la «Ø» o el «½», deformados."""
+    subs = list(path.sub_paths()) if path.has_sub_paths else [path]
+    return [_xy(sub.flattening(tolerance)) for sub in subs]
+
+
+def _inside(point: np.ndarray, ring: np.ndarray) -> bool:
+    """Si ``point`` queda dentro de ``ring`` (regla del rayo)."""
+    x, y = float(point[0]), float(point[1])
+    xs, ys = ring[:, 0], ring[:, 1]
+    xn, yn = np.roll(xs, -1), np.roll(ys, -1)
+    crosses = (ys > y) != (yn > y)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        at = xs + (y - ys) * (xn - xs) / (yn - ys)
+    return bool(np.count_nonzero(crosses & (x < at)) % 2)
+
+
+def _glyph_rings(path, tolerance: float) -> list[tuple[np.ndarray, bool]]:
+    """Las partes de una letra (un trazado de ``draw_text``) con su marca de hueco: es hueco la
+    parte que queda dentro de un número impar de otras partes de **la misma letra**. No se mira
+    el sentido de giro: ezdxf no lo deja igual en todas las letras, y una letra entera (la «E»)
+    podía tomarse por hueco y desaparecer."""
+    rings = [ring for ring in _parts(path, tolerance) if len(ring) > 2]
+    if len(rings) == 1:
+        return [(rings[0], False)]
+    marked = []
+    for number, ring in enumerate(rings):
+        depth = sum(
+            1 for other, outer in enumerate(rings) if other != number and _inside(ring[0], outer)
+        )
+        marked.append((ring, depth % 2 == 1))
+    return marked
+
+
 def _tolerance(record) -> float:
     box = record.bbox()
     if not box.has_data:
@@ -309,10 +345,12 @@ def _tolerance(record) -> float:
 
 def _add_record(builder: _Builder, record, rgba, chain: int) -> None:
     if isinstance(record, PathRecord):
-        builder.add(LINE, rgba, chain, [_xy(record.path.flattening(_tolerance(record)))])
+        builder.add(LINE, rgba, chain, _parts(record.path, _tolerance(record)))
     elif isinstance(record, FilledPathsRecord):
+        # Cada parte, un anillo: se pintan con la regla par-impar, así que la parte que queda
+        # dentro de otra sale como hueco (como en el PDF).
         tolerance = _tolerance(record)
-        rings = [_xy(path.flattening(tolerance)) for path in record.paths]
+        rings = [ring for path in record.paths for ring in _parts(path, tolerance)]
         builder.add(FILL, rgba, chain, [ring for ring in rings if len(ring) > 2])
     elif isinstance(record, PointsRecord):
         vertices = _xy(record.points.vertices())
@@ -324,25 +362,31 @@ def _add_record(builder: _Builder, record, rgba, chain: int) -> None:
 
 
 def _area(ring: np.ndarray) -> float:
-    x, y = ring[:, 0], ring[:, 1]
+    """Área con signo. Respecto al primer punto: con coordenadas de millones (PRGD, 4,7 millones
+    en X) y letras de milímetros, la fórmula sobre las coordenadas tal cual perdía toda la
+    precisión (áreas de 0 o al azar)."""
+    local = ring - ring[0]
+    x, y = local[:, 0], local[:, 1]
     return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
 
 
 def _add_text(builder: _Builder, records: list, rgba, chain: int, info) -> None:
     """Un texto (los registros que dejó ``draw_text``) como un solo trazo del índice.
 
-    Las letras rellenas (TrueType) van de mayor a menor anillo, con los huecos marcados: el
-    hueco tiene la orientación contraria a la del anillo mayor. Así se pintan sin la regla
-    par-impar (rápido): cada anillo, lleno o vacío, encima del anterior."""
+    Las letras rellenas (TrueType) van de mayor a menor anillo, con los huecos marcados (la
+    parte de una letra que queda dentro de otra parte de la misma letra, ``_glyph_rings``). Así
+    se pintan sin la regla par-impar (rápido): cada anillo, lleno o vacío, encima del anterior;
+    un hueco es siempre menor que la parte que lo contiene, así que va después."""
     height, origin, along, _count = info
     tolerance = max(_TEXT_FLATTEN * height, 1e-9)
-    filled, strokes = [], []
+    marked, strokes = [], []
     for record in records:
         if isinstance(record, FilledPathsRecord):
-            filled.extend(_xy(path.flattening(tolerance)) for path in record.paths)
+            for path in record.paths:
+                marked.extend(_glyph_rings(path, tolerance))
         elif isinstance(record, PathRecord):
-            strokes.append(_xy(record.path.flattening(tolerance)))
-    filled = [ring for ring in filled if len(ring) > 2]
+            strokes.extend(_parts(record.path, tolerance))
+    filled = [ring for ring, _hole in marked]
     rings = filled or [line for line in strokes if len(line)]
     if not rings:
         for record in records:  # sin letras: lo que haya, como siempre
@@ -362,10 +406,9 @@ def _add_text(builder: _Builder, records: list, rgba, chain: int, info) -> None:
     end = o + u * float(s.max()) + v * middle
     line = (float(start[0]), float(start[1]), float(end[0]), float(end[1]))
     if filled:
-        areas = [_area(ring) for ring in rings]
-        order = sorted(range(len(rings)), key=lambda number: -abs(areas[number]))
-        outer = math.copysign(1.0, areas[order[0]])
-        holes = [math.copysign(1.0, areas[number]) != outer for number in order]
+        areas = [abs(_area(ring)) for ring in rings]
+        order = sorted(range(len(rings)), key=lambda number: -areas[number])
+        holes = [marked[number][1] for number in order]
         builder.add(
             TEXT_FILL, rgba, chain, [rings[number] for number in order], holes, (height, line)
         )

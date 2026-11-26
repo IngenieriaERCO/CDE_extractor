@@ -372,7 +372,7 @@ Medido con PRGD (`PRGD-25-1365-CIV-PL-106_1_VA.dxf`, 105 MB): una vista lejana t
 - **Menos detalle de lejos** (decisión de Luis Angel): un trazo que en esa vista mide menos de un píxel se pinta como un punto de su color, debajo de lo demás. `lod` lo cuenta: `{"strokes": trazos en la vista, "as_dots": de ellos, pintados como punto}`.
 - Con la preparación todavía en marcha, con otra configuración o con `include_hidden_layers`, la vista se dibuja como en la 1.1: `"prepared": false`, `"lod": null`. Si la configuración es otra, además se empieza a preparar la nueva (la última pedida).
 - En una vista preparada, `omitted` cuenta lo no dibujado en todo el Model Space, no solo en la vista.
-- La caché de PNG distingue las dos clases de imagen. El nombre de la preparada termina en `_it` desde la 1.4; en la 1.2 y la 1.3 terminaba en `_i`, y esas imágenes, que llevan el texto como cajas, ya no se reutilizan.
+- La caché de PNG distingue las dos clases de imagen. El nombre de la preparada termina en `_it2` desde el arreglo de las partes de las letras y del MULTILEADER (2026-11-26). Las imágenes anteriores no se reutilizan: `_it` (1.4, con letras que faltaban) e `_i` (1.2 y 1.3, con el texto como cajas).
 
 **Texto (desde la 1.4; decisiones de Luis Angel, 2026-11-26):**
 - Al preparar, cada texto se graba como en el PDF: sus letras como trazados, con la misma fuente, altura y giro. Pasa con los TEXT, MTEXT, ATTRIB, MULTILEADER y el texto de las cotas.
@@ -384,6 +384,8 @@ Medido con PRGD (`PRGD-25-1365-CIV-PL-106_1_VA.dxf`, 105 MB): una vista lejana t
 - `texts` en la respuesta cuenta los textos de la vista: `{"drawn": con letras, "as_lines": como raya, "as_dots": como punto}`. Es `null` en una vista sin preparar.
 - **Sin preparar, el texto sigue saliendo como su caja (rectángulo).** Es lo que pasa en la vista previa de un bloque (`preview` con `ref` o `handle`), en una zona pedida antes de `preview_ready`, con otra configuración o con `include_hidden_layers`, y en la orden `preview-modelspace` de la línea de órdenes.
 - Comprobado con una prueba: la caja de la tinta del texto en la vista previa y la de sus trazos en el PDF publicado coinciden a menos de 1,5 píxeles.
+- Cada parte de una letra (la «R»: su contorno y su hueco) es un anillo aparte. Es hueco la parte que queda dentro de otra parte de la misma letra. Antes se unían las partes y el hueco se decidía por el sentido de giro, con un área sin precisión en coordenadas de millones: en PRGD-25 faltaban letras enteras («R FU DE» por «REFUERZO DE») y la «Ø» de «Ø=½"».
+- Los MULTILEADER se dibujan desde sus datos, como en el PDF, no desde su gráfico proxy (que en PRGD-25 es el texto «AcDbMLeader (ACDB_MLEADER_CLASS)» en un recuadro). Vale en todas las vistas previas, preparadas o no.
 
 **Recomendación para el Componedor:**
 1. Envíe en `load` la CTB y la transparencia que usará.
@@ -762,6 +764,7 @@ Además de las pruebas de cada orden, estas comprueban el contrato:
 - `DXF_CHANGED` al cambiar la fecha o el tamaño del DXF entre `load` y `export`.
 - Nombres de paquete: acentos, eñes, caracteres raros, más de 60 caracteres (sufijo de hash) y ruta de más de 240 caracteres.
 - Temporales `.cde-tmp-` limpiados al arrancar y al empezar un `export`.
+- Partes de las letras y MULTILEADER (`tests/test_preview_glyphs.py`): los textos 81CED («REFUERZO DE MUROS EN PLANTA») y 81E7A («Ø=½"» en Calibri) de PRGD-25, con sus coordenadas, y un MULTILEADER con el gráfico proxy de relleno; la tinta de la vista previa y la del PDF publicado de la misma zona coinciden (más del 95 % en los dos sentidos); 32 anillos y 9 huecos; una «O» lejos del origen, hueca; la marca `_it2`.
 - Texto real en la vista previa preparada (1.4, `tests/test_preview_text.py`):
   - un solo trazo por texto, con su altura (también con la escala de un INSERT) y su línea media, también girada;
   - letras desde 6 píxeles (la «O», hueca), raya de 1 a 6 y punto por debajo;

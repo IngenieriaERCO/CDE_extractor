@@ -532,7 +532,7 @@ Medido con PRGD (el de `Downloads`, 105 MB, el mismo que en la 1.2; `data/verifi
 - Pruebas: `tests/test_preview_text.py` (4), una de ellas compara las letras de la vista previa con los trazos del PDF publicado (a menos de 1,5 píxeles). En `test_worker_zone` y `test_zone_texts`, la versión pasa a 1.4.
 - Pendiente: el texto real también fuera de la vista preparada, si hace falta; y `font_substitutions` en `load`, si hace falta.
 
-## Letras que faltaban en textos de estilos TrueType sin archivo (2026-11-26, sin commit)
+## Letras que faltaban en textos de estilos TrueType sin archivo (2026-11-26, commit `7074112`)
 Error confirmado por Luis Angel en el PDF exportado y compuesto de PRGD-25 (cajas de paso): «CAJA DE PASO 1.30m x 1.50m» salía «CA  DA  A», y faltaban letras en los encabezados del «CUADRO DESPIECE». En AutoCAD se ve completo. Pasaba igual en la vista previa (subfase B).
 
 - **Causa:** el estilo «ARIAL» de PRGD no tiene archivo de fuente; AutoCAD guarda la familia («Sora ExtraLight», no instalada) en el XDATA del **estilo**.
@@ -551,6 +551,23 @@ Error confirmado por Luis Angel en el PDF exportado y compuesto de PRGD-25 (caja
 - **Pendiente:**
   - Comparar con el PDF que imprimió AutoCAD del PRGD-25: no está en el equipo (solo el de PRGD-26, que no tiene estilos afectados).
   - Revisar el texto de los MULTILEADER, cuyo estilo no mira `_requests` (en PRGD salen bien).
+
+## Letras, «Ø» y MULTILEADER en la vista previa preparada (2026-11-26, sin commit)
+Prueba de Luis Angel en el Componedor con PRGD-25, ya con `7074112` y `8dbef0c`: en la vista previa de la zona de las cajas de paso faltaban letras («R FU DE / R S EN P NT» por «REFUERZO DE MUROS EN PLANTA»), salía «AcDbMLeader (ACDB_MLEADER_CLASS)» y faltaba la «Ø» de «Ø=½"». En el PDF de la misma zona, todo bien.
+
+- **Causas** (solo de la vista previa; la fuente ya era Arial y la imagen no venía de la caché):
+  - `Path.flattening` une las partes de cada letra (sub-trazados) en una sola línea. El hueco se decidía por el sentido de giro frente al del anillo mayor del texto, con un área calculada sobre coordenadas de millones (4,7 millones en X), sin precisión: letras enteras («E», «Z», «A») salían como hueco y no se pintaban, y la «Ø» (3 partes) y el «½» desaparecían o se deformaban.
+  - ezdxf dibuja un MULTILEADER desde su gráfico proxy si lo tiene. Los 386 de PRGD-25 llevan uno de relleno: ese texto en un recuadro, sin la flecha ni el texto real. El PDF no lo mostraba; sin confirmar por qué, probablemente porque la copia de trabajo no conserva el gráfico proxy.
+- **Arreglo** (aprobado por Luis Angel):
+  - `preview_index._glyph_rings`: cada parte de una letra es un anillo aparte, y es hueco la que queda dentro de un número impar de partes de la misma letra. `_area` resta el primer punto antes de calcular. Los demás rellenos y las líneas también van por partes (los rellenos, con la regla par-impar), igual en `preview.py` (vistas sin preparar y de bloques).
+  - `exporters._StrictFrontend._draw_composite`: los MULTILEADER, siempre desde sus datos (`proxy_graphic=False`), en el PDF y en la vista previa.
+  - La marca de la caché de las vistas preparadas pasa de `_it` a `_it2`.
+- **Comprobado:**
+  - `tests/test_preview_glyphs.py` (4): los textos 81CED y 81E7A con sus coordenadas y un MULTILEADER con el proxy de relleno; la tinta de la vista previa y la del PDF publicado coinciden en más del 95 % en los dos sentidos. Sin el arreglo, 3 de las 4 fallan.
+  - **El PDF no cambia:** hash del SVG de Perfil igual (`A2560C11…3FF9`); Perfil_K0010, 0 píxeles distintos; Plano_completo, 0 píxeles frente al mismo PDF hecho con el código anterior (frente a la referencia del 28-10 siguen las diferencias de antes); y el PDF de las cajas de paso de PRGD-25, 0 píxeles (`data/verificacion/partes_mleader/`).
+  - La vista de la captura, antes y después: `data/verificacion/partes_mleader/vista_antes.png` y `vista_despues.png`.
+  - Preparación de PRGD-25 en el proceso, una medición: 66 s y 3 839 textos (antes 3 278: ahora cuentan los de los MULTILEADER).
+- **Pendiente:** las vistas previas sin preparar (bloque, zona antes de `preview_ready`) siguen con su marca de caché de siempre: las ya guardadas pueden mostrar el recuadro del MULTILEADER hasta que se borre la caché.
 
 ## Otros
 - Hablar con Alan: ¿limpiar historial de Git (SVG/TXT de salidas ya commiteados)? Investigar handles duplicados del DXF.
