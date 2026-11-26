@@ -33,6 +33,7 @@ from cde_exporter.cad.font_config import (
     font_is_installed,
     is_installed_font,
     is_shx_request,
+    style_font_request,
 )
 from cde_exporter.cad.models import CadProcessingError, invalid_data_reason
 from cde_exporter.cad.reader import dxf_attr, is_unknown_entity, read_dxf
@@ -281,6 +282,9 @@ def _style_and_font(entity, document: Drawing) -> tuple[str, str, str, bool]:
             raw_name = next((str(tag.value) for tag in xdata if isinstance(tag.value, str)), "")
         except (ezdxf.DXFError, AttributeError):
             pass
+    if not raw_name:
+        # Estilo TrueType sin archivo: la familia está en el XDATA del estilo.
+        raw_name = style_font_request(style)
     configured = active_substitutions().get(raw_name.casefold()) if raw_name else None
     if configured:
         return style_name, raw_name, configured[1], False

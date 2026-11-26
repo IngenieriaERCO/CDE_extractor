@@ -18,6 +18,8 @@ from cde_exporter.cad.models import CadProcessingError
 
 _INLINE_FONT = re.compile(r"\\[fF]([^|;]+)(?:\|[^;]*)?;", re.IGNORECASE)
 _ACTIVE_SUBSTITUTIONS: dict[str, tuple[str, str, str, int]] = {}
+# Familia de la fuente por defecto de ezdxf (``fonts.FontFace()``).
+DEFAULT_FAMILY = "sans-serif"
 
 
 def active_substitutions() -> dict[str, tuple[str, str, str, int]]:
@@ -113,6 +115,21 @@ def font_is_installed(name: str) -> bool:
     return is_installed_font(name, fonts.find_best_match(family=font_stem(name)))
 
 
+def style_font_request(style) -> str:
+    """Fuente que pide un estilo de texto: su archivo (``font``) o, si está vacío, la familia
+    TrueType que AutoCAD guarda en el XDATA del **estilo** (p. ej. «Sora ExtraLight»). Vacío si
+    no pide ninguna. Sin mirar el XDATA, ezdxf no la sustituía y caía en su fuente por defecto
+    (en un equipo con AutoCAD, ``AcadEref.ttf``, de símbolos: faltaban letras)."""
+    raw = str(style.dxf.get("font", "") or "")
+    if raw:
+        return raw
+    try:
+        family = style.get_extended_font_data()[0]
+    except (ezdxf.DXFError, AttributeError, IndexError, TypeError):
+        return ""
+    return str(family or "")
+
+
 def _requests(source: str | Path | Drawing) -> Counter[str]:
     document = source if isinstance(source, Drawing) else ezdxf.readfile(source)
     result: Counter[str] = Counter()
@@ -148,7 +165,7 @@ def _requests(source: str | Path | Drawing) -> Counter[str]:
                 style_name = entity.dxf.get("style", "Standard")
 
             try:
-                raw = str(document.styles.get(style_name).dxf.get("font", "") or "")
+                raw = style_font_request(document.styles.get(style_name))
             except (ezdxf.DXFError, AttributeError):
                 raw = ""
 
@@ -233,11 +250,25 @@ def configure_fonts(
         if origin == "respaldo automático":
             print(f"Fuente sustituida: {name} → {filename} | {origin} | {count} texto(s)")
     original = fonts.find_best_match
+    # Red de seguridad: lo que no pide ninguna fuente (``FontFace()`` de ezdxf, familia
+    # «sans-serif») usa la fuente de respaldo. ezdxf tomaba la instalada que mejor puntuaba,
+    # y en un equipo con AutoCAD era ``AcadEref.ttf``, de símbolos, sin la mayoría de letras.
+    default_face = None
+    try:
+        default_path = fallback_path or _fallback_path(fallback, folder)
+        register_font_file(default_path)
+        default_face = fonts.resolve_font_face(default_path.name)
+        if not default_face.filename:
+            default_face = None
+    except CadProcessingError:
+        default_face = None
 
     def find_best_match(*, family="sans-serif", style="Regular", weight=400, width=5, italic=False):
         face = faces.get(str(family).casefold())
         if face is not None:
             return face
+        if default_face is not None and str(family).casefold() == DEFAULT_FAMILY:
+            return default_face
         return original(family=family, style=style, weight=weight, width=width, italic=italic)
 
     fonts.find_best_match = find_best_match

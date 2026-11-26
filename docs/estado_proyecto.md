@@ -504,7 +504,53 @@ Probado con el trabajador sobre PRGD (`PRGD-25-1365-CIV-PL-106_1_VA.dxf`):
 - En PRGD-26 (`PRGD-26-1377-GEN-PL-101_1_V0.dxf`) solo hay 17 textos y ninguno con escala.
 - Pruebas: `tests/test_zone_texts.py` (33). En `test_worker_zone` la versión pasa a 1.3.
 
-**Subfase B, pendiente:** el texto real en la vista previa preparada, con cajas cuando no se leería y menos de 0,5 s con PRGD.
+- Commit `99ae62c`, subido a `origin/dev`.
+
+**Subfase B, hecha (2026-11-26, sin commit)** (protocolo 1.4, `docs/protocolo_trabajador.md`, sección 4.2, «Texto»; `preview_index.py`):
+- Decisiones de Luis Angel:
+  - la misma fuente que en el PDF;
+  - letras desde 6 píxeles, raya de 1 a 6 y punto por debajo;
+  - siempre `Pruebas/fonts/sustituciones_arial.json`, sin opción en `load`;
+  - hasta +30 MB y +15 s de preparación.
+- Al preparar, cada texto (TEXT, MTEXT, ATTRIB, MULTILEADER y el texto de las cotas) se graba con sus letras, como en el PDF. Se envuelve `pipeline.draw_text` y lo que deja es un solo trazo del índice, con su altura de mayúscula y su línea media.
+- Los huecos de las letras se guardan marcados (anillos de mayor a menor, con la orientación contraria a la del mayor). Así cada texto se pinta en una sola máscara, sin la regla par-impar.
+- La respuesta de `preview` de zona trae `texts` (`drawn`, `as_lines`, `as_dots`), y `preview_ready` trae `texts`. Las vistas preparadas se guardan en la caché con la marca `_it`, para no reutilizar las de la 1.3, que llevan cajas.
+- **Arreglo de velocidad:** la vista de todo el Model Space tardaba de media 0,66 s (0,79, 0,59 y 0,60), más que el límite de 0,6 s. El tiempo se iba en agrupar por color los 167 000 puntos de lejos (`np.unique`). Ahora se escriben de una vez en un arreglo de píxeles: pintar esa vista pasa de 0,23–0,35 s a 0,05–0,07 s, y por el trabajador tarda de media 0,35 s (0,48, 0,27 y 0,30).
+- Sin cambiar, y documentado: la vista previa de un bloque, las zonas sin preparar y `preview-modelspace` siguen con la caja del texto.
+
+Medido con PRGD (el de `Downloads`, 105 MB, el mismo que en la 1.2; `data/verificacion/velocidad_texto/`):
+
+| | 1.2 | 1.4 |
+|---|---|---|
+| Índice | 17,6 MB | 33,4 MB (+15,8 MB) |
+| Preparación | 49,9 s | 52,9–64,0 s, en tres mediciones (de +3 a +14 s) |
+| Memoria del proceso | 1 262 MB | 1 338–1 341 MB |
+| Todo el Model Space | 0,46 s | 0,35 s de media |
+| 3,7 km / 915 m / 200 m / 50 m / 10 m | 0,41 / 0,43 / 0,10 / 0,13 / 0,06 s | 0,18 / 0,27 / 0,14 / 0,16 / 0,07 s |
+| Junto a «ESCALA 1:12.5»: 100 m / 30 m / 8 m | — | 0,12 / 0,14 / 0,16 s |
+
+- Pruebas: `tests/test_preview_text.py` (4), una de ellas compara las letras de la vista previa con los trazos del PDF publicado (a menos de 1,5 píxeles). En `test_worker_zone` y `test_zone_texts`, la versión pasa a 1.4.
+- Pendiente: el texto real también fuera de la vista preparada, si hace falta; y `font_substitutions` en `load`, si hace falta.
+
+## Letras que faltaban en textos de estilos TrueType sin archivo (2026-11-26, sin commit)
+Error confirmado por Luis Angel en el PDF exportado y compuesto de PRGD-25 (cajas de paso): «CAJA DE PASO 1.30m x 1.50m» salía «CA  DA  A», y faltaban letras en los encabezados del «CUADRO DESPIECE». En AutoCAD se ve completo. Pasaba igual en la vista previa (subfase B).
+
+- **Causa:** el estilo «ARIAL» de PRGD no tiene archivo de fuente; AutoCAD guarda la familia («Sora ExtraLight», no instalada) en el XDATA del **estilo**.
+  - Nuestras sustituciones (`font_config._requests`) y el informe (`fidelity._style_and_font`) solo miraban el XDATA de la entidad, así que no se sustituía y el TXT decía «Fuentes sustituidas: no hay».
+  - ezdxf caía en su fuente por defecto («sans-serif»), que en un equipo con AutoCAD es `AcadEref.ttf` (`C:\Windows\Fonts`, de símbolos): solo tiene C, A, D, N, O, B, x y pocas más.
+  - No es la conversión a trazos ni el relleno.
+- **Arreglo** (aprobado por Luis Angel):
+  - `font_config.style_font_request` lee la familia del XDATA del estilo; si no está instalada, se sustituye por Arial (respaldo automático, `FONT_SUBSTITUTED`).
+  - Red de seguridad: con las fuentes configuradas, la familia «sans-serif» va a la de respaldo, nunca a `AcadEref.ttf`.
+  - La vista previa preparada (subfase B) instala las mismas fuentes, así que se corrige igual.
+- **Comprobado:**
+  - `tests/test_style_font_family.py` (4 pruebas, más 4 con `CDE_REFERENCE_TESTS=1`): la familia del estilo; la sustitución con su aviso; una familia inventada dibuja los mismos contornos que Arial; sin fuente, la de respaldo. Sin el arreglo, 3 de las 4 fallan («12 anillos frente a 32»).
+  - Comprobación por texto: cada texto que se dibuja tiene todas sus letras latinas en la fuente con la que se dibuja, y ninguno usa `AcadEref.ttf`. Pasa en Perfil, Plano_completo, VIA_2MA y PRGD-25 (unos 15 minutos).
+  - Antes y después de la zona de las cajas de paso de PRGD-25 a 1:50 (`data/verificacion/fuentes_estilo/prgd/`): títulos, encabezados de la tabla y nombres de vista completos. «SECCIOÓN A-A» viene así en el DXF (O y Ó seguidas).
+  - **Paquetes de referencia:** Perfil_K0010, 0 píxeles distintos; Plano_completo, 9 de 11,8 millones, un matiz de borde (`data/verificacion/fuentes_estilo/antes_despues_*.png`). Los textos «Epifanía», «SimHei» y «Raspoutine Medium» están fuera de esos bloques, o llevan su fuente en el texto (`Verdana`). **El hash de Perfil no cambia** (`A2560C11…3FF9`): no hace falta regenerar los paquetes de referencia.
+- **Pendiente:**
+  - Comparar con el PDF que imprimió AutoCAD del PRGD-25: no está en el equipo (solo el de PRGD-26, que no tiene estilos afectados).
+  - Revisar el texto de los MULTILEADER, cuyo estilo no mira `_requests` (en PRGD salen bien).
 
 ## Otros
 - Hablar con Alan: ¿limpiar historial de Git (SVG/TXT de salidas ya commiteados)? Investigar handles duplicados del DXF.
