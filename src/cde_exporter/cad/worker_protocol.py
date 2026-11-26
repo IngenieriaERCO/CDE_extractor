@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-PROTOCOL_VERSION = "1.3"
+PROTOCOL_VERSION = "1.4"
 
 # «texts» desde la 1.3: textos de una zona y escala propuesta (zone_texts, scale_text).
 COMMANDS = frozenset(

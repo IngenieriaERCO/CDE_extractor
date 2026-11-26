@@ -225,6 +225,6 @@ def test_bad_texts_requests_are_bad_request(running, tmp_path: Path, data: dict)
     assert reply["type"] == "error" and reply["error"]["code"] == protocol.BAD_REQUEST, reply
 
 
-def test_texts_is_a_command_of_protocol_1_3() -> None:
-    assert protocol.PROTOCOL_VERSION == "1.3"
+def test_texts_is_a_command_since_protocol_1_3() -> None:
+    assert protocol.PROTOCOL_VERSION == "1.4"
     assert "texts" in protocol.COMMANDS and "texts" not in protocol.IMMEDIATE_COMMANDS

@@ -1,4 +1,4 @@
-# Protocolo del trabajador (`cde-exporter worker`), versión 1.3
+# Protocolo del trabajador (`cde-exporter worker`), versión 1.4
 
 Este documento es para quien programe la integración del **Componedor** con el exportador. Es el contrato entre los dos programas: el Componedor lanza el trabajador como **comando externo** (no importa código del exportador), le envía pedidos y lee respuestas, siempre en JSON por líneas.
 
@@ -12,6 +12,8 @@ Estado: **contrato aprobado por Luis Angel (2026-11-17)**, con las observaciones
 - `prepared` y `lod` en la respuesta de `preview` de zona.
 
 **Versión 1.3 (2026-11-25, pendiente de visto bueno):** orden nueva **`texts`** (sección 4.3): los textos que se ven en una zona, con su posición y su capa, y la **escala que proponen** («ESC 1:25», «ESCALA: 1:25», «ESC-1:10»…). Solo añade: un Componedor 1.2 funciona igual. Para saber si puede usar `texts`, el Componedor mira `protocol_version` en `ready` (1.3 o mayor).
+
+**Versión 1.4 (2026-11-26, pendiente de visto bueno):** **el texto real en la vista previa preparada** (sección 4.2, «Texto»). Las letras salen con la misma fuente, altura y giro que en el PDF, en vez de su caja. Solo añade: `texts` en la respuesta de `preview` de zona y en `preview_ready`. Un Componedor 1.3 funciona igual y ve las letras sin cambiar nada.
 
 Decisiones ya tomadas (Luis Angel, 2026-11-17):
 - Un proceso de trabajo persistente que **lee el DXF una sola vez** y atiende tres órdenes: cargar (`load`), vista previa (`preview`) y exportar (`export`), más cancelar (`cancel`).
@@ -92,7 +94,7 @@ Cada pedido termina con **exactamente un** `result` o un `error`. Los `event` no
 
 ```json
 {"protocol": "1.0", "id": null, "type": "ready",
- "data": {"protocol_version": "1.3", "exporter_version": "0.1.0", "ezdxf": "1.4.4", "pymupdf": "1.28.2",
+ "data": {"protocol_version": "1.4", "exporter_version": "0.1.0", "ezdxf": "1.4.4", "pymupdf": "1.28.2",
           "manifest_schema_version": "1.5", "work_dir": "C:\\ruta\\carpeta_de_trabajo"}}
 ```
 
@@ -351,15 +353,15 @@ Medido con PRGD (`PRGD-25-1365-CIV-PL-106_1_VA.dxf`, 105 MB): una vista lejana t
 ```json
 {"protocol": "1.2", "id": null, "type": "event", "event": "preview_progress",
  "data": {"session": "s-1", "stage": "draw", "percent": 61.4, "message": "Preparando la vista previa: 9 120 de 25 837"}}
-{"protocol": "1.2", "id": null, "type": "event", "event": "preview_ready",
- "data": {"session": "s-1", "items": 166956, "points": 559348, "memory_mb": 17.6, "seconds": 49.9,
+{"protocol": "1.4", "id": null, "type": "event", "event": "preview_ready",
+ "data": {"session": "s-1", "items": 167073, "texts": 3278, "points": 1516939, "memory_mb": 33.4, "seconds": 52.9,
           "plot_style": {"name": "CTB_ERCO_derivada_PRGD.ctb", "sha256": "b4a9…"}, "print_transparency": false}}
 {"protocol": "1.2", "id": null, "type": "event", "event": "preview_failed",
  "data": {"session": "s-1", "message": "…"}}
 ```
 
 - `preview_progress`: como mucho dos por segundo. `stage` es `boxes`, `draw` o `index`; `percent` va de 0 a 100 y solo sube.
-- `preview_ready`: «vista previa lista». `items` y `points` son los trazos indexados, `memory_mb` lo que ocupa el índice, `seconds` lo que tardó, y lleva la configuración preparada.
+- `preview_ready`: «vista previa lista». `items` y `points` son los trazos indexados (`texts`, desde la 1.4, cuántos de ellos son textos), `memory_mb` lo que ocupa el índice, `seconds` lo que tardó, y lleva la configuración preparada.
 - `preview_failed`: la preparación falló. Las vistas se siguen dibujando como en la 1.1; el `message` es para el registro.
 - Con otro `load` o con `close`, la preparación en curso se detiene sin aviso. Los eventos llevan `session`: el Componedor ignora los de una sesión que ya no es la suya.
 
@@ -370,24 +372,37 @@ Medido con PRGD (`PRGD-25-1365-CIV-PL-106_1_VA.dxf`, 105 MB): una vista lejana t
 - **Menos detalle de lejos** (decisión de Luis Angel): un trazo que en esa vista mide menos de un píxel se pinta como un punto de su color, debajo de lo demás. `lod` lo cuenta: `{"strokes": trazos en la vista, "as_dots": de ellos, pintados como punto}`.
 - Con la preparación todavía en marcha, con otra configuración o con `include_hidden_layers`, la vista se dibuja como en la 1.1: `"prepared": false`, `"lod": null`. Si la configuración es otra, además se empieza a preparar la nueva (la última pedida).
 - En una vista preparada, `omitted` cuenta lo no dibujado en todo el Model Space, no solo en la vista.
-- La caché de PNG distingue las dos clases de imagen (el nombre de la preparada termina en `_i`).
+- La caché de PNG distingue las dos clases de imagen. El nombre de la preparada termina en `_it` desde la 1.4; en la 1.2 y la 1.3 terminaba en `_i`, y esas imágenes, que llevan el texto como cajas, ya no se reutilizan.
+
+**Texto (desde la 1.4; decisiones de Luis Angel, 2026-11-26):**
+- Al preparar, cada texto se graba como en el PDF: sus letras como trazados, con la misma fuente, altura y giro. Pasa con los TEXT, MTEXT, ATTRIB, MULTILEADER y el texto de las cotas.
+- La sustitución de fuentes es siempre `Pruebas/fonts/sustituciones_arial.json`, la de la regresión de Perfil. No hay opción en `load`; queda para más adelante si hace falta.
+- Cada texto es un solo trazo del índice, con su altura de mayúscula. Lo que se pinta depende de esa altura en píxeles:
+  - **6 píxeles o más:** las letras, con sus huecos (la «O» se ve hueca);
+  - **de 1 a 6 píxeles:** una raya de su color a lo largo del texto, a media altura;
+  - **menos de 1 píxel:** un punto, como el resto del detalle diminuto.
+- `texts` en la respuesta cuenta los textos de la vista: `{"drawn": con letras, "as_lines": como raya, "as_dots": como punto}`. Es `null` en una vista sin preparar.
+- **Sin preparar, el texto sigue saliendo como su caja (rectángulo).** Es lo que pasa en la vista previa de un bloque (`preview` con `ref` o `handle`), en una zona pedida antes de `preview_ready`, con otra configuración o con `include_hidden_layers`, y en la orden `preview-modelspace` de la línea de órdenes.
+- Comprobado con una prueba: la caja de la tinta del texto en la vista previa y la de sus trazos en el PDF publicado coinciden a menos de 1,5 píxeles.
 
 **Recomendación para el Componedor:**
 1. Envíe en `load` la CTB y la transparencia que usará.
 2. Muestre el avance de `preview_progress` («Preparando la vista previa: 61 %»).
 3. Hasta `preview_ready`, pida solo vistas cercanas, que se dibujan rápido igualmente; las lejanas tardarían lo de antes.
 
-**Medido con PRGD** (trabajador como proceso, CTB derivada, sin transparencia, 1 500 px; `data/verificacion/velocidad/medicion_trabajador.json`):
+**Medido con PRGD** (trabajador como proceso, CTB derivada, sin transparencia, 1 500 px; 1.2 en `data/verificacion/velocidad/`, 1.4 en `data/verificacion/velocidad_texto/`):
 
-| | Antes (1.1) | Ahora (1.2, preparada) |
-|---|---|---|
-| `load` | 58 s | 58 s (igual) |
-| Preparación en segundo plano | — | 50 s tras `load` hasta `preview_ready` |
-| Todo el Model Space / 3,7 km / 915 m (G1) | 44–48 s (la primera, más 17–19 s de cajas) | **0,41–0,46 s** |
-| 200 m / 50 m / 10 m | 1,9 / 0,95 / 0,19 s | **0,10 / 0,13 / 0,06 s** |
-| Vista cercana pedida mientras se prepara | — | 3,6–16 s (si llega mientras se calculan las cajas, espera a que terminen; las cajas se calculan una sola vez entre los dos) |
-| `status` mientras se prepara | — | 0,09 s |
-| Memoria | 1 048 MB tras `load` | 1 262 MB al terminar (+214 MB); el índice, 17,6 MB |
+| | Antes (1.1) | 1.2, preparada | 1.4, con el texto real |
+|---|---|---|---|
+| `load` | 58 s | 58 s (igual) | 50–65 s (igual; varía entre mediciones) |
+| Preparación en segundo plano | — | 50 s tras `load` hasta `preview_ready` | 53–64 s (de +3 a +14 s) |
+| Todo el Model Space | 44–48 s (la primera, más 17–19 s de cajas) | 0,46 s | **0,27–0,48 s** (media de 3: 0,35 s) |
+| 3,7 km / 915 m (G1) | 44–48 s | 0,41 / 0,43 s | **0,18 / 0,27 s** |
+| 200 m / 50 m / 10 m | 1,9 / 0,95 / 0,19 s | 0,10 / 0,13 / 0,06 s | **0,14 / 0,16 / 0,07 s** |
+| Junto a un texto con escala: 100 m / 30 m / 8 m | — | — | **0,12 / 0,14 / 0,16 s** (a 30 m, 13 textos con letras y 302 como raya; a 8 m, 18 con letras) |
+| Vista cercana pedida mientras se prepara | — | 3,6–16 s (si llega mientras se calculan las cajas, espera a que terminen; las cajas se calculan una sola vez entre los dos) | 4–18 s (igual) |
+| `status` mientras se prepara | — | 0,09 s | 0,09 s |
+| Memoria | 1 048 MB tras `load` | 1 262 MB al terminar (+214 MB); el índice, 17,6 MB | 1 338–1 341 MB; el índice, 33,4 MB (+15,8 MB: 3 278 textos, 1,52 millones de puntos) |
 
 ### 4.3 Textos de una zona y escala propuesta (`texts`, desde la 1.3)
 
@@ -747,6 +762,11 @@ Además de las pruebas de cada orden, estas comprueban el contrato:
 - `DXF_CHANGED` al cambiar la fecha o el tamaño del DXF entre `load` y `export`.
 - Nombres de paquete: acentos, eñes, caracteres raros, más de 60 caracteres (sufijo de hash) y ruta de más de 240 caracteres.
 - Temporales `.cde-tmp-` limpiados al arrancar y al empezar un `export`.
+- Texto real en la vista previa preparada (1.4, `tests/test_preview_text.py`):
+  - un solo trazo por texto, con su altura (también con la escala de un INSERT) y su línea media, también girada;
+  - letras desde 6 píxeles (la «O», hueca), raya de 1 a 6 y punto por debajo;
+  - la fuente sustituida, como en el PDF (`romans.shx` sale como Arial rellena);
+  - y las letras de la vista previa donde las dibuja el PDF publicado.
 - Vista previa preparada (1.2, `tests/test_preview_index.py`):
   - las capas de cada trazo, también dentro de los bloques;
   - la misma matriz que sin preparar, y puntos de lejos;
@@ -814,3 +834,12 @@ Versión 1.3, textos de una zona (decisiones de Luis Angel, 2026-11-25):
 1. Para la escala cuentan TEXT, MTEXT, atributos y textos de directrices; no las cotas.
 2. Una sola escala: el Componedor la rellena y el usuario la confirma o la cambia, viendo el texto de donde salió. Varias: se muestran todas para elegir. Ninguna: nada.
 3. Por subfases: primero `texts` (A); después, el texto real en la vista previa (B).
+
+Versión 1.4, texto real en la vista previa (decisiones de Luis Angel, 2026-11-26):
+
+1. La misma fuente que en el PDF.
+2. Letras desde 6 píxeles de altura, raya de 1 a 6 y punto por debajo.
+3. Siempre la sustitución `Pruebas/fonts/sustituciones_arial.json`, sin opción en `load` por ahora.
+4. Se aceptan hasta +30 MB y +15 s de preparación. Se midieron +15,8 MB y de +3 a +14 s, según la medición.
+5. La vista previa de un bloque, las zonas sin preparar y `preview-modelspace` siguen con la caja del texto.
+6. La vista de todo el Model Space de PRGD tardaba de media 0,66 s, más que el límite de 0,6 s. Por eso los puntos de lejos se escriben ahora de una vez en los píxeles, sin agruparlos por color: tarda de media 0,35 s.

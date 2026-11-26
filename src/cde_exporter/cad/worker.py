@@ -14,6 +14,7 @@ caché) y 3 (``export``, en ``worker_export``). Protocolo 1.1: zonas del Model S
 plano tras ``load`` (``preview_index``), con eventos de avance y de «lista»; la preparación va
 en un hilo aparte que cede el turno a cada pedido (``Gate``: nunca dibujan los dos a la vez).
 Protocolo 1.3: ``texts``, los textos de una zona y la escala que proponen (``worker_zone``).
+Protocolo 1.4: el texto real (las letras) en la vista previa preparada (``preview_index``).
 """
 
 from __future__ import annotations
@@ -654,7 +655,7 @@ class Worker:
             elif preparation.state in ("ready", "running", "failed", "stopped"):
                 self.start_preparation(session, plot_style, print_transparency)
         if index is not None:
-            tag += "_i"
+            tag += "_it"  # preparada, con el texto real (1.4); las «_i» de la 1.3 no valen
         png, meta = self.previews.paths(
             session.loaded.fingerprint, preview_key(zone), long_side, tag
         )

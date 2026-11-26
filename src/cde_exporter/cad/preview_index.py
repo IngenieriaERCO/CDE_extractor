@@ -22,19 +22,32 @@ dibuja **una sola vez** por sesión, en segundo plano, y cada vista solo filtra 
 La preparación es para una configuración (tabla CTB y transparencia al imprimir) y sin capas
 ocultas del CAD; un pedido con otra configuración o con ``include_hidden_layers`` se dibuja
 como antes (``worker_zone.draw_zone_preview``).
+
+**Texto (protocolo 1.4):** en la preparación, los textos (TEXT, MTEXT, ATTRIB, MULTILEADER y el
+texto de las cotas: todo lo que pasa por ``pipeline.draw_text``) se graban como en el PDF, con
+sus letras como trazados, con la misma fuente (sustituciones de ``TEXT_SUBSTITUTIONS``), altura
+y giro. Cada texto es un solo trazo del índice (``TEXT_FILL`` o, con fuentes de trazo,
+``TEXT_LINE``) con su altura de mayúscula y su línea media. Al pintar, según la altura en
+píxeles (decisión de Luis Angel): desde ``TEXT_LEGIBLE_PX`` (6), las letras; de 1 a 6, una raya
+de su color a lo largo del texto; por debajo de 1, un punto. Fuera de la vista preparada (vista
+previa de un bloque, zonas sin preparar y ``preview-modelspace``), el texto sigue saliendo como
+su caja.
 """
 
 from __future__ import annotations
 
 import contextlib
+import io
 import math
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 from ezdxf.addons.drawing import RenderContext
+from ezdxf.addons.drawing.config import TextPolicy
 from ezdxf.addons.drawing.properties import LayoutProperties
 from ezdxf.addons.drawing.recorder import (
     FilledPathsRecord,
@@ -46,6 +59,7 @@ from ezdxf.addons.drawing.recorder import (
 from PIL import Image, ImageChops, ImageDraw
 
 from cde_exporter.cad.draw_order import drawing_sequence
+from cde_exporter.cad.font_config import configure_fonts
 from cde_exporter.cad.preview import (
     MARGIN_PX,
     PreviewImage,
@@ -57,9 +71,16 @@ from cde_exporter.cad.reader import dxf_attr
 from cde_exporter.cad.run_hooks import DrawingCancelled
 from cde_exporter.cad.zone_preview import boxes_for
 
-LINE, FILL, PAIRS = 0, 1, 2
+LINE, FILL, PAIRS, TEXT_FILL, TEXT_LINE = 0, 1, 2, 3, 4
+TEXT_KINDS = (TEXT_FILL, TEXT_LINE)
 _FLATTEN_RELATIVE = 0.002  # tolerancia al aplanar: 0,2 % del tamaño del trazo
+_TEXT_FLATTEN = 0.03  # letras: 3 % de la altura de mayúscula
 LOD_PIXELS = 1.0  # menos de un píxel en la vista: se pinta como un punto
+TEXT_LEGIBLE_PX = 6.0  # altura de mayúscula desde la que se pintan las letras
+# Sustitución de fuentes de la vista previa preparada (decisión de Luis Angel: siempre esta).
+TEXT_SUBSTITUTIONS = (
+    Path(__file__).resolve().parents[3] / "Pruebas" / "fonts" / "sustituciones_arial.json"
+)
 
 # (etapa, fracción 0–1, mensaje)
 Progress = Callable[[str, float, str], None]
@@ -84,6 +105,31 @@ class _TaggingFrontend(_PreviewFrontend):
         self.chains: dict[tuple[str, ...], int] = {}
         self.checkpoint = checkpoint
         self.flush = flush
+        # Textos de la grabación en curso: primer registro de cada uno → (altura de mayúscula,
+        # origen, dirección, registros que ocupa), en coordenadas CAD.
+        self.texts: dict[int, tuple[float, tuple[float, float], tuple[float, float], int]] = {}
+        self.pipeline.draw_text = self._mark_text(self.pipeline.draw_text)
+
+    def _mark_text(self, draw_text):
+        """Envuelve ``pipeline.draw_text``: los registros que deja un texto son un solo trazo."""
+
+        def mark(text, transform, properties, cap_height, dxftype="TEXT") -> None:
+            start = len(self.records)
+            draw_text(text, transform, properties, cap_height, dxftype)
+            count = len(self.records) - start
+            if count <= 0:
+                return
+            origin = transform.transform((0, 0, 0))
+            along = transform.transform((1, 0, 0)) - origin
+            up = transform.transform((0, 1, 0)) - origin
+            self.texts[start] = (
+                float(cap_height) * up.magnitude,
+                (origin.x, origin.y),
+                (along.x, along.y),
+                count,
+            )
+
+        return mark
 
     def draw_entity(self, entity, properties) -> None:
         self.checkpoint()
@@ -118,6 +164,7 @@ class PreviewIndex:
 
     points: np.ndarray  # (P, 2) coordenadas CAD
     span_start: np.ndarray  # (S + 1,) primer punto de cada tramo
+    span_hole: np.ndarray  # (S,) 1 si el tramo es un hueco de una letra (se pinta vacío)
     item_span: np.ndarray  # (K + 1,) primer tramo de cada trazo
     kind: np.ndarray  # (K,) LINE, FILL o PAIRS
     color: np.ndarray  # (K,) índice en ``colors``
@@ -126,6 +173,9 @@ class PreviewIndex:
     colors: list[tuple[int, int, int, int]]
     chains: list[tuple[str, ...]]
     extent: tuple[float, float, float, float] | None
+    text_slot: np.ndarray  # (K,) puesto en ``text_height``/``text_line``, o −1 si no es texto
+    text_height: np.ndarray  # (T,) altura de mayúscula, en unidades CAD
+    text_line: np.ndarray  # (T, 4) línea media del texto: x0, y0, x1, y1
     plot_style: object = None
     print_transparency: bool = True
     omitted: dict = field(default_factory=dict)
@@ -137,12 +187,29 @@ class PreviewIndex:
 
     @property
     def nbytes(self) -> int:
-        arrays = (self.points, self.span_start, self.item_span, self.kind, self.color, self.chain)
-        return int(sum(array.nbytes for array in arrays) + self.box.nbytes)
+        arrays = (
+            self.points,
+            self.span_start,
+            self.span_hole,
+            self.item_span,
+            self.kind,
+            self.color,
+            self.chain,
+            self.box,
+            self.text_slot,
+            self.text_height,
+            self.text_line,
+        )
+        return int(sum(array.nbytes for array in arrays))
+
+    @property
+    def texts(self) -> int:
+        return len(self.text_height)
 
     def describe(self) -> dict:
         return {
             "items": self.items,
+            "texts": self.texts,
             "points": int(len(self.points)),
             "memory_mb": round(self.nbytes / 2**20, 1),
             "seconds": round(self.seconds, 1),
@@ -158,21 +225,31 @@ class _Builder:
         self.points: list[np.ndarray] = []
         self.count = 0
         self.span_start = [0]
+        self.span_hole: list[int] = []
         self.item_span = [0]
         self.kind: list[int] = []
         self.color: list[int] = []
         self.chain: list[int] = []
         self.box: list[tuple[float, float, float, float]] = []
         self.colors: dict[tuple[int, int, int, int], int] = {}
+        self.text_slot: list[int] = []
+        self.text_height: list[float] = []
+        self.text_line: list[tuple[float, float, float, float]] = []
 
-    def add(self, kind: int, rgba, chain: int, polylines: list[np.ndarray]) -> None:
-        polylines = [line for line in polylines if len(line)]
-        if not polylines:
+    def add(
+        self, kind: int, rgba, chain: int, polylines: list[np.ndarray], holes=None, text=None
+    ) -> None:
+        """``holes``: por tramo, si es un hueco; ``text``: (altura, línea media) de un texto."""
+        keep = [number for number, line in enumerate(polylines) if len(line)]
+        if not keep:
             return
-        for line in polylines:
+        for number in keep:
+            line = polylines[number]
             self.points.append(line)
             self.count += len(line)
             self.span_start.append(self.count)
+            self.span_hole.append(0 if holes is None else int(holes[number]))
+        polylines = [polylines[number] for number in keep]
         self.item_span.append(len(self.span_start) - 1)
         joined = np.concatenate(polylines) if len(polylines) > 1 else polylines[0]
         mins, maxs = joined.min(axis=0), joined.max(axis=0)
@@ -180,6 +257,12 @@ class _Builder:
         self.kind.append(kind)
         self.color.append(self.colors.setdefault(rgba, len(self.colors)))
         self.chain.append(chain)
+        if text is None:
+            self.text_slot.append(-1)
+        else:
+            self.text_slot.append(len(self.text_height))
+            self.text_height.append(text[0])
+            self.text_line.append(text[1])
 
     def finish(self, chains: dict, plot_style, print_transparency, omitted) -> PreviewIndex:
         box = np.array(self.box, dtype=np.float64).reshape(-1, 4)
@@ -195,6 +278,7 @@ class _Builder:
         return PreviewIndex(
             points=np.concatenate(self.points) if self.points else np.zeros((0, 2)),
             span_start=np.array(self.span_start, dtype=np.int64),
+            span_hole=np.array(self.span_hole, dtype=np.uint8),
             item_span=np.array(self.item_span, dtype=np.int64),
             kind=np.array(self.kind, dtype=np.uint8),
             color=np.array(self.color, dtype=np.uint32),
@@ -203,6 +287,9 @@ class _Builder:
             colors=[rgba for rgba, _ in sorted(self.colors.items(), key=lambda kv: kv[1])],
             chains=ordered_chains,
             extent=extent,
+            text_slot=np.array(self.text_slot, dtype=np.int32),
+            text_height=np.array(self.text_height, dtype=np.float64),
+            text_line=np.array(self.text_line, dtype=np.float64).reshape(-1, 4),
             plot_style=plot_style,
             print_transparency=print_transparency,
             omitted=omitted,
@@ -234,6 +321,56 @@ def _add_record(builder: _Builder, record, rgba, chain: int) -> None:
         vertices = _xy(record.lines.vertices())
         pairs = [vertices[i : i + 2] for i in range(0, len(vertices) - 1, 2)]
         builder.add(PAIRS, rgba, chain, pairs)
+
+
+def _area(ring: np.ndarray) -> float:
+    x, y = ring[:, 0], ring[:, 1]
+    return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+
+
+def _add_text(builder: _Builder, records: list, rgba, chain: int, info) -> None:
+    """Un texto (los registros que dejó ``draw_text``) como un solo trazo del índice.
+
+    Las letras rellenas (TrueType) van de mayor a menor anillo, con los huecos marcados: el
+    hueco tiene la orientación contraria a la del anillo mayor. Así se pintan sin la regla
+    par-impar (rápido): cada anillo, lleno o vacío, encima del anterior."""
+    height, origin, along, _count = info
+    tolerance = max(_TEXT_FLATTEN * height, 1e-9)
+    filled, strokes = [], []
+    for record in records:
+        if isinstance(record, FilledPathsRecord):
+            filled.extend(_xy(path.flattening(tolerance)) for path in record.paths)
+        elif isinstance(record, PathRecord):
+            strokes.append(_xy(record.path.flattening(tolerance)))
+    filled = [ring for ring in filled if len(ring) > 2]
+    rings = filled or [line for line in strokes if len(line)]
+    if not rings:
+        for record in records:  # sin letras: lo que haya, como siempre
+            _add_record(builder, record, rgba, chain)
+        return
+    # Línea media: a lo largo del texto, a media altura de lo dibujado.
+    points = np.concatenate(rings)
+    o = np.array(origin, dtype=np.float64)
+    u = np.array(along, dtype=np.float64)
+    norm = float(np.hypot(u[0], u[1]))
+    u = u / norm if norm > 0 else np.array([1.0, 0.0])
+    v = np.array([-u[1], u[0]])
+    s = (points - o) @ u
+    t = (points - o) @ v
+    middle = (float(t.min()) + float(t.max())) / 2
+    start = o + u * float(s.min()) + v * middle
+    end = o + u * float(s.max()) + v * middle
+    line = (float(start[0]), float(start[1]), float(end[0]), float(end[1]))
+    if filled:
+        areas = [_area(ring) for ring in rings]
+        order = sorted(range(len(rings)), key=lambda number: -abs(areas[number]))
+        outer = math.copysign(1.0, areas[order[0]])
+        holes = [math.copysign(1.0, areas[number]) != outer for number in order]
+        builder.add(
+            TEXT_FILL, rgba, chain, [rings[number] for number in order], holes, (height, line)
+        )
+    else:
+        builder.add(TEXT_LINE, rgba, chain, rings, None, (height, line))
 
 
 class PreparationStopped(DrawingCancelled):
@@ -373,6 +510,17 @@ class Preparation:
     # -- el trabajo
 
     def build(self) -> PreviewIndex:
+        # Las fuentes, como en el PDF: se instalan antes del RenderContext (que resuelve las de
+        # los estilos) y se quitan al terminar.
+        substitutions = str(TEXT_SUBSTITUTIONS) if TEXT_SUBSTITUTIONS.is_file() else None
+        with contextlib.redirect_stdout(io.StringIO()):
+            restore_fonts = configure_fonts(substitutions, None, self.document)
+        try:
+            return self._build()
+        finally:
+            restore_fonts()
+
+    def _build(self) -> PreviewIndex:
         started = time.perf_counter()
         document = self.document
         target = self.boxes_target
@@ -384,16 +532,33 @@ class Preparation:
         records = backend.records
         builder = _Builder()
 
+        def rgba_of(record):
+            rgba = colors.get(record.property_hash)
+            if rgba is None:
+                rgba = colors[record.property_hash] = _rgba(
+                    backend.properties[record.property_hash].color
+                )
+            return rgba
+
         def flush() -> None:
-            for record, tag in zip(records, frontend.tags, strict=False):
-                rgba = colors.get(record.property_hash)
-                if rgba is None:
-                    rgba = colors[record.property_hash] = _rgba(
-                        backend.properties[record.property_hash].color
-                    )
-                _add_record(builder, record, rgba, tag if tag is not None else 0)
+            tags = frontend.tags
+            texts = frontend.texts
+            position = 0
+            while position < len(records):
+                record = records[position]
+                tag = tags[position] if position < len(tags) else None
+                chain = tag if tag is not None else 0
+                info = texts.get(position)
+                if info is not None:
+                    group = records[position : position + info[3]]
+                    _add_text(builder, group, rgba_of(record), chain, info)
+                    position += info[3]
+                    continue
+                _add_record(builder, record, rgba_of(record), chain)
+                position += 1
             records.clear()
-            frontend.tags.clear()
+            tags.clear()
+            texts.clear()
 
         colors: dict[int, tuple[int, int, int, int]] = {}
         ctx = RenderContext(document)
@@ -402,7 +567,7 @@ class Preparation:
         frontend = _TaggingFrontend(
             ctx,
             backend,
-            config=_configuration(),
+            config=_configuration().with_changes(text_policy=TextPolicy.FILLING),
             records=records,
             checkpoint=self._checkpoint,
             flush=flush,
@@ -468,7 +633,7 @@ def paint_index(
     f = size[1] - (size[1] - height * scale) / 2 + ymin * scale
     cad_to_px = [scale, 0.0, 0.0, -scale, e, f]
     image = Image.new("RGBA", size, (0, 0, 0, 0))
-    stats = {"items": 0, "dots": 0}
+    stats = {"items": 0, "dots": 0, "texts": {"drawn": 0, "as_lines": 0, "as_dots": 0}}
     if index.items == 0:
         return PreviewImage(image, ((xmin, ymin), (xmax, ymax)), _round(cad_to_px)), stats
     # Una caja de un píxel de holgura (las líneas tienen grosor de un píxel).
@@ -485,27 +650,51 @@ def paint_index(
     chosen = np.nonzero(mask)[0]
     sizes = np.maximum(box[chosen, 2] - box[chosen, 0], box[chosen, 3] - box[chosen, 1]) * scale
     tiny = sizes < LOD_PIXELS
-    draw = ImageDraw.Draw(image)
+    # Textos: según su altura de mayúscula en píxeles, letras, raya o punto.
+    slots = index.text_slot[chosen]
+    is_text = slots >= 0
+    text_px = np.zeros(len(chosen))
+    text_px[is_text] = index.text_height[slots[is_text]] * scale
+    tiny[is_text] = text_px[is_text] < LOD_PIXELS
+    as_line = is_text & ~tiny & (text_px < TEXT_LEGIBLE_PX)
     factor = np.array([scale, -scale])
     shift = np.array([e - 0.5, f - 0.5])
-    # 1. Lo diminuto, como puntos (por color), debajo de lo demás.
+    # 1. Lo diminuto, como puntos, debajo de lo demás: escritos de una vez en los píxeles
+    #    (como ``draw.point``, sin mezclar; si varios caen en el mismo píxel, queda uno).
     dots = chosen[tiny]
     if len(dots):
         centers = np.column_stack(
             ((box[dots, 0] + box[dots, 2]) / 2, (box[dots, 1] + box[dots, 3]) / 2)
         )
         pixels = np.floor(centers * factor + shift + 0.5).astype(np.int64)
-        colors = index.color[dots]
-        for color in np.unique(colors):
-            same = pixels[colors == color]
-            draw.point([tuple(p) for p in np.unique(same, axis=0)], fill=index.colors[color])
+        inside = (
+            (pixels[:, 0] >= 0)
+            & (pixels[:, 0] < size[0])
+            & (pixels[:, 1] >= 0)
+            & (pixels[:, 1] < size[1])
+        )
+        canvas = np.zeros((size[1], size[0], 4), dtype=np.uint8)
+        palette = np.array(index.colors, dtype=np.uint8).reshape(-1, 4)
+        canvas[pixels[inside, 1], pixels[inside, 0]] = palette[index.color[dots][inside]]
+        image = Image.fromarray(canvas, "RGBA")
+    draw = ImageDraw.Draw(image)
     # 2. Lo demás, en el orden de dibujo.
     rest = chosen[~tiny]
+    lines = set(chosen[as_line].tolist())
     for number, item in enumerate(rest):
         if check is not None and number % 5000 == 0:
             check()
         first, last = index.item_span[item], index.item_span[item + 1]
         rgba = index.colors[index.color[item]]
+        kind = index.kind[item]
+        if kind in TEXT_KINDS:
+            if item in lines:
+                line = index.text_line[index.text_slot[item]].reshape(2, 2)
+                draw.line((line * factor + shift).ravel().tolist(), fill=rgba, width=1)
+                continue
+            if kind == TEXT_FILL:
+                _fill_text(image, index, first, last, factor, shift, rgba)
+                continue
         flats = []
         for span in range(first, last):
             points = index.points[index.span_start[span] : index.span_start[span + 1]]
@@ -521,12 +710,45 @@ def paint_index(
                 draw.point(flat, fill=rgba)
             else:
                 draw.line(flat, fill=rgba, width=1)
-    stats = {"items": int(len(chosen)), "dots": int(len(dots))}
+    texts = int(is_text.sum())
+    text_lines = int(as_line.sum())
+    text_dots = int((is_text & tiny).sum())
+    stats = {
+        "items": int(len(chosen)),
+        "dots": int(len(dots)),
+        "texts": {
+            "drawn": texts - text_lines - text_dots,
+            "as_lines": text_lines,
+            "as_dots": text_dots,
+        },
+    }
     return PreviewImage(image, ((xmin, ymin), (xmax, ymax)), _round(cad_to_px)), stats
 
 
 def _round(values: list[float]) -> list[float]:
     return [round(value, 9) for value in values]
+
+
+def _fill_text(image: Image.Image, index: PreviewIndex, first, last, factor, shift, color) -> None:
+    """Letras de un texto: sus anillos, de mayor a menor, llenos o vacíos (huecos) en una sola
+    máscara del tamaño del texto, que se pega con su color."""
+    rings = []
+    for span in range(first, last):
+        points = index.points[index.span_start[span] : index.span_start[span + 1]]
+        rings.append(((points * factor + shift), bool(index.span_hole[span])))
+    joined = np.concatenate([ring for ring, _hole in rings])
+    left = max(0, math.floor(float(joined[:, 0].min())))
+    top = max(0, math.floor(float(joined[:, 1].min())))
+    right = min(image.size[0], math.ceil(float(joined[:, 0].max())) + 2)
+    bottom = min(image.size[1], math.ceil(float(joined[:, 1].max())) + 2)
+    if right <= left or bottom <= top:
+        return
+    mask = Image.new("1", (right - left, bottom - top), 0)
+    pen = ImageDraw.Draw(mask)
+    offset = np.array([left, top])
+    for ring, hole in rings:
+        pen.polygon((ring - offset).ravel().tolist(), fill=0 if hole else 1)
+    image.paste(color, (left, top, right, bottom), mask)
 
 
 def _fill_even_odd(image: Image.Image, rings: list[list[float]], color) -> None:

@@ -207,12 +207,13 @@ def draw_zone_preview(
         if _visible(_layer_name(entity), request.layers, request.exclude_layers)
     ]
     lod = None
+    texts = None
     if index is not None:
         # Desde la vista previa preparada: lo omitido es el de todo el Model Space.
         omitted = {kind: 0 for kind in ALWAYS_REPORTED} | dict(index.omitted)
         if frame is None:
             picture = PreviewImage(Image.new("RGBA", (1, 1), (0, 0, 0, 0)), None, None)
-            stats = {"items": 0, "dots": 0}
+            stats = {"items": 0, "dots": 0, "texts": {"drawn": 0, "as_lines": 0, "as_dots": 0}}
         else:
             picture, stats = paint_index(
                 index,
@@ -222,6 +223,7 @@ def draw_zone_preview(
                 check,
             )
         lod = {"strokes": stats["items"], "as_dots": stats["dots"]}
+        texts = stats["texts"]
     else:
         player, omitted = draw_entities(
             document,
@@ -265,6 +267,7 @@ def draw_zone_preview(
         "omitted": omitted,
         "prepared": index is not None,
         "lod": lod,
+        "texts": texts,
     }
     return picture.image, data
 
