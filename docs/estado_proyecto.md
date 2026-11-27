@@ -569,6 +569,16 @@ Prueba de Luis Angel en el Componedor con PRGD-25, ya con `7074112` y `8dbef0c`:
   - Preparación de PRGD-25 en el proceso, una medición: 66 s y 3 839 textos (antes 3 278: ahora cuentan los de los MULTILEADER).
 - **Pendiente:** las vistas previas sin preparar (bloque, zona antes de `preview_ready`) siguen con su marca de caché de siempre: las ya guardadas pueden mostrar el recuadro del MULTILEADER hasta que se borre la caché.
 
+## Aviso falso de escala en zonas isométricas (2026-11-27, sin commit)
+Prueba de Luis Angel con PRGD-25: las zonas «iso» (1:50) e «iso2» (1:25) salían con «Escala física no garantizada»: 1:50,1145 y 1:25,0572 en X, exactas en Y. Una zona de planta o sección de la misma hoja (cajas de paso, 1:50) pasaba.
+
+- **Causa:** la caja de un bloque reutilizado (`InstanceRecord.bbox`) se calculaba girando las esquinas de la caja de cada trazo, no los trazos. En un bloque girado, esas esquinas quedan fuera del dibujo: en «iso2», 8,2 mm de más en X. «Escala del dibujo» compara el PDF con esa caja, así que avisaba en falso; los trazos del PDF estaban bien (sin reutilizar bloques, el mismo PDF píxel a píxel y «[OK] 1:25.0000»).
+- **Arreglo** (aprobado por Luis Angel): la caja lleva con la matriz de la marca los puntos reales del bloque, guardados una vez como contorno convexo (`_Instance.hull_points`); una marca anidada aporta los de su bloque colocados.
+- **Bloque sin zona:** antes, la página medía lo mismo y la escala era exacta, pero el dibujo quedaba corrido: en un bloque de prueba con diagonales giradas 30°, pegado al borde izquierdo (0 mm de margen) y con 10 mm a la derecha. Ahora, 5 mm a cada lado, como sin reutilizar.
+- **Comprobado:**
+  - Prueba nueva en `tests/test_instancing.py` (bloque con una diagonal, insertado tres veces girado 30°): con reutilización, «Escala del dibujo» pasa y el PDF, la página y la caja dibujada son los de sin reutilizar. Sin el arreglo falla (1:51,0887 en X).
+  - Hash del SVG de Perfil igual; Perfil, Plano_completo y la zona de las cajas de paso, 0 píxeles distintos, la misma página y la misma caja dibujada; «iso2», 0 píxeles y la misma página, con la caja dibujada ya correcta y «[OK] Escala del dibujo» (`data/verificacion/caja_instancias/`).
+
 ## Otros
 - Hablar con Alan: ¿limpiar historial de Git (SVG/TXT de salidas ya commiteados)? Investigar handles duplicados del DXF.
 - Informes Word de Fase 1 y 2 desactualizados (4 archivos de salida, escala solo por flag): rehacer con guía de uso actual (data/input → escala por pregunta → PDF+TXT).

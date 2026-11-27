@@ -15,6 +15,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pymupdf
 from ezdxf import bbox, xclip
 from ezdxf import colors as ezdxf_colors
@@ -152,6 +153,69 @@ class _Instance:
     # HATCH transparentes que no se dibujaron (--no-print-transparency): se cuentan en cada
     # INSERT que reutiliza la grabación.
     transparent: tuple = ()
+    # Puntos del contorno convexo de todo lo grabado, en coordenadas del bloque (se calculan
+    # la primera vez que se pide la caja de una marca: ``InstanceRecord.bbox``).
+    hull: object = None
+
+    def hull_points(self):
+        if self.hull is None:
+            self.hull = _convex_hull(
+                [points for record in self.records for points in [_record_points(record)]
+                 if points is not None and len(points)]
+            )
+        return self.hull
+
+
+def _record_points(record):
+    """Todos los puntos de un registro (con los de control de las curvas, como la caja que mide
+    ezdxf), en sus coordenadas; ``None`` si no tiene. Una marca anidada da los de su bloque
+    colocados con su matriz."""
+    if isinstance(record, InstanceRecord):
+        return _transformed(record.instance.hull_points(), record.matrix)
+    if isinstance(record, FilledPathsRecord):
+        shapes = [path for path in record.paths if len(path)]
+    else:
+        shape = None
+        for name in ("path", "points", "lines", "boundary"):
+            shape = getattr(record, name, None)
+            if shape is not None:
+                break
+        shapes = [shape] if shape is not None else []
+    arrays = [shape.np_vertices()[:, :2] for shape in shapes]
+    arrays = [array for array in arrays if len(array)]
+    return np.concatenate(arrays) if arrays else None
+
+
+def _transformed(points, matrix: Matrix44):
+    """``points`` (N × 2) llevados con ``matrix`` en planta (convenio de fila de ezdxf)."""
+    if points is None or not len(points):
+        return points
+    m = np.array(list(matrix.rows()), dtype=np.float64)
+    return points @ m[:2, :2] + m[3, :2]
+
+
+def _convex_hull(arrays: list):
+    """Contorno convexo (cadena monótona) de todos los puntos: la caja de cualquier colocación
+    girada de esos puntos es la de su contorno convexo, con muchos menos puntos."""
+    if not arrays:
+        return np.zeros((0, 2))
+    points = np.unique(np.concatenate(arrays), axis=0)  # ordenados por x y luego y
+    if len(points) <= 2:
+        return points
+
+    def half(sequence) -> list:
+        chain: list = []
+        for point in sequence:
+            while len(chain) >= 2:
+                (ax, ay), (bx, by) = chain[-2], chain[-1]
+                if (bx - ax) * (point[1] - ay) - (by - ay) * (point[0] - ax) > 0:
+                    break
+                chain.pop()
+            chain.append((float(point[0]), float(point[1])))
+        return chain
+
+    lower, upper = half(points), half(points[::-1])
+    return np.array(lower[:-1] + upper[:-1], dtype=np.float64)
 
 
 class InstanceRecord(DataRecord):
@@ -168,12 +232,13 @@ class InstanceRecord(DataRecord):
         self.matrix = matrix
 
     def bbox(self) -> BoundingBox2d:
-        box = BoundingBox2d()
-        for record in self.instance.records:
-            corners = record.bbox()
-            if corners.has_data:
-                box.extend(self.matrix.fast_2d_transform(corners.rect_vertices()))
-        return box
+        """La caja de lo dibujado colocado: los puntos reales (su contorno convexo) llevados con
+        la matriz. Girar las esquinas de la caja de cada trazo la agrandaba en un bloque girado
+        (isometrías de PRGD-25: 8 mm de más, y «Escala del dibujo» avisaba de 1:25,0572)."""
+        points = _transformed(self.instance.hull_points(), self.matrix)
+        if points is None or not len(points):
+            return BoundingBox2d()
+        return BoundingBox2d(Vec2(x, y) for x, y in points.tolist())
 
     def transform_inplace(self, m: Matrix44) -> None:
         self.matrix = Matrix44.chain(self.matrix, m)

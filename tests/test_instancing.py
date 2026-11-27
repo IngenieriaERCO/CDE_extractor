@@ -334,3 +334,38 @@ def test_xobject_package_passes_the_checks_and_verify_package(tmp_path: Path, mo
     # «Escala del dibujo» mide los trazos con get_drawings, que entra en los XObject.
     assert checks["Escala del dibujo"]["passed"], checks["Escala del dibujo"]["detail"]
     assert all(item["passed"] for item in checks.values())
+
+
+def _rotated_diagonals(document) -> None:
+    """Como una isometría: un bloque con una diagonal, insertado tres veces girado 30°. La caja
+    de la diagonal tiene esquinas que no son del dibujo; giradas, salían fuera de él."""
+    block = document.blocks.new("DIAGONAL")
+    block.add_line((0, 0), (4, 1))
+    detail = document.blocks.new("ISO")
+    for x in (0.0, 10.0, 20.0):
+        detail.add_blockref("DIAGONAL", (x, 0), dxfattribs={"rotation": 30.0})
+    document.modelspace().add_blockref("ISO", (0, 0))
+
+
+def test_a_rotated_reused_block_measures_its_real_strokes(
+    tmp_path: Path, monkeypatch, reused
+) -> None:
+    """El tamaño dibujado (la caja que graba ezdxf, que compara «Escala del dibujo» y que fija
+    la página) sale de los trazos reales del bloque girado, no de las esquinas giradas de su
+    caja: con reutilización, el mismo PDF, la misma página y la escala exacta."""
+    source = _source(tmp_path / "iso.dxf", _rotated_diagonals)
+    results = {}
+    for instancing in (False, True):
+        monkeypatch.setenv(exporters.INSTANCING_ENV, "1" if instancing else "0")
+        prefix = tmp_path / f"salida_{instancing}" / "iso"
+        arguments = ["cad", "extract-block", str(source), "--block-name", "ISO"]
+        assert main([*arguments, "--scale", "1:50", "--output-prefix", str(prefix)]) == 0
+        manifest = json.loads(prefix.with_name("iso.manifest.json").read_text("utf-8"))
+        checks = {item["name"]: item for item in manifest["validation"]["checks"]}
+        results[instancing] = (manifest, checks, _drawings(prefix.with_suffix(".pdf")))
+    assert reused  # el segundo y el tercero reutilizan el dibujo del primero
+    plain, instanced = results[False], results[True]
+    assert instanced[1]["Escala del dibujo"]["passed"], instanced[1]["Escala del dibujo"]["detail"]
+    assert instanced[0]["pdf"]["page_size_mm"] == plain[0]["pdf"]["page_size_mm"]
+    assert instanced[0]["pdf"]["drawing"]["cad_bounds"] == plain[0]["pdf"]["drawing"]["cad_bounds"]
+    _assert_same(plain[2], instanced[2])
