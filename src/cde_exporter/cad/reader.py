@@ -14,6 +14,7 @@ from ezdxf.math import BoundingBox
 from ezdxf.units import unit_name
 
 from cde_exporter.cad import run_hooks
+from cde_exporter.cad.acad_tables import convert_tables
 from cde_exporter.cad.models import Bounds2D, CadProcessingError, CadWindow, DxfInspection
 
 UNBOUNDED_DIAGNOSTIC_TYPES = frozenset({"3DSOLID", "MTEXT", "POLYLINE", "REGION"})
@@ -205,9 +206,13 @@ def read_dxf(path: str | Path) -> Drawing:
     if not source.is_file():
         raise CadProcessingError(f"La ruta CAD no es un archivo: {source}")
     try:
-        return ezdxf.readfile(source)
+        document = ezdxf.readfile(source)
     except (ezdxf.DXFError, OSError, UnicodeError, ValueError) as error:
         raise CadProcessingError(f"No se pudo leer el DXF '{source}': {error}") from error
+    # Las tablas de AutoCAD (ACAD_TABLE) se dibujan desde su bloque interno «*T»: se cambian por
+    # un INSERT de ese bloque en el documento leído (el archivo no se toca).
+    convert_tables(document)
+    return document
 
 
 def entity_bounds(entity: DXFEntity) -> Bounds2D | None:

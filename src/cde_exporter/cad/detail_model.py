@@ -186,6 +186,9 @@ class ModelSpaceSelection:
     del Model Space elegidas (un INSERT cuenta como una); ``not_copied`` las que ezdxf no pudo
     copiar; ``zero_length`` las líneas y polilíneas de longitud nula que no se dibujan y
     ``without_bounds`` las que, con zona, no se pudieron situar por no tener caja.
+    ``unknown_skipped``: (tipo, cantidad, motivo) de las entidades del Model Space que no se
+    pueden situar ni dibujar (tipos de complementos que ezdxf no sabe leer y tablas ACAD_TABLE
+    que no se pueden dibujar): no se sabe si están en la zona, pero nunca se pierden en silencio.
     """
 
     layers: tuple[str, ...]
@@ -196,6 +199,7 @@ class ModelSpaceSelection:
     not_copied: int = 0
     zero_length: int = 0
     without_bounds: int = 0
+    unknown_skipped: tuple[tuple[str, int, str], ...] = ()
     # Recorte a la zona (por defecto con zona; --no-clip lo quita): entidades recortadas, tramos
     # que quedaron, las que resultaron estar fuera y, por tipo, las que cruzan el borde y entran
     # enteras porque no se pueden recortar.

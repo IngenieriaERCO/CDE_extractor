@@ -18,6 +18,11 @@ from ezdxf import units
 
 from cde_exporter import __version__
 from cde_exporter.cad import run_hooks
+from cde_exporter.cad.acad_tables import (
+    drawn_tables_message,
+    tables_in_block,
+    tables_not_drawn_message,
+)
 from cde_exporter.cad.block_catalog import format_block_catalog, list_referenced_blocks
 from cde_exporter.cad.block_extractor import (
     BlockReference,
@@ -834,6 +839,29 @@ def _run_extract_block(
             # Entidades de complementos que ezdxf no sabe leer: la extracción no las copia y no
             # salen en el PDF; se dice cuáles y cuántas.
             unknown = unknown_entity_counts(document, args.block_name)
+            # Las tablas (ACAD_TABLE) tienen sus propios avisos: dibujadas desde su bloque «*T»
+            # (info) o, si no se puede (sin bloque o girada), omitidas con el motivo.
+            unknown.pop("ACAD_TABLE", None)
+            tables_drawn, tables_problems = tables_in_block(document, args.block_name)
+            table_warnings = []
+            if tables_drawn:
+                table_warnings.append(
+                    ExtractionWarning(
+                        "ACAD_TABLE_FROM_BLOCK", Severity.INFO, drawn_tables_message(tables_drawn)
+                    )
+                )
+            if tables_problems:
+                table_warnings.append(
+                    ExtractionWarning(
+                        "ACAD_TABLE_NOT_DRAWN",
+                        Severity.WARNING,
+                        tables_not_drawn_message(tables_problems),
+                    )
+                )
+            if table_warnings:
+                detail = dataclasses.replace(
+                    detail, warnings=(*detail.warnings, *table_warnings)
+                )
             if unknown:
                 detail = dataclasses.replace(
                     detail,

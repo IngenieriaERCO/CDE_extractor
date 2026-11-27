@@ -136,6 +136,12 @@ WARNING_CODES: dict[str, tuple[NoticeCategory, str | None]] = {
     "SOURCE_UNUSED_BLOCKS_SKIPPED": (NoticeCategory.ENTITIES, None),
     "SOURCE_MODELSPACE_LOOSE_SKIPPED": (NoticeCategory.ENTITIES, None),
     "UNKNOWN_ENTITIES_OMITTED": (NoticeCategory.ENTITIES, UNKNOWN_ENTITIES_ADVICE),
+    "MODELSPACE_UNKNOWN_SKIPPED": (NoticeCategory.ENTITIES, UNKNOWN_ENTITIES_ADVICE),
+    "ACAD_TABLE_FROM_BLOCK": (NoticeCategory.ENTITIES, None),
+    "ACAD_TABLE_NOT_DRAWN": (
+        NoticeCategory.ENTITIES,
+        "En AutoCAD, quite el giro de la tabla o use EXPLODE para convertirla en líneas y textos.",
+    ),
     "MODELSPACE_WITHOUT_BOUNDS": (
         NoticeCategory.ENTITIES,
         "Para incluirlas, exporte sin --window o amplíe la zona en el CAD.",

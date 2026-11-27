@@ -249,6 +249,20 @@ def modelspace_selection_warnings(selection: ModelSpaceSelection | None) -> list
                 f"{'quitada' if removed == 1 else 'quitadas'} de la copia ({layers}).",
             )
         )
+    if selection.unknown_skipped:
+        total = sum(count for _kind, count, _reason in selection.unknown_skipped)
+        kinds = ", ".join(
+            f"{kind} ({count}, {reason})" for kind, count, reason in selection.unknown_skipped
+        )
+        warnings.append(
+            ExtractionWarning(
+                "MODELSPACE_UNKNOWN_SKIPPED",
+                Severity.WARNING,
+                f"El Model Space tiene {_entities_text(total)} que no se "
+                f"{'puede' if total == 1 else 'pueden'} situar ni dibujar: {kinds}. No se sabe "
+                f"si {'está' if total == 1 else 'están'} en la zona; no salen en el PDF.",
+            )
+        )
     if selection.without_bounds:
         one = selection.without_bounds == 1
         warnings.append(

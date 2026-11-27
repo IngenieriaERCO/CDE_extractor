@@ -37,6 +37,7 @@ from ezdxf import xref
 from ezdxf.document import Drawing
 
 from cde_exporter.cad import block_commands
+from cde_exporter.cad.acad_tables import NO_BLOCK, is_table, table_problem
 from cde_exporter.cad.block_extractor import (
     _multileader_mapping_once,
     _restore_default_resources,
@@ -51,7 +52,7 @@ from cde_exporter.cad.detail_model import ModelSpaceSelection
 from cde_exporter.cad.draw_order import copy_block_draw_order, modelspace_ranks, set_draw_order
 from cde_exporter.cad.hidden_layers import layer_state, parse_layer_selection
 from cde_exporter.cad.models import CadProcessingError
-from cde_exporter.cad.reader import entity_bounds
+from cde_exporter.cad.reader import entity_bounds, is_unknown_entity
 from cde_exporter.cad.scale import parse_nominal_scale
 
 # Nombre del bloque de trabajo que agrupa la selección (con _2, _3… si ya existe).
@@ -149,8 +150,10 @@ def select_modelspace(
     xmin = ymin = math.inf
     xmax = ymax = -math.inf
     for entity in document.modelspace() if candidates is None else candidates:
-        if not entity.dxf.is_supported("layer"):
-            continue  # entidades que ezdxf no interpreta (p. ej. GEOMAPIMAGE): no se copian
+        if not entity.dxf.is_supported("layer") or is_table(entity):
+            # Entidades que ezdxf no interpreta (p. ej. GEOMAPIMAGE) y tablas que no se pueden
+            # dibujar: no se copian (``unknown_skipped`` las cuenta para el aviso).
+            continue
         layer = str(entity.dxf.get("layer", "0") or "0")
         if layers and not _matches(layer, layers):
             continue
@@ -480,6 +483,19 @@ def run_extract_modelspace(args) -> int:
     return block_commands.run_extract_block(values, working)
 
 
+def unknown_skipped(document: Drawing) -> tuple[tuple[str, int, str], ...]:
+    """(tipo, cantidad, motivo) de lo que el Model Space tiene y no se puede situar ni dibujar:
+    tipos de complementos que ezdxf no sabe leer y tablas ACAD_TABLE sin su bloque «*T» o
+    giradas (las demás ya son un INSERT de su bloque: ``acad_tables.convert_tables``)."""
+    counts: Counter = Counter()
+    for entity in document.modelspace():
+        if is_table(entity):
+            counts[("ACAD_TABLE", table_problem(entity) or NO_BLOCK)] += 1
+        elif is_unknown_entity(entity):
+            counts[(entity.dxftype(), "tipo que ezdxf no sabe leer")] += 1
+    return tuple((kind, count, reason) for (kind, reason), count in sorted(counts.items()))
+
+
 def prepare_modelspace_export(args, document: Drawing, pruned, candidates=None):
     """Elige, copia, recorta y agrupa en el bloque de trabajo lo pedido en ``args`` (las
     opciones de ``extract-modelspace``) del DXF ya leído, que no se modifica. Devuelve los
@@ -539,6 +555,7 @@ def prepare_modelspace_export(args, document: Drawing, pruned, candidates=None):
             not_copied=not_copied,
             zero_length=selection.zero_length,
             without_bounds=selection.without_bounds,
+            unknown_skipped=unknown_skipped(document),
             clipped=clip is not None,
             clipped_entities=0 if clip is None else clip.clipped,
             clip_pieces=0 if clip is None else clip.pieces,
